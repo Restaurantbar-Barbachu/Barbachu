@@ -1,0 +1,80 @@
+{
+  "products": [
+    {
+      "id": "DEMO-PROD-01",
+      "name": "Tostada Demo",
+      "category": "Pruebas Demo",
+      "priceCents": 6500
+    },
+    {
+      "id": "DEMO-PROD-02",
+      "name": "Agua Fresca Demo",
+      "category": "Pruebas Demo",
+      "priceCents": 2000
+    },
+    {
+      "id": "DEMO-PROD-03",
+      "name": "Botana Demo",
+      "category": "Pruebas Demo",
+      "priceCents": 8500
+    }
+  ],
+  "ingredients": [
+    {
+      "id": "DEMO-ING-01",
+      "name": "Maiz Demo",
+      "unit": "pieza",
+      "initialQuantity": 20
+    },
+    {
+      "id": "DEMO-ING-02",
+      "name": "Queso Demo",
+      "unit": "g",
+      "initialQuantity": 800
+    },
+    {
+      "id": "DEMO-ING-03",
+      "name": "Agua Demo",
+      "unit": "ml",
+      "initialQuantity": 6000
+    },
+    {
+      "id": "DEMO-ING-04",
+      "name": "Limon Demo",
+      "unit": "ml",
+      "initialQuantity": 500
+    }
+  ],
+  "recipes": [
+    {
+      "productId": "DEMO-PROD-01",
+      "ingredientId": "DEMO-ING-01",
+      "quantityPerUnit": 1
+    },
+    {
+      "productId": "DEMO-PROD-01",
+      "ingredientId": "DEMO-ING-02",
+      "quantityPerUnit": 30
+    },
+    {
+      "productId": "DEMO-PROD-02",
+      "ingredientId": "DEMO-ING-03",
+      "quantityPerUnit": 250
+    },
+    {
+      "productId": "DEMO-PROD-02",
+      "ingredientId": "DEMO-ING-04",
+      "quantityPerUnit": 15
+    },
+    {
+      "productId": "DEMO-PROD-03",
+      "ingredientId": "DEMO-ING-01",
+      "quantityPerUnit": 2
+    },
+    {
+      "productId": "DEMO-PROD-03",
+      "ingredientId": "DEMO-ING-02",
+      "quantityPerUnit": 40
+    }
+  ]
+}

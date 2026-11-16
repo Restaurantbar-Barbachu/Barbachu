@@ -1,0 +1,47 @@
+# Verifica el proyecto React + TypeScript + Vite; no realiza despliegues.
+name: POS Vite CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+# Permisos mínimos: este flujo solo necesita leer el repositorio.
+permissions:
+  contents: read
+
+# Evita ejecutar validaciones obsoletas cuando hay nuevos commits.
+concurrency:
+  group: pos-vite-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build con Node.js ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Versiones LTS compatibles con el proyecto.
+        node-version: ["20.x", "22.x", "24.x"]
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      # No existe package-lock.json en este repositorio.
+      - name: Instalar dependencias
+        run: npm install --no-audit --no-fund
+
+      # El script build ejecuta TypeScript (tsc) y después Vite.
+      - name: Verificar tipos y compilar
+        run: npm run build

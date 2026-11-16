@@ -1,0 +1,488 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --bg: #0a0a0b;
+  --card: #161618;
+  --card2: #1f1f22;
+  --cream: #f0e6d3;
+  --dim: rgba(240, 230, 211, 0.72);
+  --gold: #c8a84b;
+  --goldb: #e8d090;
+  --golddim: rgba(200, 168, 75, 0.28);
+  --line: rgba(240, 230, 211, 0.1);
+  --edge: rgba(255, 255, 255, 0.14);
+  --mat: rgba(22, 22, 24, 0.75);
+  --wa: #25d366;
+  --green: #173c34;
+  --green2: #28584c;
+  --danger: #e05252;
+  --warn: #e5a43b;
+  --info: #3b82f6;
+  --serif: Georgia, 'Iowan Old Style', 'Palatino Linotype', 'Playfair Display', serif;
+  --sans: system-ui, -apple-system, 'SF Pro Text', 'DM Sans', 'Segoe UI', Roboto, sans-serif;
+  --top: env(safe-area-inset-top, 0px);
+  --bot: env(safe-area-inset-bottom, 0px);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: calc(110px + var(--top));
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: var(--bg) radial-gradient(circle at 20% 30%, rgba(200, 168, 75, 0.04) 1px, transparent 1px) 0 0 / 28px 28px;
+  color: var(--cream);
+  font: 1rem/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  padding-bottom: calc(18px + var(--bot));
+  overflow-x: hidden;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+/* Scrollbar styles */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--golddim);
+}
+
+/* Frame decoration from og-image */
+.barbachu-frame {
+  position: relative;
+  border: 1px solid var(--golddim);
+  border-radius: 20px;
+}
+.barbachu-frame::before, .barbachu-frame::after {
+  content: '✦';
+  position: absolute;
+  color: var(--gold);
+  font-size: 10px;
+}
+.barbachu-frame::before {
+  top: -7px;
+  left: 12px;
+}
+.barbachu-frame::after {
+  bottom: -7px;
+  right: 12px;
+}
+
+/* POS Shell */
+.pos-app {
+  display: flex;
+  min-height: 100vh;
+  width: 100%;
+  background: var(--bg) radial-gradient(circle at 20% 30%, rgba(200, 168, 75, 0.03) 1px, transparent 1px) 0 0 / 28px 28px;
+}
+
+.pos-sidebar {
+  width: 256px;
+  flex-shrink: 0;
+  background: #111113;
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 16px 12px;
+}
+
+.pos-brand {
+  padding: 8px 8px 18px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pos-brand-logo {
+  width: 38px;
+  height: auto;
+  filter: drop-shadow(0 0 10px rgba(200, 168, 75, 0.35));
+}
+
+.pos-brand h1 {
+  font: 700 1.15rem var(--serif);
+  color: var(--cream);
+  letter-spacing: 0.04em;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.pos-brand p {
+  margin: 2px 0 0;
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--gold);
+  letter-spacing: 0.14em;
+  font-weight: 700;
+}
+
+.pos-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 14px;
+  flex: 1;
+}
+
+.pos-nav-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dim);
+  background: transparent;
+  border: 1px solid transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  width: 100%;
+}
+
+.pos-nav-btn:hover {
+  background: var(--card);
+  color: var(--cream);
+  border-color: var(--line);
+}
+
+.pos-nav-btn.active {
+  background: linear-gradient(160deg, rgba(200, 168, 75, 0.18), var(--card) 75%);
+  color: var(--goldb);
+  border-color: var(--gold);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.pos-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: transparent;
+}
+
+.pos-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  background: var(--mat);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid var(--line);
+  min-height: 64px;
+  position: sticky;
+  top: 0;
+  z-index: 30;
+}
+
+.pos-topbar h2 {
+  font: 700 1.25rem/1.2 var(--serif);
+  margin: 0;
+  color: var(--cream);
+}
+
+.pos-content {
+  flex: 1;
+  padding: 20px 24px 32px;
+  overflow-y: auto;
+}
+
+/* Category Chips */
+.pos-chips {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  scrollbar-width: none;
+}
+.pos-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.pos-chip {
+  flex: none;
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--golddim);
+  background: var(--card);
+  color: var(--dim);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.pos-chip:hover {
+  border-color: var(--gold);
+  color: var(--cream);
+}
+
+.pos-chip.active {
+  background: var(--gold);
+  border-color: var(--gold);
+  color: var(--bg);
+  font-weight: 700;
+}
+
+/* Product Cards */
+.pos-product-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
+  gap: 12px;
+}
+
+.pos-prod-card {
+  background: linear-gradient(160deg, rgba(200, 168, 75, 0.08), var(--card) 65%);
+  border: 1px solid var(--golddim);
+  border-radius: 18px;
+  padding: 14px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 108px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: inset 0 1px 0 var(--edge);
+}
+
+.pos-prod-card:hover:not(:disabled) {
+  border-color: var(--gold);
+  background: linear-gradient(160deg, rgba(200, 168, 75, 0.18), var(--card2) 65%);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.pos-prod-card:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.pos-prod-card:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pos-prod-card .prod-key {
+  font-size: 10px;
+  color: var(--dim);
+  font-weight: 600;
+  margin-bottom: 4px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.pos-prod-card .prod-name {
+  font: 600 0.92rem/1.25 var(--serif);
+  color: var(--cream);
+  margin-bottom: 8px;
+}
+
+.pos-prod-card .prod-price {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--goldb);
+  font-variant-numeric: tabular-nums;
+}
+
+/* KDS Kanban Board */
+.kds-board {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.kds-column {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 16px;
+  min-height: 600px;
+  box-shadow: inset 0 1px 0 var(--edge);
+}
+
+.kds-column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 14px;
+}
+
+.kds-ticket {
+  background: var(--card2);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 14px;
+  margin-bottom: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  transition: all 0.15s ease;
+}
+
+.kds-ticket.priority-alta {
+  border-color: var(--danger);
+  background: linear-gradient(180deg, rgba(224, 82, 82, 0.15) 0%, var(--card2) 100%);
+}
+
+/* Table Map Grid */
+.table-map-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 14px;
+}
+
+.table-tile {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 16px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 130px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: inset 0 1px 0 var(--edge);
+}
+
+.table-tile:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.table-tile.free {
+  border-color: rgba(37, 211, 102, 0.35);
+  background: linear-gradient(180deg, rgba(37, 211, 102, 0.06) 0%, var(--card) 100%);
+}
+
+.table-tile.busy {
+  border-color: var(--gold);
+  background: linear-gradient(180deg, rgba(200, 168, 75, 0.16) 0%, var(--card) 100%);
+}
+
+/* Sheet Modal (from index.html) */
+.sheet {
+  margin: auto auto 0;
+  width: min(100%, 640px);
+  max-width: none;
+  max-height: 88dvh;
+  border: 0;
+  border-radius: 28px 28px 0 0;
+  padding: 0;
+  color: var(--cream);
+  background: var(--mat);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  box-shadow: inset 0 1px 0 var(--edge);
+  overflow: visible;
+}
+.sheet::backdrop {
+  background: rgba(0, 0, 0, 0.65);
+}
+
+/* Receipt Print Styling */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #printable-receipt, #printable-receipt * {
+    visibility: visible;
+  }
+  #printable-receipt {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 80mm;
+    font-family: monospace;
+    font-size: 11px;
+    color: #000;
+    background: #fff;
+    padding: 8px;
+  }
+}
+
+/* Mobile Bottom Navigation Bar */
+.pos-mobile-bar {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .pos-app {
+    flex-direction: column;
+    padding-bottom: 64px;
+  }
+  .pos-sidebar {
+    display: none;
+  }
+  .pos-mobile-bar {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: #111113;
+    border-top: 1px solid var(--line);
+    z-index: 50;
+    padding: 6px 0 calc(6px + var(--bot));
+  }
+  .pos-mobile-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--dim);
+    background: transparent;
+    border: 0;
+    padding: 4px;
+    cursor: pointer;
+  }
+  .pos-mobile-btn.active {
+    color: var(--gold);
+  }
+  .kds-board {
+    grid-template-columns: 1fr;
+  }
+}

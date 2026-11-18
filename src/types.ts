@@ -195,6 +195,16 @@ export interface SoftProduct {
   saleEnabled: boolean;
 }
 
+export interface TimeClockRecord {
+  id: string;
+  userId: string;
+  userName: string;
+  role: string;
+  clockIn: string;
+  clockOut?: string;
+  status: 'activo' | 'finalizado';
+}
+
 export interface FullPosState {
   products: SoftProduct[];
   orders: Order[];
@@ -209,6 +219,7 @@ export interface FullPosState {
   permissions: Record<UserRole, RolePermissions>;
   deviceConfig: DeviceConfig;
   config: RestaurantConfig;
+  staffClock: TimeClockRecord[];
 }
 
 export interface MenuItemData {

@@ -133,6 +133,16 @@ export function createInitialPosState(): FullPosState {
     permissions: DEFAULT_PERMISSIONS,
     deviceConfig: DEFAULT_DEVICE_CONFIG,
     config: DEFAULT_CONFIG,
+    staffClock: [
+      {
+        id: 'clk-1',
+        userId: DEFAULT_USERS[2].id,
+        userName: DEFAULT_USERS[2].name,
+        role: DEFAULT_USERS[2].role,
+        clockIn: new Date(Date.now() - 3600000 * 2).toISOString(),
+        status: 'activo',
+      },
+    ],
   };
 }
 
@@ -148,6 +158,7 @@ export function loadPosState(storage: Storage = window.localStorage): FullPosSta
           users: Array.isArray(parsed.users) && parsed.users.length > 0 ? parsed.users : DEFAULT_USERS,
           permissions: parsed.permissions || DEFAULT_PERMISSIONS,
           deviceConfig: parsed.deviceConfig || DEFAULT_DEVICE_CONFIG,
+          staffClock: Array.isArray(parsed.staffClock) ? parsed.staffClock : [],
           products:
             Array.isArray(parsed.products) && parsed.products.length > 0
               ? parsed.products

@@ -60,7 +60,7 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
 
   const getWhatsAppUrl = (item: MenuItemData) => {
     const msg = `Hola, quiero pedir: ${item.name} (${item.price})`;
-    return `https://wa.me/523314456850?text=${encodeURIComponent(msg)}`;
+    return `/api/pedir?t=${encodeURIComponent(msg)}`;
   };
 
   return (
@@ -300,7 +300,7 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
 
       {/* WhatsApp Floating Action Button */}
       <a
-        href="https://wa.me/523314456850?text=Hola%2C%20quiero%20hacer%20un%20pedido"
+        href="/api/pedir?t=Hola%2C%20quiero%20hacer%20un%20pedido"
         target="_blank"
         rel="noopener noreferrer"
         aria-label="Pedir por WhatsApp"

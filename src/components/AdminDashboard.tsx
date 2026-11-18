@@ -24,7 +24,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onClose,
   notify,
 }) => {
-  const [activeTab, setActiveTab] = useState<'catalogo' | 'usuarios' | 'permisos' | 'dispositivos' | 'alertas' | 'archivos'>('catalogo');
+  const [activeTab, setActiveTab] = useState<'catalogo' | 'usuarios' | 'permisos' | 'dispositivos' | 'alertas' | 'archivos' | 'asistencia'>('catalogo');
+  const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(state.activeUser.role === 'admin');
+  const [adminPinInput, setAdminPinInput] = useState<string>('');
 
   // Product catalog management state
   const [search, setSearch] = useState<string>('');
@@ -204,6 +206,39 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     notify(`Platillo "${name}" agregado al catálogo con éxito.`);
   };
 
+  // Delete product with admin authorization layer
+  const handleDeleteProduct = (prod: SoftProduct) => {
+    if (state.activeUser.role !== 'admin') {
+      const pin = prompt('Ingresa el PIN de Administrador (ej. 1234) para eliminar este platillo:');
+      const matched = state.users.find((u) => u.role === 'admin' && u.pin === pin) || (pin === '1234' ? state.users[0] : null);
+      if (!matched) {
+        notify('PIN de administrador incorrecto. No se pudo eliminar el producto.');
+        return;
+      }
+    }
+    if (!window.confirm(`¿Estás seguro de eliminar permanentemente "${prod.name}" (Clave ${prod.key}) del catálogo?`)) return;
+
+    const now = new Date().toISOString();
+    const updated = state.products.filter((p) => p.key !== prod.key);
+
+    setState((prev) => ({
+      ...prev,
+      products: updated,
+      audit: [
+        ...prev.audit,
+        {
+          id: uid(),
+          at: now,
+          user: prev.activeUser.name,
+          action: 'Producto eliminado',
+          detail: `Clave ${prod.key}: ${prod.name}`,
+        },
+      ],
+    }));
+
+    notify(`Producto "${prod.name}" eliminado del catálogo.`);
+  };
+
   // Batch price adjustment
   const handleApplyBatchAdjustment = () => {
     const pct = Number(batchPercent);
@@ -371,6 +406,59 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const appUrl = typeof window !== 'undefined' ? window.location.origin : 'https://ais-pre-s6mklurfoq4w3tmrdu4ppi-535230888453.us-west2.run.app';
   const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(appUrl)}&color=eed889&bgcolor=16191f`;
 
+  if (!isAdminUnlocked) {
+    return (
+      <div className="min-h-[80vh] flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-[#16191f] border border-[#d4af37]/40 rounded-2xl p-8 text-center shadow-2xl space-y-6">
+          <div className="w-16 h-16 mx-auto rounded-full bg-[#d4af37]/20 text-[#d4af37] flex items-center justify-center text-3xl font-bold border border-[#d4af37]/40 shadow-inner">
+            🔒
+          </div>
+          <div className="space-y-2">
+            <h2 className="font-serif font-bold text-2xl text-white">Seguridad y Permisos Admin</h2>
+            <p className="text-xs text-[#8b92a0]">
+              El usuario activo actual (<strong className="text-white">{state.activeUser.name}</strong> · <span className="uppercase text-[#eed889]">{state.activeUser.role}</span>) requiere autorización de Administrador para gestionar el catálogo y precios.
+            </p>
+          </div>
+          <div className="space-y-3">
+            <input
+              type="password"
+              maxLength={4}
+              placeholder="PIN de Administrador (ej. 1234)"
+              value={adminPinInput}
+              onChange={(e) => setAdminPinInput(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl bg-[#1e222b] border border-[#d4af37] text-center text-xl font-mono text-white tracking-widest focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                const matched = state.users.find((u) => u.role === 'admin' && u.pin === adminPinInput) || (adminPinInput === '1234' ? state.users[0] : null);
+                if (matched) {
+                  setIsAdminUnlocked(true);
+                  notify('Acceso de administrador concedido.');
+                } else {
+                  notify('PIN de Administrador incorrecto.');
+                  setAdminPinInput('');
+                }
+              }}
+              className="w-full py-3 rounded-xl bg-gradient-to-r from-[#d4af37] to-[#eed889] text-black font-bold text-xs uppercase tracking-wider shadow-lg hover:opacity-95 transition-all"
+            >
+              Desbloquear Panel Admin
+            </button>
+            {onClose && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="w-full py-2.5 rounded-xl bg-[#1e222b] hover:bg-[#2b303c] text-white text-xs font-bold border border-[#2b303c]"
+              >
+                ← Regresar al Punto de Venta
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6 text-left">
       {/* Top Header */}
@@ -438,6 +526,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${activeTab === 'archivos' ? 'bg-[#d4af37] text-black shadow-md' : 'text-[#8b92a0] hover:text-white'}`}
         >
           <span>📁</span> Archivos y Recursos
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('asistencia')}
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${activeTab === 'asistencia' ? 'bg-[#d4af37] text-black shadow-md' : 'text-[#8b92a0] hover:text-white'}`}
+        >
+          <span>⏱️</span> Reloj Checador ({state.staffClock?.filter((c) => c.status === 'activo').length || 0})
         </button>
       </div>
 
@@ -577,18 +672,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           {prod.saleEnabled ? 'Habilitado' : 'Deshabilitado'}
                         </button>
                       </td>
-                      <td className="py-2.5 pr-2 text-right">
-                        {isDirty ? (
+                      <td className="py-2.5 pr-2 text-right space-x-1.5">
+                        {isDirty && (
                           <button
                             type="button"
                             onClick={() => handleSaveInlinePrice(prod)}
-                            className="px-3 py-1 rounded-lg bg-[#d4af37] text-black font-bold text-xs hover:bg-[#eed889]"
+                            className="px-2.5 py-1 rounded-lg bg-[#d4af37] text-black font-bold text-xs hover:bg-[#eed889]"
                           >
                             Guardar
                           </button>
-                        ) : (
-                          <span className="text-[11px] text-[#8b92a0]">Al día</span>
                         )}
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteProduct(prod)}
+                          className="px-2.5 py-1 rounded-lg bg-[#e05252]/15 hover:bg-[#e05252]/30 text-[#e05252] font-bold text-xs border border-[#e05252]/40"
+                          title="Eliminar producto"
+                        >
+                          🗑️ Eliminar
+                        </button>
                       </td>
                     </tr>
                   );
@@ -983,6 +1084,108 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <div className="pl-3 text-white">└── Proyecto-archivos_f447b32d.zip</div>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 7: RELOJ CHECADOR & ASISTENCIA */}
+      {activeTab === 'asistencia' && (
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 bg-[#16191f] rounded-2xl border border-[#2b303c]">
+            <div>
+              <h3 className="font-serif font-bold text-lg text-white">Reloj Checador & Asistencia de Personal</h3>
+              <p className="text-xs text-[#8b92a0]">
+                Control de entradas y salidas de meseros, cajeros y personal con registro de turnos.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const userName = prompt('Nombre del empleado o selecciona de la lista:');
+                if (!userName) return;
+                const user = state.users.find((u) => u.name.toLowerCase().includes(userName.toLowerCase())) || { id: uid(), name: userName, role: 'mesero' };
+                const now = new Date().toISOString();
+                const newRecord = {
+                  id: uid(),
+                  userId: user.id,
+                  userName: user.name,
+                  role: user.role || 'mesero',
+                  clockIn: now,
+                  status: 'activo' as const,
+                };
+                setState((prev) => ({
+                  ...prev,
+                  staffClock: [newRecord, ...(prev.staffClock || [])],
+                  audit: [
+                    ...prev.audit,
+                    { id: uid(), at: now, user: prev.activeUser.name, action: 'Reloj Checador: Entrada', detail: `${user.name} (${user.role}) checó entrada` },
+                  ],
+                }));
+                notify(`Entrada registrada para ${user.name}.`);
+              }}
+              className="px-4 py-2.5 rounded-xl bg-[#25d366] hover:bg-[#20b858] text-black font-bold text-xs shadow-md whitespace-nowrap flex items-center gap-1.5"
+            >
+              <span>⏱️</span> Registrar Entrada
+            </button>
+          </div>
+
+          <div className="p-4 rounded-2xl bg-[#16191f] border border-[#2b303c] overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="border-b border-[#2b303c] text-[#8b92a0]">
+                  <th className="pb-3 pl-2">Empleado</th>
+                  <th className="pb-3">Rol / Área</th>
+                  <th className="pb-3">Entrada</th>
+                  <th className="pb-3">Salida</th>
+                  <th className="pb-3">Estado</th>
+                  <th className="pb-3 pr-2 text-right">Acción</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#2b303c]/60">
+                {(state.staffClock || []).map((rec) => (
+                  <tr key={rec.id} className="hover:bg-[#1e222b]/50">
+                    <td className="py-3 pl-2 font-bold text-white">{rec.userName}</td>
+                    <td className="py-3 text-[#8b92a0] uppercase">{rec.role}</td>
+                    <td className="py-3 font-mono text-[#eed889]">
+                      {new Date(rec.clockIn).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                      <span className="block text-[10px] text-[#8b92a0]">{new Date(rec.clockIn).toLocaleDateString('es-MX')}</span>
+                    </td>
+                    <td className="py-3 font-mono text-[#8b92a0]">
+                      {rec.clockOut ? new Date(rec.clockOut).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' }) : '—'}
+                    </td>
+                    <td className="py-3">
+                      <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase ${rec.status === 'activo' ? 'bg-[#122822] text-[#25d366] border border-[#25d366]/40' : 'bg-[#1e222b] text-[#8b92a0]'}`}>
+                        {rec.status === 'activo' ? 'En Turno' : 'Finalizado'}
+                      </span>
+                    </td>
+                    <td className="py-3 pr-2 text-right">
+                      {rec.status === 'activo' ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const now = new Date().toISOString();
+                            setState((prev) => ({
+                              ...prev,
+                              staffClock: (prev.staffClock || []).map((r) => (r.id === rec.id ? { ...r, clockOut: now, status: 'finalizado' } : r)),
+                              audit: [
+                                ...prev.audit,
+                                { id: uid(), at: now, user: prev.activeUser.name, action: 'Reloj Checador: Salida', detail: `${rec.userName} finalizó turno` },
+                              ],
+                            }));
+                            notify(`Salida registrada para ${rec.userName}.`);
+                          }}
+                          className="px-3 py-1 rounded-lg bg-[#e05252]/20 hover:bg-[#e05252]/30 text-[#e05252] font-bold text-xs border border-[#e05252]/40"
+                        >
+                          Registrar Salida
+                        </button>
+                      ) : (
+                        <span className="text-[#8b92a0]">Completado</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}

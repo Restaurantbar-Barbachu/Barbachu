@@ -32,6 +32,21 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 
   render() {
     if (this.state.hasError) {
+      let parsedFsError: {
+        error?: string;
+        operationType?: string;
+        path?: string | null;
+        authInfo?: { email?: string | null };
+      } | null = null;
+      const rawMsg = this.state.error?.message || '';
+      if (rawMsg.startsWith('{') && rawMsg.includes('"operationType"')) {
+        try {
+          parsedFsError = JSON.parse(rawMsg);
+        } catch {
+          parsedFsError = null;
+        }
+      }
+
       return (
         <div className="min-h-screen bg-[#0a0a0b] text-[#f0e6d3] flex items-center justify-center p-6">
           <div className="max-w-md w-full bg-[#16191f] border border-[#d4af37]/40 rounded-2xl p-6 text-center shadow-2xl space-y-4">
@@ -39,12 +54,36 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
               !
             </div>
             <h2 className="font-serif font-bold text-xl text-white">Barbachu POS · Recuperación</h2>
-            <p className="text-xs text-[#8b92a0]">
-              Se detectó una interrupción temporal en la interfaz (por ejemplo, traducción automática del navegador o recarga de nodo).
-            </p>
-            <div className="p-3 bg-[#1e222b] rounded-xl text-left font-mono text-[11px] text-[#eed889] truncate">
-              {this.state.error?.message || 'Error de sincronización'}
-            </div>
+            {parsedFsError ? (
+              <div className="space-y-2 text-left bg-[#1e222b] border border-[#2a2f3a] rounded-xl p-3.5">
+                <div className="flex items-center justify-between text-[11px] uppercase tracking-wider text-[#8b92a0]">
+                  <span>Error de Permisos / Sincronización</span>
+                  <span className="font-mono text-[#d4af37]">{parsedFsError.operationType || 'read/write'}</span>
+                </div>
+                {parsedFsError.path && (
+                  <p className="text-[11px] font-mono text-gray-300 break-all">
+                    Ruta: {parsedFsError.path}
+                  </p>
+                )}
+                {parsedFsError.authInfo?.email && (
+                  <p className="text-[11px] text-[#8b92a0] break-all">
+                    Cuenta: {parsedFsError.authInfo.email}
+                  </p>
+                )}
+                <p className="text-xs text-[#eed889] break-words">
+                  {parsedFsError.error || 'No fue posible completar la operación en Firestore.'}
+                </p>
+              </div>
+            ) : (
+              <>
+                <p className="text-xs text-[#8b92a0]">
+                  Se detectó una interrupción temporal en la interfaz (por ejemplo, traducción automática del navegador o recarga de nodo).
+                </p>
+                <div className="p-3 bg-[#1e222b] rounded-xl text-left font-mono text-[11px] text-[#eed889] break-words max-h-28 overflow-auto">
+                  {rawMsg || 'Error de sincronización'}
+                </div>
+              </>
+            )}
             <button
               type="button"
               onClick={this.handleReset}

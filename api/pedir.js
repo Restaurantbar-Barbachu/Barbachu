@@ -24,13 +24,15 @@ module.exports = (req, res) => {
 
     res.statusCode = 302;
     res.setHeader('Location', 'https://wa.me/' + number + '?text=' + encodeURIComponent(text));
-    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Robots-Tag', 'noindex, nofollow');
     res.setHeader('Referrer-Policy', 'no-referrer');
     return res.end();
   } catch (err) {
     res.statusCode = 500;
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     return res.end('Error al abrir WhatsApp.');
   }
 };

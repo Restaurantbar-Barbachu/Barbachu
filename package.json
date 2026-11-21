@@ -10,8 +10,12 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@firebase/eslint-plugin-security-rules": "^0.0.2",
     "clsx": "^2.1.1",
+    "eslint": "^10.15.0",
+    "firebase": "^13.4.0",
     "lucide-react": "^1.16.0",
+    "qrcode.react": "^4.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "recharts": "^3.10.1",

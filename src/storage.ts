@@ -4,13 +4,7 @@ import { SOFT_INGREDIENTS, SOFT_PRODUCTS } from './data/softRestaurantCatalog';
 export const POS_STORAGE_KEY = 'barbachu.pos.production.v1';
 
 export const DEFAULT_USERS: PosUser[] = [
-  { id: 'usr-admin', name: 'Mauro (Administrador)', role: 'admin', avatar: 'AD', pin: '1234', area: 'Gerencia General' },
-  { id: 'usr-caja', name: 'Caja Mostrador', role: 'caja', avatar: 'CA', pin: '2222', area: 'Caja Principal' },
-  { id: 'usr-mesero1', name: 'Andrea (Mesera)', role: 'mesero', avatar: 'AN', pin: '3333', area: 'Salón Principal' },
-  { id: 'usr-mesero2', name: 'Diego (Mesero)', role: 'mesero', avatar: 'DI', pin: '3334', area: 'Terraza y Barra Exterior' },
-  { id: 'usr-mesero3', name: 'Mariana (Mesera)', role: 'mesero', avatar: 'MA', pin: '3335', area: 'Salón y Domicilio' },
-  { id: 'usr-cocina', name: 'Jefe de Cocina / KDS', role: 'cocina', avatar: 'CO', pin: '4444', area: 'Cocina Caliente' },
-  { id: 'usr-barra', name: 'Bartender / Barra', role: 'cocina', avatar: 'BA', pin: '5555', area: 'Barra de Bebidas' },
+  { id: 'usr-admin', name: 'Administrador Principal', role: 'admin', avatar: 'AD', pin: '0000', area: 'Gerencia General' },
 ];
 
 export const DEFAULT_PERMISSIONS: Record<UserRole, RolePermissions> = {
@@ -70,43 +64,44 @@ export const DEFAULT_CONFIG: RestaurantConfig = {
   name: 'Barbachu',
   tagline: 'Restaurante Bar',
   address: 'Poza Rica #4984, San Pedrito, Tlaquepaque, Jal.',
-  phone: '+52 33 1445 6850',
+  phone: '',
   currency: 'MXN',
-  whatsappNumber: '523314456850',
+  whatsappNumber: '',
+  receiptFooter: '¡Gracias por su preferencia!',
+  suggestedTipPct: 10,
+  autoLockMinutes: 0,
 };
 
 export function createInitialInventory(): Record<number, InventoryItem> {
   const inv: Record<number, InventoryItem> = {};
   for (const item of SOFT_INGREDIENTS) {
-    let initialStock = 20;
-    if (item.Unidad === 'KG' || item.Unidad === 'kg') initialStock = 15;
-    else if (item.Unidad === 'LT' || item.Unidad === 'L') initialStock = 30;
-    else if (item.Unidad === 'PZA' || item.Unidad === 'pza') initialStock = 50;
-
     inv[item.Clave] = {
       clave: item.Clave,
       descripcion: item['Descripción'],
       unidad: item.Unidad || 'PZA',
       categoria: item['Categoría'] || 'GENERAL',
       costo: item.Costo || item['Costo Promedio'] || 0,
-      stock: initialStock,
-      minStock: 5,
+      stock: 0,
+      minStock: 0,
     };
   }
   return inv;
 }
 
-export function createInitialShift(): CashShift {
+export function createInitialShift(initialCashCents = 0): CashShift {
+  const safeInitial = Math.max(0, Math.round(Number(initialCashCents) || 0));
   return {
     id: `TURNO-${Date.now().toString(36)}`,
-    initialCashCents: 100000, // $1,000.00 MXN fondo inicial
+    initialCashCents: safeInitial,
     isOpen: true,
     openedAt: new Date().toISOString(),
     cashSalesCents: 0,
     cardSalesCents: 0,
     transferSalesCents: 0,
     totalSalesCents: 0,
-    expectedCashCents: 100000,
+    expectedCashCents: safeInitial,
+    retirosCents: 0,
+    depositosCents: 0,
   };
 }
 
@@ -115,16 +110,8 @@ export function createInitialPosState(): FullPosState {
     products: SOFT_PRODUCTS.map((p) => ({ ...p })),
     orders: [],
     sales: [],
-    audit: [
-      {
-        id: `aud-${Date.now().toString(36)}`,
-        at: new Date().toISOString(),
-        user: DEFAULT_USERS[0].name,
-        action: 'Sistema inicializado',
-        detail: 'POS Barbachu listo para operaciones en vivo con catálogo SoftRestaurant de 199 productos y 121 insumos.',
-      },
-    ],
-    shift: createInitialShift(),
+    audit: [],
+    shift: createInitialShift(0),
     inventory: createInitialInventory(),
     inventoryMovements: [],
     nextOrderNumber: 1,
@@ -133,16 +120,7 @@ export function createInitialPosState(): FullPosState {
     permissions: DEFAULT_PERMISSIONS,
     deviceConfig: DEFAULT_DEVICE_CONFIG,
     config: DEFAULT_CONFIG,
-    staffClock: [
-      {
-        id: 'clk-1',
-        userId: DEFAULT_USERS[2].id,
-        userName: DEFAULT_USERS[2].name,
-        role: DEFAULT_USERS[2].role,
-        clockIn: new Date(Date.now() - 3600000 * 2).toISOString(),
-        status: 'activo',
-      },
-    ],
+    staffClock: [],
   };
 }
 
@@ -152,12 +130,21 @@ export function loadPosState(storage: Storage = window.localStorage): FullPosSta
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed && Array.isArray(parsed.orders) && Array.isArray(parsed.sales)) {
+        const users: PosUser[] =
+          Array.isArray(parsed.users) && parsed.users.length > 0 ? parsed.users : DEFAULT_USERS;
+        const activeUser =
+          parsed.activeUser && users.some((u) => u.id === parsed.activeUser.id)
+            ? parsed.activeUser
+            : users[0];
+
         return {
           ...createInitialPosState(),
           ...parsed,
-          users: Array.isArray(parsed.users) && parsed.users.length > 0 ? parsed.users : DEFAULT_USERS,
+          users,
+          activeUser,
           permissions: parsed.permissions || DEFAULT_PERMISSIONS,
           deviceConfig: parsed.deviceConfig || DEFAULT_DEVICE_CONFIG,
+          config: { ...DEFAULT_CONFIG, ...(parsed.config || {}) },
           staffClock: Array.isArray(parsed.staffClock) ? parsed.staffClock : [],
           products:
             Array.isArray(parsed.products) && parsed.products.length > 0
@@ -168,20 +155,6 @@ export function loadPosState(storage: Storage = window.localStorage): FullPosSta
             ...(parsed.inventory || {}),
           },
         };
-      }
-    }
-
-    // Try migration from legacy keys if available
-    const legacyV2 = storage.getItem('barbachu.pos.demo.v2');
-    if (legacyV2) {
-      const parsed = JSON.parse(legacyV2);
-      if (parsed && Array.isArray(parsed.orders)) {
-        const state = createInitialPosState();
-        state.orders = parsed.orders || [];
-        state.sales = parsed.sales || [];
-        state.audit = parsed.audit || state.audit;
-        state.nextOrderNumber = parsed.nextNumber || 1;
-        return state;
       }
     }
   } catch (err) {

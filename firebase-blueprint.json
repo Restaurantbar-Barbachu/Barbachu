@@ -1,0 +1,631 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated POS operator profile and Google identity record",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 180
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "caja", "mesero", "cocina"]
+        },
+        "area": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "displayName", "role", "createdAt", "updatedAt"]
+    },
+    "AdminMarker": {
+      "title": "AdminMarker",
+      "description": "Trusted administrator marker document keyed by Firebase Auth UID",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 180
+        },
+        "grantedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "grantedAt"]
+    },
+    "PosConfig": {
+      "title": "PosConfig",
+      "description": "Global restaurant configuration, role permissions matrix, and authorized staff emails",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "tagline": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "address": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "currency": {
+          "type": "string",
+          "maxLength": 10
+        },
+        "whatsappNumber": {
+          "type": "string",
+          "maxLength": 24
+        },
+        "receiptFooter": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "suggestedTipPct": {
+          "type": "integer"
+        },
+        "autoLockMinutes": {
+          "type": "integer"
+        },
+        "nextOrderNumber": {
+          "type": "integer"
+        },
+        "permissions": {
+          "type": "object"
+        },
+        "authorizedEmails": {
+          "type": "array"
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["name", "currency", "nextOrderNumber", "permissions", "authorizedEmails", "ownerUid", "updatedAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Restaurant menu and POS catalog product",
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "group": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "category": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "station": {
+          "type": "string",
+          "enum": ["cocina", "barra"]
+        },
+        "sourcePrice": {
+          "type": "number"
+        },
+        "priceCents": {
+          "type": "integer"
+        },
+        "saleEnabled": {
+          "type": "boolean"
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["key", "name", "group", "category", "sourcePrice", "priceCents", "saleEnabled", "ownerUid", "updatedAt"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Active or closed restaurant order with station items",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "number": {
+          "type": "integer"
+        },
+        "service": {
+          "type": "string",
+          "enum": ["mesa", "barra_exterior", "barra_interior", "para_llevar", "domicilio"]
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "table": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "waiter": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "items": {
+          "type": "array"
+        },
+        "totalCents": {
+          "type": "integer"
+        },
+        "discountCents": {
+          "type": "integer"
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["normal", "alta"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["sent", "preparing", "ready", "served", "closed", "delivered"]
+        },
+        "paid": {
+          "type": "boolean"
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorizedEmails": {
+          "type": "array"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "number", "service", "location", "table", "waiter", "items", "totalCents", "discountCents", "priority", "status", "paid", "ownerUid", "authorizedEmails", "createdAt", "updatedAt"]
+    },
+    "Sale": {
+      "title": "Sale",
+      "description": "Completed payment and receipt record",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "receipt": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "orderId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "service": {
+          "type": "string",
+          "enum": ["mesa", "barra_exterior", "barra_interior", "para_llevar", "domicilio"]
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "table": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "waiter": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "items": {
+          "type": "array"
+        },
+        "subtotalCents": {
+          "type": "integer"
+        },
+        "discountCents": {
+          "type": "integer"
+        },
+        "totalCents": {
+          "type": "integer"
+        },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["efectivo", "tarjeta", "transferencia", "mixto"]
+        },
+        "paidAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorizedEmails": {
+          "type": "array"
+        }
+      },
+      "required": ["id", "receipt", "service", "location", "table", "waiter", "items", "subtotalCents", "discountCents", "totalCents", "paymentMethod", "paidAt", "ownerUid", "authorizedEmails"]
+    },
+    "CashShift": {
+      "title": "CashShift",
+      "description": "Cash drawer shift record",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "initialCashCents": {
+          "type": "integer"
+        },
+        "isOpen": {
+          "type": "boolean"
+        },
+        "openedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "cashSalesCents": {
+          "type": "integer"
+        },
+        "cardSalesCents": {
+          "type": "integer"
+        },
+        "transferSalesCents": {
+          "type": "integer"
+        },
+        "totalSalesCents": {
+          "type": "integer"
+        },
+        "expectedCashCents": {
+          "type": "integer"
+        },
+        "retirosCents": {
+          "type": "integer"
+        },
+        "depositosCents": {
+          "type": "integer"
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorizedEmails": {
+          "type": "array"
+        }
+      },
+      "required": ["id", "initialCashCents", "isOpen", "openedAt", "cashSalesCents", "cardSalesCents", "transferSalesCents", "totalSalesCents", "expectedCashCents", "ownerUid", "authorizedEmails"]
+    },
+    "InventoryItem": {
+      "title": "InventoryItem",
+      "description": "SoftRestaurant raw ingredient stock item",
+      "type": "object",
+      "properties": {
+        "clave": {
+          "type": "integer"
+        },
+        "descripcion": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "unidad": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "categoria": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "costo": {
+          "type": "number"
+        },
+        "stock": {
+          "type": "number"
+        },
+        "minStock": {
+          "type": "number"
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorizedEmails": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["clave", "descripcion", "unidad", "categoria", "costo", "stock", "minStock", "ownerUid", "authorizedEmails", "updatedAt"]
+    },
+    "InventoryMovement": {
+      "title": "InventoryMovement",
+      "description": "Audit log of inventory stock changes",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "clave": {
+          "type": "integer"
+        },
+        "descripcion": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "type": {
+          "type": "string",
+          "enum": ["entrada", "ajuste", "consumo", "merma"]
+        },
+        "qty": {
+          "type": "number"
+        },
+        "costUnit": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "user": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorizedEmails": {
+          "type": "array"
+        }
+      },
+      "required": ["id", "at", "clave", "descripcion", "type", "qty", "costUnit", "reason", "user", "ownerUid", "authorizedEmails"]
+    },
+    "StaffUser": {
+      "title": "StaffUser",
+      "description": "POS operational staff member with role, area, and PIN",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "caja", "mesero", "cocina"]
+        },
+        "avatar": {
+          "type": "string",
+          "maxLength": 4
+        },
+        "pin": {
+          "type": "string",
+          "maxLength": 8
+        },
+        "area": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorizedEmails": {
+          "type": "array"
+        }
+      },
+      "required": ["id", "name", "role", "avatar", "pin", "area", "ownerUid", "authorizedEmails"]
+    },
+    "TimeClockRecord": {
+      "title": "TimeClockRecord",
+      "description": "Employee clock-in and clock-out attendance record",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "userName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "role": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "clockIn": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "clockOut": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["activo", "finalizado"]
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorizedEmails": {
+          "type": "array"
+        }
+      },
+      "required": ["id", "userId", "userName", "role", "clockIn", "status", "ownerUid", "authorizedEmails"]
+    },
+    "AuditLogEntry": {
+      "title": "AuditLogEntry",
+      "description": "Immutable operational audit event",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "user": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "action": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorizedEmails": {
+          "type": "array"
+        }
+      },
+      "required": ["id", "at", "user", "action", "detail", "ownerUid", "authorizedEmails"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private authenticated operator profile (PII isolated)"
+    },
+    "/admins/{adminUid}": {
+      "schema": { "$ref": "#/entities/AdminMarker" },
+      "description": "Administrator registry"
+    },
+    "/pos_config/{configId}": {
+      "schema": { "$ref": "#/entities/PosConfig" },
+      "description": "Restaurant configuration and permissions matrix"
+    },
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Restaurant catalog products"
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Live POS & KDS orders"
+    },
+    "/sales/{saleId}": {
+      "schema": { "$ref": "#/entities/Sale" },
+      "description": "Completed POS sales & receipts"
+    },
+    "/shifts/{shiftId}": {
+      "schema": { "$ref": "#/entities/CashShift" },
+      "description": "Cash register shifts"
+    },
+    "/inventory/{itemId}": {
+      "schema": { "$ref": "#/entities/InventoryItem" },
+      "description": "Ingredient stock inventory"
+    },
+    "/inventory_movements/{movementId}": {
+      "schema": { "$ref": "#/entities/InventoryMovement" },
+      "description": "Inventory movement audit history"
+    },
+    "/staff_users/{staffId}": {
+      "schema": { "$ref": "#/entities/StaffUser" },
+      "description": "Operational staff directory and PINs"
+    },
+    "/staff_clock/{clockId}": {
+      "schema": { "$ref": "#/entities/TimeClockRecord" },
+      "description": "Employee time clock attendance records"
+    },
+    "/audit_logs/{auditId}": {
+      "schema": { "$ref": "#/entities/AuditLogEntry" },
+      "description": "Append-only operational audit logs"
+    }
+  }
+}

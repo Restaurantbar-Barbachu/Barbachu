@@ -44,13 +44,17 @@ export type OrderStatus = 'sent' | 'preparing' | 'ready' | 'served' | 'closed' |
 export type Priority = 'normal' | 'alta';
 export type PaymentMethod = 'efectivo' | 'tarjeta' | 'transferencia' | 'mixto';
 
+export type ItemStatus = 'pending' | 'preparing' | 'ready' | 'served';
+export type StationType = 'cocina' | 'barra';
+
 export interface OrderItem {
   key: string;
   name: string;
   priceCents: number;
   qty: number;
   note: string;
-  station?: 'cocina' | 'barra';
+  station?: StationType;
+  itemStatus?: ItemStatus;
 }
 
 export interface CustomerDelivery {
@@ -118,6 +122,8 @@ export interface CashShift {
   transferSalesCents: number;
   totalSalesCents: number;
   expectedCashCents: number;
+  retirosCents?: number;
+  depositosCents?: number;
   actualCashCents?: number;
   differenceCents?: number;
   closedByUser?: string;
@@ -166,6 +172,7 @@ export interface PosUser {
   avatar: string;
   pin: string;
   area: string;
+  email?: string;
 }
 
 export type DeviceStation = 'todos' | 'comandero' | 'caja' | 'cocina' | 'barra';
@@ -183,6 +190,9 @@ export interface RestaurantConfig {
   phone: string;
   currency: string;
   whatsappNumber: string;
+  receiptFooter?: string;
+  suggestedTipPct?: number;
+  autoLockMinutes?: number;
 }
 
 export interface SoftProduct {
@@ -190,6 +200,7 @@ export interface SoftProduct {
   name: string;
   group: string;
   category: string;
+  station?: StationType;
   sourcePrice: number;
   priceCents: number;
   saleEnabled: boolean;
@@ -220,6 +231,7 @@ export interface FullPosState {
   deviceConfig: DeviceConfig;
   config: RestaurantConfig;
   staffClock: TimeClockRecord[];
+  authorizedEmails?: string[];
 }
 
 export interface MenuItemData {

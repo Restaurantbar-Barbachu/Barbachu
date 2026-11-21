@@ -1,5 +1,7 @@
 import {
+  DeviceStation,
   FullPosState,
+  ItemStatus,
   Order,
   OrderItem,
   OrderStatus,
@@ -7,6 +9,8 @@ import {
   Priority,
   Sale,
   ServiceType,
+  StationType,
+  UserRole,
 } from './types';
 
 export function uid(): string {
@@ -69,6 +73,69 @@ export function totalCents(items: OrderItem[], discountCents: number = 0): numbe
   return Math.max(0, subtotalCents(items) - discountCents);
 }
 
+const BARRA_CATEGORIES = new Set([
+  'CERVEZA',
+  'MICHELADA',
+  'BEBIDAS C/ALCOHOL',
+  'BEBIDAS S/ALCOHOL',
+  'DESTILADOS',
+  'CUBETAS',
+  'COCTELES',
+  'BEBIDAS',
+]);
+
+export function classifyProductStation(category: string): StationType {
+  return BARRA_CATEGORIES.has((category || '').toUpperCase().trim()) ? 'barra' : 'cocina';
+}
+
+const ITEM_NEXT: Record<ItemStatus, ItemStatus[]> = {
+  pending: ['preparing'],
+  preparing: ['ready'],
+  ready: ['served'],
+  served: [],
+};
+
+export function canTransitionItemStatus(from: ItemStatus, to: ItemStatus): boolean {
+  return ITEM_NEXT[from]?.includes(to) ?? false;
+}
+
+export function nextItemStatus(from: ItemStatus): ItemStatus | null {
+  return ITEM_NEXT[from]?.[0] ?? null;
+}
+
+export function canActOnItem(
+  userRole: UserRole,
+  station: StationType,
+  to: ItemStatus,
+  deviceStation: DeviceStation = 'todos'
+): boolean {
+  if (userRole === 'admin') return true;
+  if (to === 'served') {
+    return userRole === 'mesero' || userRole === 'caja';
+  }
+  if (userRole === 'cocina') {
+    if (deviceStation === 'cocina' || deviceStation === 'barra') {
+      return deviceStation === station;
+    }
+    return true;
+  }
+  return userRole === 'caja';
+}
+
+export function computeOrderStatusFromItems(items: OrderItem[], fallback: OrderStatus = 'sent'): OrderStatus {
+  if (fallback === 'closed') return 'closed';
+  if (!items || items.length === 0) return fallback;
+  const statuses = items.map((i) => i.itemStatus || 'pending');
+  if (statuses.every((s) => s === 'served')) return 'served';
+  if (statuses.every((s) => s === 'ready' || s === 'served')) return 'ready';
+  if (statuses.some((s) => s === 'preparing' || s === 'ready' || s === 'served')) return 'preparing';
+  return 'sent';
+}
+
+export function hasUnservedItems(order: Order): boolean {
+  return order.items.some((i) => (i.itemStatus || 'pending') !== 'served');
+}
+
 export function addAudit(
   state: FullPosState,
   action: string,
@@ -122,7 +189,11 @@ export function createOrUpdateOrder(
         table: params.location,
         waiter: params.waiter || existing.waiter,
         note: params.note,
-        items: params.items.map((i) => ({ ...i })),
+        items: params.items.map((i) => ({
+          ...i,
+          station: i.station || 'cocina',
+          itemStatus: i.itemStatus || 'pending',
+        })),
         customer: params.customer || existing.customer,
         totalCents: nextTotal,
         priority: params.priority || existing.priority,
@@ -146,6 +217,11 @@ export function createOrUpdateOrder(
   // Create new order
   const orderNumber = state.nextOrderNumber;
   const newId = uid();
+  const normalizedItems = params.items.map((i) => ({
+    ...i,
+    station: i.station || 'cocina',
+    itemStatus: i.itemStatus || 'pending',
+  }));
   const newOrder: Order = {
     id: newId,
     number: orderNumber,
@@ -155,7 +231,7 @@ export function createOrUpdateOrder(
     waiter: params.waiter || state.activeUser.name,
     note: params.note,
     customer: params.customer,
-    items: params.items.map((i) => ({ ...i })),
+    items: normalizedItems,
     totalCents: sub,
     discountCents: 0,
     priority: params.priority || 'normal',
@@ -251,20 +327,36 @@ export function closeAndPayOrder(
   return nextState;
 }
 
-export function printReceiptText(sale: Sale, config = { name: 'Barbachu', address: 'Poza Rica #4984', phone: '+52 33 1445 6850' }): string {
+export function printReceiptText(
+  sale: Sale,
+  config: {
+    name?: string;
+    address?: string;
+    phone?: string;
+    receiptFooter?: string;
+    suggestedTipPct?: number;
+  } = { name: 'Barbachu', address: 'Poza Rica #4984' }
+): string {
   const line = '------------------------------------------';
+  const restName = (config.name || 'Barbachu').toUpperCase();
   const lines: string[] = [
-    `       ${config.name.toUpperCase()} RESTAURANTE BAR       `,
-    `      ${config.address}      `,
-    `            Tel: ${config.phone}            `,
+    `       ${restName} RESTAURANTE BAR       `,
+  ];
+  if (config.address && config.address.trim()) {
+    lines.push(`      ${config.address.trim()}      `);
+  }
+  if (config.phone && config.phone.trim()) {
+    lines.push(`            Tel: ${config.phone.trim()}            `);
+  }
+  lines.push(
     line,
     `Folio: ${sale.receipt}    Fecha: ${new Date(sale.paidAt).toLocaleDateString('es-MX')} ${new Date(sale.paidAt).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`,
     `Ubicación: ${locationLabel(sale.service, sale.location)}`,
     `Mesero: ${sale.waiter}`,
     line,
     'Cant  Descripción                      Importe',
-    line,
-  ];
+    line
+  );
 
   for (const item of sale.items) {
     const totalItem = (lineTotalCents(item) / 100).toFixed(2);
@@ -283,9 +375,71 @@ export function printReceiptText(sale: Sale, config = { name: 'Barbachu', addres
   }
   lines.push(`TOTAL:                           $${(sale.totalCents / 100).toFixed(2).padStart(8, ' ')}`);
   lines.push(`Método de Pago:                  ${sale.paymentMethod.toUpperCase()}`);
+  if (typeof sale.changeGiven === 'number' && sale.changeGiven > 0) {
+    lines.push(`Cambio entregado:                $${(sale.changeGiven / 100).toFixed(2).padStart(8, ' ')}`);
+  }
   lines.push(line);
-  lines.push('       ¡GRACIAS POR SU PREFERENCIA!       ');
+  lines.push(`  ${(config.receiptFooter || '¡GRACIAS POR SU PREFERENCIA!').trim()}  `);
   lines.push('     Conserve este ticket para dudas     ');
 
   return lines.join('\n');
 }
+
+export function printPreCheckText(
+  order: Order,
+  config: {
+    name?: string;
+    address?: string;
+    phone?: string;
+    suggestedTipPct?: number;
+  } = { name: 'Barbachu', address: 'Poza Rica #4984' }
+): string {
+  const line = '------------------------------------------';
+  const restName = (config.name || 'Barbachu').toUpperCase();
+  const sub = subtotalCents(order.items);
+  const total = Math.max(0, sub - (order.discountCents || 0));
+  const tipPct = typeof config.suggestedTipPct === 'number' ? config.suggestedTipPct : 10;
+  const tipCents = Math.round((total * tipPct) / 100);
+
+  const lines: string[] = [
+    `       ${restName} · PRE-CUENTA        `,
+  ];
+  if (config.address && config.address.trim()) {
+    lines.push(`      ${config.address.trim()}      `);
+  }
+  if (config.phone && config.phone.trim()) {
+    lines.push(`            Tel: ${config.phone.trim()}            `);
+  }
+  lines.push(
+    line,
+    `Cuenta #${order.number}   ${new Date().toLocaleDateString('es-MX')} ${new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`,
+    `Ubicación: ${locationLabel(order.service, order.location)}`,
+    `Atendido por: ${order.waiter}`,
+    line,
+    'Cant  Descripción                      Importe',
+    line
+  );
+
+  for (const item of order.items) {
+    const totalItem = (lineTotalCents(item) / 100).toFixed(2);
+    const itemDesc = item.name.slice(0, 24).padEnd(24, ' ');
+    const itemQty = String(item.qty).padEnd(5, ' ');
+    lines.push(`${itemQty} ${itemDesc} $${totalItem.padStart(8, ' ')}`);
+  }
+
+  lines.push(line);
+  lines.push(`Subtotal:                        $${(sub / 100).toFixed(2).padStart(8, ' ')}`);
+  if (order.discountCents > 0) {
+    lines.push(`Descuento:                     - $${(order.discountCents / 100).toFixed(2).padStart(8, ' ')}`);
+  }
+  lines.push(`TOTAL CONSUMO:                   $${(total / 100).toFixed(2).padStart(8, ' ')}`);
+  if (tipPct > 0) {
+    lines.push(`Propina sugerida (${tipPct}%):          $${(tipCents / 100).toFixed(2).padStart(8, ' ')}`);
+    lines.push(`Total c/ propina:                $${((total + tipCents) / 100).toFixed(2).padStart(8, ' ')}`);
+  }
+  lines.push(line);
+  lines.push('  ESTE DOCUMENTO NO ES COMPROBANTE DE PAGO  ');
+
+  return lines.join('\n');
+}
+

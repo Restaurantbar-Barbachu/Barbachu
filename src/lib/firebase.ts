@@ -6,7 +6,13 @@ import {
   signOut,
   type User,
 } from 'firebase/auth';
-import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
+import {
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  doc,
+  getDocFromServer,
+} from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 export const BOOTSTRAPPED_ADMIN_EMAIL = 'maurocazqiez013@gmail.com';
@@ -14,8 +20,17 @@ export const FIREBASE_CONFIG = firebaseConfig;
 
 const app = initializeApp(firebaseConfig);
 
-// CRITICAL: Must pass firestoreDatabaseId so queries target the provisioned named database
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+// CRITICAL: Configure Firestore with offline persistence (persistent local cache) and named database ID
+export const db = initializeFirestore(
+  app,
+  {
+    localCache: persistentLocalCache({
+      tabManager: persistentMultipleTabManager(),
+    }),
+  },
+  firebaseConfig.firestoreDatabaseId
+);
+
 export const auth = getAuth(app);
 
 export const googleProvider = new GoogleAuthProvider();
@@ -79,7 +94,7 @@ export async function testConnection(): Promise<boolean> {
     return true;
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
+      console.warn('Client is offline; running in offline cache mode.');
       return false;
     }
     return true;

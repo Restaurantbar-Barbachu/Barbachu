@@ -101,21 +101,21 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 }
 
 export const App: React.FC = () => {
-  // Check URL query param or hash for initial view
+  // Check URL query param or hash for initial view (default is menu)
   const [activeView, setActiveView] = useState<'pos' | 'menu'>(() => {
     if (typeof window !== 'undefined') {
       const search = new URLSearchParams(window.location.search);
-      if (search.get('view') === 'menu') return 'menu';
-      if (window.location.pathname.startsWith('/menu')) return 'menu';
+      if (search.get('view') === 'pos') return 'pos';
+      if (window.location.pathname.startsWith('/pos')) return 'pos';
     }
-    return 'pos';
+    return 'menu';
   });
 
   // Keep URL updated smoothly
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (activeView === 'menu') {
-      params.set('view', 'menu');
+    if (activeView === 'pos') {
+      params.set('view', 'pos');
     } else {
       params.delete('view');
     }

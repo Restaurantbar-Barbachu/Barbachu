@@ -13,6 +13,10 @@ import {
   UserRole,
 } from './types';
 
+const RECEIPT_LINE_SEPARATOR = '------------------------------------------';
+const DEFAULT_RESTAURANT_NAME = 'Barbachu';
+const DEFAULT_RESTAURANT_ADDRESS = 'Poza Rica #4984';
+
 export function uid(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -122,13 +126,27 @@ export function canActOnItem(
   return userRole === 'caja';
 }
 
+/**
+ * Computes order status in a single pass over items, avoiding multiple array allocations.
+ */
 export function computeOrderStatusFromItems(items: OrderItem[], fallback: OrderStatus = 'sent'): OrderStatus {
   if (fallback === 'closed') return 'closed';
   if (!items || items.length === 0) return fallback;
-  const statuses = items.map((i) => i.itemStatus || 'pending');
-  if (statuses.every((s) => s === 'served')) return 'served';
-  if (statuses.every((s) => s === 'ready' || s === 'served')) return 'ready';
-  if (statuses.some((s) => s === 'preparing' || s === 'ready' || s === 'served')) return 'preparing';
+
+  let allServed = true;
+  let allReadyOrServed = true;
+  let anyActive = false;
+
+  for (const item of items) {
+    const status = item.itemStatus || 'pending';
+    if (status !== 'served') allServed = false;
+    if (status !== 'ready' && status !== 'served') allReadyOrServed = false;
+    if (status === 'preparing' || status === 'ready' || status === 'served') anyActive = true;
+  }
+
+  if (allServed) return 'served';
+  if (allReadyOrServed) return 'ready';
+  if (anyActive) return 'preparing';
   return 'sent';
 }
 
@@ -327,36 +345,52 @@ export function closeAndPayOrder(
   return nextState;
 }
 
-export function printReceiptText(
-  sale: Sale,
-  config: {
-    name?: string;
-    address?: string;
-    phone?: string;
-    receiptFooter?: string;
-    suggestedTipPct?: number;
-  } = { name: 'Barbachu', address: 'Poza Rica #4984' }
-): string {
-  const line = '------------------------------------------';
-  const restName = (config.name || 'Barbachu').toUpperCase();
-  const lines: string[] = [
-    `       ${restName} RESTAURANTE BAR       `,
-  ];
-  if (config.address && config.address.trim()) {
+interface ReceiptConfig {
+  name?: string;
+  address?: string;
+  phone?: string;
+  receiptFooter?: string;
+  suggestedTipPct?: number;
+}
+
+function buildReceiptHeader(
+  title: string,
+  metaLines: string[],
+  config: ReceiptConfig = {}
+): string[] {
+  const restName = (config.name || DEFAULT_RESTAURANT_NAME).toUpperCase();
+  const lines: string[] = [`       ${restName} · ${title}        `];
+  if (config.address?.trim()) {
     lines.push(`      ${config.address.trim()}      `);
   }
-  if (config.phone && config.phone.trim()) {
+  if (config.phone?.trim()) {
     lines.push(`            Tel: ${config.phone.trim()}            `);
   }
   lines.push(
-    line,
-    `Folio: ${sale.receipt}    Fecha: ${new Date(sale.paidAt).toLocaleDateString('es-MX')} ${new Date(sale.paidAt).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`,
+    RECEIPT_LINE_SEPARATOR,
+    ...metaLines,
+    RECEIPT_LINE_SEPARATOR,
+    'Cant  Descripción                      Importe',
+    RECEIPT_LINE_SEPARATOR
+  );
+  return lines;
+}
+
+export function printReceiptText(
+  sale: Sale,
+  config: ReceiptConfig = { name: DEFAULT_RESTAURANT_NAME, address: DEFAULT_RESTAURANT_ADDRESS }
+): string {
+  const paidDate = new Date(sale.paidAt);
+  const dateStr = paidDate.toLocaleDateString('es-MX');
+  const timeStr = paidDate.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+
+  const metaLines = [
+    `Folio: ${sale.receipt}    Fecha: ${dateStr} ${timeStr}`,
     `Ubicación: ${locationLabel(sale.service, sale.location)}`,
     `Mesero: ${sale.waiter}`,
-    line,
-    'Cant  Descripción                      Importe',
-    line
-  );
+  ];
+
+  const lines = buildReceiptHeader('RESTAURANTE BAR', metaLines, config);
 
   for (const item of sale.items) {
     const totalItem = (lineTotalCents(item) / 100).toFixed(2);
@@ -368,57 +402,46 @@ export function printReceiptText(
     }
   }
 
-  lines.push(line);
-  lines.push(`Subtotal:                        $${(sale.subtotalCents / 100).toFixed(2).padStart(8, ' ')}`);
+  lines.push(
+    RECEIPT_LINE_SEPARATOR,
+    `Subtotal:                        $${(sale.subtotalCents / 100).toFixed(2).padStart(8, ' ')}`
+  );
   if (sale.discountCents > 0) {
     lines.push(`Descuento:                     - $${(sale.discountCents / 100).toFixed(2).padStart(8, ' ')}`);
   }
-  lines.push(`TOTAL:                           $${(sale.totalCents / 100).toFixed(2).padStart(8, ' ')}`);
-  lines.push(`Método de Pago:                  ${sale.paymentMethod.toUpperCase()}`);
+  lines.push(
+    `TOTAL:                           $${(sale.totalCents / 100).toFixed(2).padStart(8, ' ')}`,
+    `Método de Pago:                  ${sale.paymentMethod.toUpperCase()}`
+  );
   if (typeof sale.changeGiven === 'number' && sale.changeGiven > 0) {
     lines.push(`Cambio entregado:                $${(sale.changeGiven / 100).toFixed(2).padStart(8, ' ')}`);
   }
-  lines.push(line);
-  lines.push(`  ${(config.receiptFooter || '¡GRACIAS POR SU PREFERENCIA!').trim()}  `);
-  lines.push('     Conserve este ticket para dudas     ');
+  lines.push(
+    RECEIPT_LINE_SEPARATOR,
+    `  ${(config.receiptFooter || '¡GRACIAS POR SU PREFERENCIA!').trim()}  `,
+    '     Conserve este ticket para dudas     '
+  );
 
   return lines.join('\n');
 }
 
 export function printPreCheckText(
   order: Order,
-  config: {
-    name?: string;
-    address?: string;
-    phone?: string;
-    suggestedTipPct?: number;
-  } = { name: 'Barbachu', address: 'Poza Rica #4984' }
+  config: ReceiptConfig = { name: DEFAULT_RESTAURANT_NAME, address: DEFAULT_RESTAURANT_ADDRESS }
 ): string {
-  const line = '------------------------------------------';
-  const restName = (config.name || 'Barbachu').toUpperCase();
+  const now = new Date();
   const sub = subtotalCents(order.items);
   const total = Math.max(0, sub - (order.discountCents || 0));
   const tipPct = typeof config.suggestedTipPct === 'number' ? config.suggestedTipPct : 10;
   const tipCents = Math.round((total * tipPct) / 100);
 
-  const lines: string[] = [
-    `       ${restName} · PRE-CUENTA        `,
-  ];
-  if (config.address && config.address.trim()) {
-    lines.push(`      ${config.address.trim()}      `);
-  }
-  if (config.phone && config.phone.trim()) {
-    lines.push(`            Tel: ${config.phone.trim()}            `);
-  }
-  lines.push(
-    line,
-    `Cuenta #${order.number}   ${new Date().toLocaleDateString('es-MX')} ${new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`,
+  const metaLines = [
+    `Cuenta #${order.number}   ${now.toLocaleDateString('es-MX')} ${now.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`,
     `Ubicación: ${locationLabel(order.service, order.location)}`,
     `Atendido por: ${order.waiter}`,
-    line,
-    'Cant  Descripción                      Importe',
-    line
-  );
+  ];
+
+  const lines = buildReceiptHeader('PRE-CUENTA', metaLines, config);
 
   for (const item of order.items) {
     const totalItem = (lineTotalCents(item) / 100).toFixed(2);
@@ -427,19 +450,24 @@ export function printPreCheckText(
     lines.push(`${itemQty} ${itemDesc} $${totalItem.padStart(8, ' ')}`);
   }
 
-  lines.push(line);
-  lines.push(`Subtotal:                        $${(sub / 100).toFixed(2).padStart(8, ' ')}`);
+  lines.push(
+    RECEIPT_LINE_SEPARATOR,
+    `Subtotal:                        $${(sub / 100).toFixed(2).padStart(8, ' ')}`
+  );
   if (order.discountCents > 0) {
     lines.push(`Descuento:                     - $${(order.discountCents / 100).toFixed(2).padStart(8, ' ')}`);
   }
   lines.push(`TOTAL CONSUMO:                   $${(total / 100).toFixed(2).padStart(8, ' ')}`);
   if (tipPct > 0) {
-    lines.push(`Propina sugerida (${tipPct}%):          $${(tipCents / 100).toFixed(2).padStart(8, ' ')}`);
-    lines.push(`Total c/ propina:                $${((total + tipCents) / 100).toFixed(2).padStart(8, ' ')}`);
+    lines.push(
+      `Propina sugerida (${tipPct}%):          $${(tipCents / 100).toFixed(2).padStart(8, ' ')}`,
+      `Total c/ propina:                $${((total + tipCents) / 100).toFixed(2).padStart(8, ' ')}`
+    );
   }
-  lines.push(line);
-  lines.push('  ESTE DOCUMENTO NO ES COMPROBANTE DE PAGO  ');
+  lines.push(
+    RECEIPT_LINE_SEPARATOR,
+    '  ESTE DOCUMENTO NO ES COMPROBANTE DE PAGO  '
+  );
 
   return lines.join('\n');
 }
-

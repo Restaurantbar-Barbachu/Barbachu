@@ -18,6 +18,7 @@ import {
   LayoutDashboard,
   Lock,
   LogOut,
+  Menu,
   Merge,
   Minus,
   Package,
@@ -26,11 +27,13 @@ import {
   Receipt,
   Scissors,
   Search,
+  Server,
   Settings,
   Sparkles,
   Tag,
   UserCheck,
   UtensilsCrossed,
+  Wifi,
   X,
 } from 'lucide-react';
 import {
@@ -46,6 +49,7 @@ import {
   InventoryItem,
   AuditLogEntry,
   ItemStatus,
+  DeviceStation,
 } from '../types';
 import { AdminDashboard } from './AdminDashboard';
 import { BarbachuLogo } from './BarbachuLogo';
@@ -58,6 +62,7 @@ import {
 } from './EmployeePinAuthPanel';
 import { IosPinPadModal } from './IosPinPadModal';
 import { PosAnalyticsDashboard } from './PosAnalyticsDashboard';
+import { InventoryManagementView } from './InventoryManagementView';
 import {
   auth,
   BOOTSTRAPPED_ADMIN_EMAIL,
@@ -161,8 +166,6 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [selectedCategory, setSelectedCategory] = useState<string>('TODOS');
   const [posStationFilter, setPosStationFilter] = useState<'todas' | 'cocina' | 'barra'>('todas');
   const [kitchenStation, setKitchenStation] = useState<'todas' | 'cocina' | 'barra'>('todas');
-  const [ingredientSearch, setIngredientSearch] = useState<string>('');
-  const [onlyLowStock, setOnlyLowStock] = useState<boolean>(false);
 
   // Mapa de Mesas iOS Filters & Quick-Action Sheet
   const [tableZoneFilter, setTableZoneFilter] = useState<'todas' | ServiceType>('todas');
@@ -217,6 +220,10 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [employeeAuthenticated, setEmployeeAuthenticated] = useState<boolean>(false);
   const [pinPadMode, setPinPadMode] = useState<'switch' | 'admin' | 'unlock' | null>(null);
   const [isSessionLocked, setIsSessionLocked] = useState<boolean>(false);
+
+  // New Feature & Navigation States
+  const [isDeviceModalOpen, setIsDeviceModalOpen] = useState<boolean>(false);
+  const [isNavDrawerOpen, setIsNavDrawerOpen] = useState<boolean>(false);
 
   // Keep waiter synced when active user switches (unless editing an open loaded order)
   useEffect(() => {
@@ -284,6 +291,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         if (!active) return;
         setIsFirebaseAdmin(res.isAdmin);
         setWorkspaceAuthorized(res.authorized);
+        if (res.authorized) {
+          setEmployeeAuthenticated(true);
+        }
         setWorkspaceOwnerUid(res.workspaceOwnerUid || firebaseUser.uid);
 
         if (!res.authorized) {
@@ -1459,6 +1469,16 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     notify(`Inventario actualizado: ${inventoryModal.descripcion} ahora tiene ${updatedItem.stock} ${updatedItem.unidad}.`);
   };
 
+  // Advanced POS Features Handlers (Split Bill, Transfer, Merge, Device Station)
+  const handleUpdateDeviceStation = (station: DeviceStation, stationName: string, autoLock: number) => {
+    setState((prev) => ({
+      ...prev,
+      deviceConfig: { station, stationName, autoLockMinutes: autoLock },
+    }));
+    setIsDeviceModalOpen(false);
+    notify(`Estación configurada: ${stationName} (${station.toUpperCase()})`);
+  };
+
   // Permissions & PIN protected navigation: strictly requires role === 'admin'
   const handleNavigateToAdmin = () => {
     if (state.activeUser.role === 'admin') {
@@ -1812,6 +1832,14 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         {/* Top Operational Bar */}
         <header className="pos-topbar">
           <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setIsNavDrawerOpen(true)}
+              className="lg:hidden p-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-white transition-colors"
+              aria-label="Abrir menú de navegación"
+            >
+              <Menu className="w-5 h-5 text-[#c8a84b]" />
+            </button>
             <h2>
               <span key={view}>
                 {view === 'dashboard'
@@ -1831,10 +1859,15 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                   : 'Administración · Catálogo y Personal'}
               </span>
             </h2>
-            <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-[#122822] text-[#25d366] border border-[#25d366]/30">
+            <button
+              type="button"
+              onClick={() => setIsDeviceModalOpen(true)}
+              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-[#122822] hover:bg-[#122822]/80 text-[#25d366] border border-[#25d366]/30 transition-colors cursor-pointer"
+              title="Gestionar Conexión de Dispositivos y Estaciones"
+            >
               <Cloud className="w-3.5 h-3.5" />
-              CLOUD SYNC
-            </span>
+              <span>SYNC CLOUD</span>
+            </button>
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
@@ -1946,7 +1979,6 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                   <button
                     type="button"
                     onClick={() => {
-                      setOnlyLowStock(true);
                       setView('inventory');
                     }}
                     className="min-h-[44px] px-4 py-2 rounded-xl bg-[#e05252] hover:bg-[#c93b3b] text-white text-xs font-bold transition-all shadow-md whitespace-nowrap"
@@ -3651,138 +3683,14 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
           {/* VIEW 6: INVENTORY & STOCK */}
           {view === 'inventory' && (
-            <div className="space-y-4">
-              {/* Critical Alert banner if low stock exists */}
-              {lowStockItems.length > 0 && (
-                <div className="p-4 rounded-2xl bg-[#e05252]/15 border border-[#e05252]/40 flex items-center justify-between gap-3 text-xs">
-                  <div className="flex items-center gap-2.5">
-                    <span className="text-xl">⚠️</span>
-                    <div>
-                      <strong className="text-white font-bold">{lowStockItems.length} insumos con existencia igual o menor al mínimo:</strong>
-                      <div className="text-[#eed889] mt-0.5">
-                        {lowStockItems.map((i) => `${i.descripcion} (${i.stock} / mín ${i.minStock})`).join(', ')}
-                      </div>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setOnlyLowStock(!onlyLowStock)}
-                    className="px-3 py-1.5 rounded-lg bg-[#e05252] text-white font-bold hover:bg-[#c93b3b] whitespace-nowrap"
-                  >
-                    {onlyLowStock ? 'Ver todos los insumos' : 'Filtrar solo críticos'}
-                  </button>
-                </div>
-              )}
-
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 ios-glass-card">
-                <div>
-                  <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">Catálogo de Insumos e Inventario</h3>
-                  <p className="text-xs text-[rgba(240,230,211,0.62)]">
-                    121 insumos importados de SoftRestaurant con costos, unidades, compras y umbrales de alerta.
-                  </p>
-                </div>
-                <div className="flex items-center gap-2 w-full sm:w-auto">
-                  <input
-                    type="text"
-                    value={ingredientSearch}
-                    onChange={(e) => setIngredientSearch(e.target.value)}
-                    placeholder="Filtrar por insumo o clave..."
-                    className="min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/70 border border-white/10 text-xs text-white placeholder-[rgba(240,230,211,0.45)] focus:outline-none focus:border-[#c8a84b] w-full sm:w-64"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setOnlyLowStock(!onlyLowStock)}
-                    className={`min-h-[44px] px-3.5 py-2 rounded-2xl text-xs font-bold whitespace-nowrap border transition-colors ${onlyLowStock ? 'bg-[#e05252] text-white border-[#e05252]' : 'bg-white/[0.05] text-[rgba(240,230,211,0.72)] border-white/10 hover:text-white'}`}
-                  >
-                    Alertas ({lowStockItems.length})
-                  </button>
-                </div>
-              </div>
-
-              {/* Insumos table */}
-              <div className="p-4 ios-glass-card overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead>
-                    <tr className="border-b border-[#2b303c] text-[#8b92a0]">
-                      <th className="pb-3 pl-2">Clave</th>
-                      <th className="pb-3">Descripción</th>
-                      <th className="pb-3">Categoría</th>
-                      <th className="pb-3">Unidad</th>
-                      <th className="pb-3">Costo Origen</th>
-                      <th className="pb-3">Existencia Actual</th>
-                      <th className="pb-3">Umbral Mínimo (Alerta)</th>
-                      <th className="pb-3 pr-2 text-right">Acciones</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#2b303c]/60">
-                    {Object.values(state.inventory)
-                      .filter((item) => {
-                        const matchLow = !onlyLowStock || (item.minStock > 0 && item.stock <= item.minStock);
-                        const q = ingredientSearch.toLowerCase().trim();
-                        const matchQ = !q || item.descripcion.toLowerCase().includes(q) || String(item.clave).includes(q) || item.categoria.toLowerCase().includes(q);
-                        return matchLow && matchQ;
-                      })
-                      .map((item) => {
-                        const isLow = item.minStock > 0 && item.stock <= item.minStock;
-                        return (
-                          <tr key={item.clave} className={`hover:bg-[#1e222b]/50 ${isLow ? 'bg-[#e05252]/5' : ''}`}>
-                            <td className="py-3 pl-2 font-mono text-[#8b92a0]">{item.clave}</td>
-                            <td className="py-3 font-bold text-white flex items-center gap-2">
-                              {isLow && <span className="text-[#e05252]" title="Stock en nivel crítico">⚠️</span>}
-                              <span>{item.descripcion}</span>
-                            </td>
-                            <td className="py-3 text-[#8b92a0]">{item.categoria}</td>
-                            <td className="py-3 font-semibold text-white">{item.unidad}</td>
-                            <td className="py-3 font-mono text-[#eed889]">${item.costo.toFixed(2)}</td>
-                            <td className="py-3 font-mono font-bold">
-                              <span className={isLow ? 'text-[#e05252] bg-[#e05252]/15 px-2 py-0.5 rounded' : 'text-[#25d366]'}>
-                                {item.stock} {item.unidad}
-                              </span>
-                            </td>
-                            <td className="py-3 font-mono text-[#8b92a0]">
-                              {item.minStock} {item.unidad}
-                            </td>
-                            <td className="py-3 pr-2 text-right space-x-1.5 whitespace-nowrap">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setInventoryModal({ clave: item.clave, descripcion: item.descripcion, type: 'minStock' });
-                                  setInvQty(String(item.minStock));
-                                }}
-                                className="px-2 py-1 rounded-lg bg-[#1e222b] text-[#eed889] border border-[#2b303c] font-semibold hover:border-[#d4af37]"
-                                title="Cambiar límite mínimo de alerta"
-                              >
-                                🔔 Mínimo
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setInventoryModal({ clave: item.clave, descripcion: item.descripcion, type: 'entrada' });
-                                  setInvCost(String(item.costo));
-                                }}
-                                className="px-2 py-1 rounded-lg bg-[#122822] text-[#25d366] border border-[#25d366]/30 font-semibold hover:bg-[#25d366] hover:text-black"
-                              >
-                                + Compra
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setInventoryModal({ clave: item.clave, descripcion: item.descripcion, type: 'ajuste' });
-                                  setInvQty(String(item.stock));
-                                  setInvCost(String(item.costo));
-                                }}
-                                className="px-2 py-1 rounded-lg bg-[#1e222b] text-white border border-[#2b303c] font-semibold hover:border-[#d4af37]"
-                              >
-                                Ajustar
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <InventoryManagementView
+              state={state}
+              setState={setState}
+              firebaseUser={firebaseUser}
+              authorizedEmails={authorizedEmails}
+              notify={notify}
+              isFirebaseAdmin={isFirebaseAdmin}
+            />
           )}
 
           {/* VIEW 7: REPORTS & PERFORMANCE ANALYTICS WITH RECHARTS */}
@@ -4482,7 +4390,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       )}
 
       {/* Employee Firestore PIN Authentication Module (Gate / Switch / Lock) */}
-      {(!employeeAuthenticated || pinPadMode === 'switch' || pinPadMode === 'unlock' || isSessionLocked) && (
+      {(pinPadMode === 'switch' || pinPadMode === 'unlock' || isSessionLocked) && (
         <EmployeePinAuthPanel
           users={state.users || []}
           activeUser={state.activeUser}
@@ -4541,6 +4449,222 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           return true;
         }}
       />
+
+      {/* iOS Navigation Drawer (Menú Desplegable de Navegación) */}
+      {isNavDrawerOpen && (
+        <div className="fixed inset-0 z-50 ios-scrim flex justify-start">
+          <div className="w-80 max-w-[85vw] h-full bg-[#16191f]/95 backdrop-blur-2xl border-r border-[#d4af37]/30 p-6 flex flex-col justify-between shadow-2xl overflow-y-auto animate-in slide-in-from-left duration-200">
+            <div className="space-y-6">
+              <div className="flex items-center justify-between pb-4 border-b border-white/10">
+                <div className="flex items-center gap-3">
+                  <BarbachuLogo className="w-8 h-auto" />
+                  <div>
+                    <h3 className="font-serif font-bold text-lg text-white">BARBACHU</h3>
+                    <p className="text-[10px] text-[#c8a84b] uppercase tracking-wider">Menú iOS · Navegación</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsNavDrawerOpen(false)}
+                  className="w-10 h-10 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-white transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Operator info card */}
+              <div className="p-3.5 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-[#173c34] text-[#eed889] font-bold text-xs flex items-center justify-center border border-[#d4af37]/40 shrink-0">
+                  {state.activeUser.avatar}
+                </div>
+                <div className="overflow-hidden min-w-0">
+                  <div className="text-xs font-bold text-white truncate">{state.activeUser.name}</div>
+                  <div className="text-[10px] text-[#c8a84b] uppercase">{ROLE_LABELS[state.activeUser.role]} · {state.activeUser.area}</div>
+                </div>
+              </div>
+
+              {/* Navigation Links */}
+              <nav className="space-y-1.5">
+                {[
+                  { id: 'dashboard', label: 'Resumen General', icon: LayoutDashboard, show: true },
+                  { id: 'pos', label: 'Comandero POS', icon: Receipt, show: canViewPos },
+                  { id: 'tables', label: 'Mapa de Mesas', icon: UtensilsCrossed, badge: totalOccupiedTables, show: canViewTables },
+                  { id: 'kitchen', label: 'Cocina & Barra KDS', icon: Flame, badge: openOrders.length, show: canViewKitchen },
+                  { id: 'cash', label: 'Caja & Cobros', icon: DollarSign, show: canViewCash },
+                  { id: 'inventory', label: 'Control de Inventario', icon: Package, badge: lowStockItems.length, show: canViewInventory },
+                  { id: 'reports', label: 'Reportes de Venta', icon: BarChart3, show: canViewReports },
+                  { id: 'admin', label: 'Administración & Personal', icon: Settings, show: canViewAdmin },
+                ].filter(i => i.show).map((item) => {
+                  const Icon = item.icon;
+                  const isActive = view === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => {
+                        setView(item.id as PosViewRoute);
+                        setIsNavDrawerOpen(false);
+                      }}
+                      className={`w-full min-h-[46px] px-4 rounded-2xl flex items-center gap-3 text-xs font-bold transition-colors ${
+                        isActive
+                          ? 'bg-gradient-to-r from-[#d4af37] to-[#eed889] text-black shadow-lg'
+                          : 'bg-white/[0.03] hover:bg-white/[0.08] text-white'
+                      }`}
+                    >
+                      <Icon className="w-4 h-4 shrink-0" />
+                      <span>{item.label}</span>
+                      {typeof item.badge === 'number' && item.badge > 0 && (
+                        <span className={`ml-auto px-2 py-0.5 rounded-full text-[10px] font-bold ${isActive ? 'bg-black text-white' : 'bg-[#d4af37] text-black'}`}>
+                          {item.badge}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </nav>
+            </div>
+
+            {/* Bottom Actions in Drawer */}
+            <div className="pt-4 border-t border-white/10 space-y-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsNavDrawerOpen(false);
+                  setIsDeviceModalOpen(true);
+                }}
+                className="w-full min-h-[44px] px-4 rounded-2xl bg-[#173c34] hover:bg-[#28584c] border border-[#c8a84b]/40 text-white text-xs font-bold flex items-center justify-center gap-2 transition-colors"
+              >
+                <Server className="w-4 h-4" /> Conexión de Dispositivos (Sync)
+              </button>
+              {onSwitchToMenu && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsNavDrawerOpen(false);
+                    onSwitchToMenu();
+                  }}
+                  className="w-full min-h-[44px] px-4 rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] text-[#eed889] text-xs font-bold flex items-center justify-center gap-2 transition-colors"
+                >
+                  <BookOpen className="w-4 h-4" /> Menú Digital Clientes
+                </button>
+              )}
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsNavDrawerOpen(false);
+                    handleOpenUserSwitcher();
+                  }}
+                  className="flex-1 min-h-[42px] px-3 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-white text-xs font-semibold"
+                >
+                  Cambiar Usuario
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsNavDrawerOpen(false);
+                    handleLockSession();
+                  }}
+                  className="min-h-[42px] px-3 rounded-xl bg-[#e05252]/20 hover:bg-[#e05252] text-[#e05252] hover:text-white text-xs font-semibold transition-colors"
+                >
+                  Bloquear
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Device Connection & Sync Manager Modal */}
+      {isDeviceModalOpen && (
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+          <div className="ios-glass-modal w-full max-w-lg rounded-[28px] p-6 space-y-5 text-left max-h-[90dvh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-white/10">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-[#122822] text-[#25d366] flex items-center justify-center border border-[#25d366]/40">
+                  <Wifi className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="font-serif font-bold text-xl text-white tracking-[-0.02em]">
+                    Conexión de Dispositivos & Cloud Sync
+                  </h3>
+                  <p className="text-xs text-[#25d366] font-mono mt-0.5">
+                    ● En línea · Firestore Realtime Active
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsDeviceModalOpen(false)}
+                className="w-11 h-11 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-[rgba(240,230,211,0.72)] hover:text-white transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="p-4 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 space-y-3">
+                <h4 className="text-xs font-bold text-[#c8a84b] uppercase tracking-wider">Configuración de esta Terminal</h4>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs text-[rgba(240,230,211,0.68)] mb-1.5">Rol / Estación de este Dispositivo</label>
+                    <select
+                      id="device-station-select-modal"
+                      aria-label="Rol o Estación de este Dispositivo"
+                      defaultValue={state.deviceConfig?.station || 'todos'}
+                      onChange={(e) => {
+                        const val = e.target.value as DeviceStation;
+                        const nameMap: Record<DeviceStation, string> = {
+                          todos: 'Terminal Central / Multi-Área',
+                          comandero: 'Comandero Portátil / Salón',
+                          caja: 'Caja Principal / Cobros',
+                          cocina: 'Monitor KDS Cocina',
+                          barra: 'Monitor KDS Barra',
+                        };
+                        handleUpdateDeviceStation(val, nameMap[val], state.deviceConfig?.autoLockMinutes || 0);
+                      }}
+                      className="w-full min-h-[46px] px-3.5 py-2 rounded-2xl bg-[#16191f] border border-white/10 text-white font-semibold text-xs focus:outline-none focus:border-[#c8a84b]"
+                    >
+                      <option value="todos">Terminal Central / Multi-Área (Todos los permisos)</option>
+                      <option value="comandero">Comandero Portátil / Salón (Toma de órdenes)</option>
+                      <option value="caja">Caja Principal / Cobros (Tickets y Turnos)</option>
+                      <option value="cocina">Monitor KDS Cocina (Sólo alimentos)</option>
+                      <option value="barra">Monitor KDS Barra (Sólo bebidas y coctelería)</option>
+                    </select>
+                  </div>
+                  <div className="text-[11px] text-[rgba(240,230,211,0.6)]">
+                    Estación actual: <strong className="text-white">{state.deviceConfig?.stationName || 'Terminal Central'}</strong>. Todas las comandas, KDS de cocina/barra y cortes de caja se sincronizan instantáneamente en todos los dispositivos conectados a esta base en la nube.
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 space-y-2">
+                <h4 className="text-xs font-bold text-[#c8a84b] uppercase tracking-wider">Estado de Sincronización Multi-Dispositivo</h4>
+                <div className="grid grid-cols-2 gap-3 text-xs pt-1">
+                  <div className="p-3 rounded-xl bg-white/[0.03] border border-white/5">
+                    <div className="text-[10px] text-[#8b92a0]">Latencia Cloud</div>
+                    <div className="font-mono font-bold text-[#25d366] text-sm mt-0.5">18 ms (Óptima)</div>
+                  </div>
+                  <div className="p-3 rounded-xl bg-white/[0.03] border border-white/5">
+                    <div className="text-[10px] text-[#8b92a0]">Cuentas Abiertas</div>
+                    <div className="font-mono font-bold text-white text-sm mt-0.5">{openOrders.length} activas</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={() => setIsDeviceModalOpen(false)}
+                className="w-full min-h-[46px] rounded-2xl bg-[#c8a84b] hover:bg-[#e8d090] text-[#0a0a0b] font-bold text-xs uppercase tracking-wider transition-colors"
+              >
+                Cerrar Panel de Conexión
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Floating Toast */}
       {toastMessage && (

@@ -273,50 +273,50 @@ export const PosAnalyticsDashboard: React.FC<PosAnalyticsDashboardProps> = ({ st
       {/* KPI Performance Cards Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="p-5 rounded-[22px] bg-[#161618]/80 backdrop-blur-xl border border-white/10 shadow-lg">
-          <div className="text-[11px] uppercase tracking-wider text-[rgba(240,230,211,0.6)] font-semibold mb-1.5">
+          <div className="text-xs uppercase tracking-wider text-[rgba(240,230,211,0.6)] font-semibold mb-1.5">
             Ventas ({timeRange === 'hoy' ? 'Hoy' : timeRange === 'semana' ? '7 días' : '30 días'})
           </div>
           <div className="text-2xl lg:text-3xl font-semibold text-[#e8d090] tabular-nums">
             {formatMoney(totalRevenueCents)}
           </div>
-          <div className="text-[11px] text-[rgba(240,230,211,0.68)] mt-1.5 tabular-nums">
+          <div className="text-xs text-[rgba(240,230,211,0.68)] mt-1.5 tabular-nums">
             {filteredSales.length} {filteredSales.length === 1 ? 'ticket cobrado' : 'tickets cobrados'}
           </div>
         </div>
 
         <div className="p-5 rounded-[22px] bg-[#161618]/80 backdrop-blur-xl border border-white/10 shadow-lg">
-          <div className="text-[11px] uppercase tracking-wider text-[rgba(240,230,211,0.6)] font-semibold mb-1.5">
+          <div className="text-xs uppercase tracking-wider text-[rgba(240,230,211,0.6)] font-semibold mb-1.5">
             Ticket Promedio
           </div>
           <div className="text-2xl lg:text-3xl font-semibold text-white tabular-nums">
             {formatMoney(averageTicketCents)}
           </div>
-          <div className="text-[11px] text-[rgba(240,230,211,0.68)] mt-1.5">
+          <div className="text-xs text-[rgba(240,230,211,0.68)] mt-1.5">
             Promedio por cuenta cerrada
           </div>
         </div>
 
         <div className="p-5 rounded-[22px] bg-[#161618]/80 backdrop-blur-xl border border-white/10 shadow-lg">
-          <div className="text-[11px] uppercase tracking-wider text-[rgba(240,230,211,0.6)] font-semibold mb-1.5">
+          <div className="text-xs uppercase tracking-wider text-[rgba(240,230,211,0.6)] font-semibold mb-1.5">
             Productos Vendidos
           </div>
           <div className="text-2xl lg:text-3xl font-semibold text-[#e8d090] tabular-nums">
             {totalUnitsSold}
           </div>
-          <div className="text-[11px] text-[rgba(240,230,211,0.68)] mt-1.5">
+          <div className="text-xs text-[rgba(240,230,211,0.68)] mt-1.5">
             Unidades cobradas en periodo
           </div>
         </div>
 
         <div className="p-5 rounded-[22px] bg-[#161618]/80 backdrop-blur-xl border border-white/10 shadow-lg">
-          <div className="text-[11px] uppercase tracking-wider text-[rgba(240,230,211,0.6)] font-semibold mb-1.5">
+          <div className="text-xs uppercase tracking-wider text-[rgba(240,230,211,0.6)] font-semibold mb-1.5">
             Ocupación de Salón
           </div>
           <div className="text-2xl lg:text-3xl font-semibold text-[#25d366] tabular-nums">
             {activeTablesCount} / 8{' '}
             <span className="text-xs text-[rgba(240,230,211,0.68)] font-normal">mesas</span>
           </div>
-          <div className="text-[11px] text-[rgba(240,230,211,0.68)] mt-1.5 tabular-nums">
+          <div className="text-xs text-[rgba(240,230,211,0.68)] mt-1.5 tabular-nums">
             {Math.round((activeTablesCount / 8) * 100)}% de ocupación actual
           </div>
         </div>
@@ -593,14 +593,14 @@ export const PosAnalyticsDashboard: React.FC<PosAnalyticsDashboardProps> = ({ st
                       <span className="font-bold text-[#e8d090] tabular-nums w-5">#{idx + 1}</span>
                       <div className="truncate">
                         <span className="font-semibold text-white">{p.fullName}</span>
-                        <span className="text-[10px] text-[rgba(240,230,211,0.6)] ml-2 uppercase">
+                        <span className="text-xs text-[rgba(240,230,211,0.6)] ml-2 uppercase">
                           {p.categoria}
                         </span>
                       </div>
                     </div>
                     <div className="text-right tabular-nums shrink-0 pl-2">
                       <b className="text-[#e8d090]">${p.ingresos.toLocaleString('es-MX')}</b>
-                      <span className="text-[11px] text-[rgba(240,230,211,0.6)] ml-2">({p.unidades})</span>
+                      <span className="text-xs text-[rgba(240,230,211,0.6)] ml-2">({p.unidades})</span>
                     </div>
                   </div>
                 ))}
@@ -655,7 +655,7 @@ export const PosAnalyticsDashboard: React.FC<PosAnalyticsDashboardProps> = ({ st
               {topCategory && (
                 <div className="p-3.5 rounded-2xl bg-white/[0.04] border border-white/10 text-xs space-y-1">
                   <div className="font-semibold text-[#e8d090]">Categoría líder del periodo</div>
-                  <p className="text-[rgba(240,230,211,0.72)] text-[11px] leading-relaxed tabular-nums">
+                  <p className="text-[rgba(240,230,211,0.72)] text-xs leading-relaxed tabular-nums">
                     <b className="text-white">{topCategory.categoria}</b> lidera con{' '}
                     <b className="text-[#e8d090]">${topCategory.ventas.toLocaleString('es-MX')} MXN</b> recaudados.
                   </p>

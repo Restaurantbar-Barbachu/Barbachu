@@ -153,7 +153,7 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
   };
 
   return (
-    <div className="min-h-screen bg-[#0a0a0b] text-[#f0e6d3] selection:bg-[#c8a84b] selection:text-[#0a0a0b]">
+    <div className="min-h-dvh bg-[#0a0a0b] text-[#f0e6d3] selection:bg-[#c8a84b] selection:text-[#0a0a0b]">
       {/* Top Banner & Quick Switcher (Public menu — zero login required) */}
       <div className="bg-[#161618]/78 backdrop-blur-2xl backdrop-saturate-[180%] border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between text-xs sticky top-0 z-40">
         <span className="text-[#e8d090] font-semibold tracking-wide flex items-center gap-2">
@@ -255,7 +255,7 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
                       key={item.id}
                       type="button"
                       onClick={() => setSelectedItem(item)}
-                      className="card snap-start flex-none w-[224px] text-left p-4 rounded-[22px] bg-gradient-to-br from-[#c8a84b]/15 via-[#161618]/90 to-[#121215] border border-white/15 hover:border-[#c8a84b]/70 transition-all duration-150 active:scale-[0.97] shadow-[0_8px_24px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.08)] group"
+                      className="card snap-start flex-none w-[224px] text-left p-4 rounded-[22px] bg-gradient-to-br from-[#c8a84b]/15 via-[#161618]/90 to-[#121215] border border-white/15 hover:border-[#c8a84b]/70 transition-all duration-150 active:scale-[0.97] shadow-[0_8px_24px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.08)] group animate-in fade-in duration-300"
                     >
                       <span className="c-ico text-2xl block mb-2">{item.icon}</span>
                       <strong className="c-name block font-serif font-bold text-base text-[#f0e6d3] group-hover:text-[#c8a84b] transition-colors tracking-[-0.01em]">
@@ -282,7 +282,7 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
                       key={item.id}
                       type="button"
                       onClick={() => setSelectedItem(item)}
-                      className="row w-full min-h-[56px] flex items-center justify-between px-4 py-3.5 text-left hover:bg-white/[0.04] active:bg-white/[0.08] transition-colors"
+                      className="row w-full min-h-[56px] flex items-center justify-between px-4 py-3.5 text-left hover:bg-white/[0.04] active:bg-white/[0.08] transition-colors animate-in fade-in duration-300"
                     >
                       <div className="pr-4">
                         <span className="r-name block font-medium text-[15px] text-[#f0e6d3] leading-snug">
@@ -326,7 +326,7 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
                             key={item.id}
                             type="button"
                             onClick={() => setSelectedItem(item)}
-                            className="row w-full min-h-[56px] flex items-center justify-between px-4 py-3.5 text-left hover:bg-white/[0.04] active:bg-white/[0.08] transition-colors"
+                            className="row w-full min-h-[56px] flex items-center justify-between px-4 py-3.5 text-left hover:bg-white/[0.04] active:bg-white/[0.08] transition-colors animate-in fade-in duration-300"
                           >
                             <div className="pr-4">
                               <span className="r-name block font-medium text-[15px] text-[#f0e6d3] leading-snug">
@@ -417,6 +417,8 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
         <div
           className="fixed inset-0 z-50 ios-scrim flex items-end sm:items-center justify-center p-0 sm:p-4"
           onClick={() => setSelectedItem(null)}
+          role="dialog"
+          aria-modal="true"
         >
           <div
             className="w-full sm:max-w-md ios-glass-modal rounded-b-none sm:rounded-[28px] p-6 pb-[calc(24px+env(safe-area-inset-bottom,0px))] sm:pb-6 text-left"

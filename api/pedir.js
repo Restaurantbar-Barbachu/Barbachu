@@ -1,8 +1,6 @@
 // /api/pedir — redirige a WhatsApp sin exponer el número en el HTML ni en el repo.
 // El número vive en la variable de entorno WA_NUMBER (Vercel → Settings → Environment Variables).
-'use strict';
-
-module.exports = (req, res) => {
+export default function handler(req, res) {
   try {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.setHeader('Allow', 'GET, HEAD');
@@ -35,4 +33,4 @@ module.exports = (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     return res.end('Error al abrir WhatsApp.');
   }
-};
+}

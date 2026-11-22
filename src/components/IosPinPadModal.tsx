@@ -97,7 +97,7 @@ export const IosPinPadModal: React.FC<IosPinPadModalProps> = ({
   const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
 
   return (
-    <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
       <div className="w-full max-w-[368px] ios-glass-modal p-6 space-y-5 text-center">
         <div className="flex items-center justify-between">
           <div className="w-10 h-10 rounded-full bg-[#c8a84b]/15 border border-[#c8a84b]/35 flex items-center justify-center text-[#e8d090]">
@@ -126,7 +126,7 @@ export const IosPinPadModal: React.FC<IosPinPadModalProps> = ({
 
         {users && users.length > 0 && onSelectUser && (
           <div className="text-left">
-            <label className="block text-[11px] uppercase tracking-wider font-semibold text-[rgba(240,230,211,0.6)] mb-1.5 pl-1">
+            <label className="block text-xs uppercase tracking-wider font-semibold text-[rgba(240,230,211,0.6)] mb-1.5 pl-1">
               Operador
             </label>
             <select
@@ -175,7 +175,7 @@ export const IosPinPadModal: React.FC<IosPinPadModalProps> = ({
           ) : errorMsg ? (
             <p className="text-xs font-semibold text-[#e05252] min-h-[16px]">{errorMsg}</p>
           ) : (
-            <p className="text-[11px] text-[rgba(240,230,211,0.5)] min-h-[16px]">
+            <p className="text-xs text-[rgba(240,230,211,0.5)] min-h-[16px]">
               Ingresa tu código de 4 dígitos
             </p>
           )}

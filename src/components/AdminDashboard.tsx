@@ -1095,7 +1095,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <span>{tab.label}</span>
               {typeof tab.count === 'number' && (
                 <span
-                  className={`px-1.5 py-0.5 rounded-full text-[10px] tabular-nums font-bold ${
+                  className={`px-1.5 py-0.5 rounded-full text-xs tabular-nums font-bold ${
                     active ? 'bg-black/15 text-[#0a0a0b]' : 'bg-white/10 text-white'
                   }`}
                 >
@@ -1251,7 +1251,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         <button
                           type="button"
                           onClick={() => handleToggleProductSale(prod)}
-                          className={`min-h-[34px] px-3 py-1 rounded-full text-[10px] font-bold uppercase transition-all ${
+                          className={`min-h-[34px] px-3 py-1 rounded-full text-xs font-bold uppercase transition-all ${
                             prod.saleEnabled
                               ? 'bg-[#122822] text-[#25d366] border border-[#25d366]/40'
                               : 'bg-[#e05252]/15 text-[#e05252] border border-[#e05252]/40'
@@ -1386,10 +1386,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           <div className="font-semibold text-white text-[15px] truncate tracking-[-0.01em]">
                             {u.name}
                           </div>
-                          <div className="text-[11px] text-[rgba(240,230,211,0.68)] uppercase font-semibold tracking-[0.03em]">
+                          <div className="text-xs text-[rgba(240,230,211,0.68)] uppercase font-semibold tracking-[0.03em]">
                             {u.role} · {u.area || 'General'}
                           </div>
-                          <div className="text-[11px] text-[#e8d090]/85 truncate mt-0.5">
+                          <div className="text-xs text-[#e8d090]/85 truncate mt-0.5">
                             {u.email || 'Sin correo vinculado'}
                           </div>
                         </div>
@@ -1398,7 +1398,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                     <div className="pt-3 border-t border-white/10 flex items-center justify-between text-xs">
                       <div>
-                        <span className="text-[rgba(240,230,211,0.55)] block text-[10px] uppercase tracking-[0.06em]">
+                        <span className="text-[rgba(240,230,211,0.55)] block text-xs uppercase tracking-[0.06em]">
                           PIN de Acceso
                         </span>
                         <span
@@ -1409,7 +1409,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         </span>
                       </div>
                       <div className="text-right">
-                        <span className="text-[rgba(240,230,211,0.55)] block text-[10px] uppercase tracking-[0.06em]">
+                        <span className="text-[rgba(240,230,211,0.55)] block text-xs uppercase tracking-[0.06em]">
                           Estado
                         </span>
                         <span
@@ -1497,7 +1497,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 >
                   <span className="font-mono">{em}</span>
                   {em === BOOTSTRAPPED_ADMIN_EMAIL ? (
-                    <span className="text-[10px] font-bold text-[#c8a84b] uppercase">Admin</span>
+                    <span className="text-xs font-bold text-[#c8a84b] uppercase">Admin</span>
                   ) : (
                     <button
                       type="button"
@@ -1675,7 +1675,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     }`}
                   >
                     <div className="font-bold text-white mb-1">{item.label}</div>
-                    <div className="text-[11px] text-[rgba(240,230,211,0.68)]">{item.desc}</div>
+                    <div className="text-xs text-[rgba(240,230,211,0.68)]">{item.desc}</div>
                   </button>
                 ))}
               </div>
@@ -1721,7 +1721,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         <div className="font-bold text-sm text-[#e05252]">
                           {item.stock} {item.unidad}
                         </div>
-                        <div className="text-[10px] text-[rgba(240,230,211,0.55)]">
+                        <div className="text-xs text-[rgba(240,230,211,0.55)]">
                           Mínimo: {item.minStock} {item.unidad}
                         </div>
                       </div>
@@ -1794,7 +1794,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           hour: '2-digit',
                           minute: '2-digit',
                         })}
-                        <span className="block text-[10px] text-[rgba(240,230,211,0.55)]">
+                        <span className="block text-xs text-[rgba(240,230,211,0.55)]">
                           {new Date(rec.clockIn).toLocaleDateString('es-MX')}
                         </span>
                       </td>
@@ -1808,7 +1808,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       </td>
                       <td className="py-3">
                         <span
-                          className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase ${
+                          className={`px-2.5 py-1 rounded-full text-xs font-bold uppercase ${
                             rec.status === 'activo'
                               ? 'bg-[#122822] text-[#25d366] border border-[#25d366]/40'
                               : 'bg-white/[0.06] text-[rgba(240,230,211,0.6)]'
@@ -2109,7 +2109,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         <td className="py-2.5 text-[rgba(240,230,211,0.78)]">
                           {entry.detail}
                           {entry.reason && (
-                            <span className="block text-[11px] text-[#e05252]">Motivo: {entry.reason}</span>
+                            <span className="block text-xs text-[#e05252]">Motivo: {entry.reason}</span>
                           )}
                         </td>
                       </tr>
@@ -2190,7 +2190,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* ADD NEW PRODUCT MODAL */}
       {showAddModal && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal max-w-md w-full p-6 space-y-4 text-left">
             <div className="flex items-center justify-between pb-3 border-b border-white/10">
               <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">
@@ -2303,7 +2303,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* ADD NEW EMPLOYEE MODAL */}
       {showAddUserModal && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal max-w-md w-full p-6 space-y-4 text-left">
             <div className="flex items-center justify-between pb-3 border-b border-white/10">
               <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">
@@ -2429,7 +2429,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* FULL EDIT EMPLOYEE MODAL */}
       {editingUser && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal max-w-md w-full p-6 space-y-4 text-left">
             <div className="flex items-center justify-between pb-3 border-b border-white/10">
               <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">
@@ -2557,7 +2557,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* CONFIRM DELETE EMPLOYEE MODAL */}
       {confirmDeleteUser && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal border-[#e05252]/40 max-w-sm w-full p-6 space-y-4 text-left">
             <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">Eliminar Empleado</h3>
             <p className="text-xs text-[rgba(240,230,211,0.72)] leading-relaxed">
@@ -2585,7 +2585,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* CONFIRM DELETE PRODUCT MODAL */}
       {confirmDeleteProd && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal border-[#e05252]/40 max-w-sm w-full p-6 space-y-4 text-left">
             <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">Eliminar Producto</h3>
             <p className="text-xs text-[rgba(240,230,211,0.72)] leading-relaxed">
@@ -2613,7 +2613,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* CONFIRM DEMO CLEANUP MODAL */}
       {confirmCleanupModal && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal border-[#e05252]/40 max-w-sm w-full p-6 space-y-4 text-left">
             <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">Confirmar Limpieza</h3>
             <p className="text-xs text-[rgba(240,230,211,0.72)] leading-relaxed">
@@ -2642,7 +2642,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* TIME CLOCK CHECK-IN MODAL */}
       {clockModalOpen && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal max-w-sm w-full p-6 space-y-4 text-left">
             <h3 className="font-serif font-bold text-base text-white tracking-[-0.02em]">Registrar Entrada</h3>
             <select
@@ -2707,7 +2707,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* EDIT MIN STOCK MODAL */}
       {editingMinStockItem && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal max-w-sm w-full p-6 space-y-4 text-left">
             <h3 className="font-serif font-bold text-base text-white tracking-[-0.02em]">Umbral Mínimo de Alerta</h3>
             <p className="text-xs text-[#e8d090]">

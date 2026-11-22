@@ -224,7 +224,7 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
       : 'Selecciona tu perfil de Firestore e ingresa tu PIN de 4 dígitos para desbloquear tu área.';
 
   return (
-    <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
+    <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-3 sm:p-6 overflow-y-auto" role="dialog" aria-modal="true">
       <div className="w-full max-w-4xl ios-glass-modal p-5 sm:p-7 my-auto space-y-5">
         {/* Top bar */}
         <div className="flex items-start justify-between gap-4 pb-4 border-b border-white/10">
@@ -338,7 +338,7 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
                           <span className="truncate">{emp.name}</span>
                           {isSelected && <CheckCircle2 className="w-4 h-4 text-[#25d366] shrink-0" />}
                         </div>
-                        <div className="text-[11px] text-[rgba(240,230,211,0.65)] truncate mt-0.5">
+                        <div className="text-xs text-[rgba(240,230,211,0.65)] truncate mt-0.5">
                           {ROLE_LABELS[emp.role] || emp.role} · {emp.area || 'General'}
                         </div>
                       </div>
@@ -351,7 +351,7 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
             {/* Selected Employee Capabilities Preview */}
             {selectedEmployee && (
               <div className="p-3.5 rounded-2xl bg-[#0a0a0b]/60 border border-white/10 space-y-1">
-                <div className="text-[11px] uppercase tracking-[0.06em] font-semibold text-[#e8d090] flex items-center gap-1.5">
+                <div className="text-xs uppercase tracking-[0.06em] font-semibold text-[#e8d090] flex items-center gap-1.5">
                   <UserCheck className="w-3.5 h-3.5" />
                   Funciones habilitadas para {selectedEmployee.name.split(' ')[0]}
                 </div>
@@ -365,14 +365,14 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
           {/* Right: iOS Tactile 4-Digit Keypad */}
           <div className="lg:col-span-5 p-5 rounded-[22px] bg-[#0a0a0b]/55 border border-white/10 flex flex-col justify-between space-y-4 text-center">
             <div className="space-y-1">
-              <div className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-[0.08em] font-semibold text-[#c8a84b]">
+              <div className="inline-flex items-center gap-1.5 text-xs uppercase tracking-[0.08em] font-semibold text-[#c8a84b]">
                 <ShieldCheck className="w-3.5 h-3.5" />
                 Validación Firestore
               </div>
               <div className="text-base font-bold text-white truncate">
                 {selectedEmployee ? selectedEmployee.name : 'Selecciona empleado'}
               </div>
-              <div className="text-[11px] text-[rgba(240,230,211,0.58)]">
+              <div className="text-xs text-[rgba(240,230,211,0.58)]">
                 {selectedEmployee ? `${ROLE_LABELS[selectedEmployee.role]} · ${selectedEmployee.area}` : 'Sin perfil'}
               </div>
             </div>
@@ -405,7 +405,7 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
                   {errorMsg}
                 </p>
               ) : (
-                <p className="text-[11px] text-[rgba(240,230,211,0.52)] min-h-[18px]">
+                <p className="text-xs text-[rgba(240,230,211,0.52)] min-h-[18px]">
                   Ingresa tu PIN de 4 dígitos
                 </p>
               )}

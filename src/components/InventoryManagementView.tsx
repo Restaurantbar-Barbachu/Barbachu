@@ -324,11 +324,11 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
         {/* Stats Row */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
           <div className="p-3.5 rounded-2xl bg-[#0a0a0b]/60 border border-white/10">
-            <div className="text-[11px] text-[rgba(240,230,211,0.58)] font-semibold">Total Insumos</div>
+            <div className="text-xs text-[rgba(240,230,211,0.58)] font-semibold">Total Insumos</div>
             <div className="text-lg font-bold font-mono text-white mt-1 tabular-nums">{inventoryList.length}</div>
           </div>
           <div className={`p-3.5 rounded-2xl border ${lowStockItems.length > 0 ? 'bg-[#e05252]/15 border-[#e05252]/40' : 'bg-[#0a0a0b]/60 border-white/10'}`}>
-            <div className="text-[11px] text-[rgba(240,230,211,0.58)] font-semibold flex items-center gap-1">
+            <div className="text-xs text-[rgba(240,230,211,0.58)] font-semibold flex items-center gap-1">
               {lowStockItems.length > 0 && <span className="text-[#e05252]">⚠️</span>} Alertas Stock Bajo
             </div>
             <div className={`text-lg font-bold font-mono mt-1 tabular-nums ${lowStockItems.length > 0 ? 'text-[#e05252]' : 'text-[#25d366]'}`}>
@@ -336,13 +336,13 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
             </div>
           </div>
           <div className="p-3.5 rounded-2xl bg-[#0a0a0b]/60 border border-white/10">
-            <div className="text-[11px] text-[rgba(240,230,211,0.58)] font-semibold">Valor Total Inventario</div>
+            <div className="text-xs text-[rgba(240,230,211,0.58)] font-semibold">Valor Total Inventario</div>
             <div className="text-lg font-bold font-mono text-[#e8d090] mt-1 tabular-nums">
               {formatMoney(inventoryList.reduce((sum, i) => sum + i.stock * i.costo * 100, 0))}
             </div>
           </div>
           <div className="p-3.5 rounded-2xl bg-[#0a0a0b]/60 border border-white/10">
-            <div className="text-[11px] text-[rgba(240,230,211,0.58)] font-semibold">Movimientos Registrados</div>
+            <div className="text-xs text-[rgba(240,230,211,0.58)] font-semibold">Movimientos Registrados</div>
             <div className="text-lg font-bold font-mono text-white mt-1 tabular-nums">
               {(state.inventoryMovements || []).length}
             </div>
@@ -434,7 +434,7 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
           <div className="p-4 ios-glass-card overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead>
-                <tr className="border-b border-white/15 text-[rgba(240,230,211,0.58)] uppercase tracking-wider text-[11px]">
+                <tr className="border-b border-white/15 text-[rgba(240,230,211,0.58)] uppercase tracking-wider text-xs">
                   <th className="pb-3 pl-2">Clave</th>
                   <th className="pb-3">Descripción</th>
                   <th className="pb-3">Categoría</th>
@@ -638,7 +638,7 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead>
-                <tr className="border-b border-white/15 text-[rgba(240,230,211,0.58)] uppercase tracking-wider text-[11px]">
+                <tr className="border-b border-white/15 text-[rgba(240,230,211,0.58)] uppercase tracking-wider text-xs">
                   <th className="pb-3 pl-2">Fecha / Hora</th>
                   <th className="pb-3">Insumo</th>
                   <th className="pb-3">Tipo</th>
@@ -663,7 +663,7 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
                       </td>
                       <td className="py-3 font-bold text-white">{mov.descripcion}</td>
                       <td className="py-3">
-                        <span className={`px-2 py-0.5 rounded-lg text-[11px] font-bold uppercase ${mov.type === 'entrada' ? 'bg-[#25d366]/20 text-[#25d366]' : 'bg-[#e8d090]/20 text-[#e8d090]'}`}>
+                        <span className={`px-2 py-0.5 rounded-lg text-xs font-bold uppercase ${mov.type === 'entrada' ? 'bg-[#25d366]/20 text-[#25d366]' : 'bg-[#e8d090]/20 text-[#e8d090]'}`}>
                           {mov.type}
                         </span>
                       </td>
@@ -684,7 +684,7 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
 
       {/* MODAL: ACCIÓN EN INSUMO (ENTRADA / AJUSTE / MÍNIMO) */}
       {modalAction && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal max-w-sm w-full p-6 space-y-4 text-left">
             <div className="flex items-center justify-between">
               <h3 className="font-serif font-bold text-base text-white">
@@ -777,7 +777,7 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
 
       {/* CONFIRM DELETE MODAL */}
       {confirmDeleteClave !== null && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal max-w-sm w-full p-6 space-y-4 text-left">
             <h3 className="font-serif font-bold text-base text-[#e05252]">Eliminar Insumo</h3>
             <p className="text-xs text-[rgba(240,230,211,0.8)]">

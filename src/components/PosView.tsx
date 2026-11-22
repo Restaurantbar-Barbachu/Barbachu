@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import {
   AlertTriangle,
@@ -51,7 +51,7 @@ import {
   ItemStatus,
   DeviceStation,
 } from '../types';
-import { AdminDashboard } from './AdminDashboard';
+const AdminDashboard = lazy(() => import('./AdminDashboard').then(m => ({ default: m.AdminDashboard })));
 import { BarbachuLogo } from './BarbachuLogo';
 import {
   defaultViewForRole,
@@ -61,8 +61,8 @@ import {
   ROLE_LABELS,
 } from './EmployeePinAuthPanel';
 import { IosPinPadModal } from './IosPinPadModal';
-import { PosAnalyticsDashboard } from './PosAnalyticsDashboard';
-import { InventoryManagementView } from './InventoryManagementView';
+const PosAnalyticsDashboard = lazy(() => import('./PosAnalyticsDashboard').then(m => ({ default: m.PosAnalyticsDashboard })));
+const InventoryManagementView = lazy(() => import('./InventoryManagementView').then(m => ({ default: m.InventoryManagementView })));
 import {
   auth,
   BOOTSTRAPPED_ADMIN_EMAIL,
@@ -1535,6 +1535,18 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     return state.sales.reduce((sum, s) => sum + s.totalCents, 0);
   }, [state.sales]);
 
+  const todaySalesCents = useMemo(() => {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    return state.sales
+      .filter((s) => s.paidAt.startsWith(todayStr))
+      .reduce((sum, s) => sum + s.totalCents, 0);
+  }, [state.sales]);
+
+  const todayOrdersCount = useMemo(() => {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    return state.orders.filter((o) => o.createdAt.startsWith(todayStr) || o.updatedAt.startsWith(todayStr)).length;
+  }, [state.orders]);
+
   // Tables map overview
   const tableLocations = useMemo(() => {
     return [
@@ -1554,7 +1566,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   // Auth loading state
   if (!authReady || cloudBooting) {
     return (
-      <div className="min-h-screen bg-[#0a0a0b] text-[#f0e6d3] flex items-center justify-center p-6">
+      <div className="min-h-dvh bg-[#0a0a0b] text-[#f0e6d3] flex items-center justify-center p-6">
         <div className="text-center space-y-4">
           <BarbachuLogo className="w-20 h-auto mx-auto" />
           <p className="text-xs uppercase tracking-widest text-[#c8a84b] font-bold">
@@ -1568,7 +1580,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   // Google Sign-In Gate for Production Multi-Device POS
   if (!firebaseUser) {
     return (
-      <div className="min-h-screen bg-[#0a0a0b] text-[#f0e6d3] flex items-center justify-center p-6">
+      <div className="min-h-dvh bg-[#0a0a0b] text-[#f0e6d3] flex items-center justify-center p-6">
         <div className="max-w-md w-full ios-glass-modal border-[#c8a84b]/35 p-8 space-y-6 text-center">
           <BarbachuLogo className="w-24 h-auto mx-auto drop-shadow-[0_0_24px_rgba(200,168,75,0.25)]" />
           <div className="space-y-1.5">
@@ -1629,7 +1641,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   // Non-authorized Google account gate
   if (!workspaceAuthorized) {
     return (
-      <div className="min-h-screen bg-[#0a0a0b] text-[#f0e6d3] flex items-center justify-center p-6">
+      <div className="min-h-dvh bg-[#0a0a0b] text-[#f0e6d3] flex items-center justify-center p-6">
         <div className="max-w-md w-full ios-glass-modal border-[#e05252]/40 p-8 space-y-5 text-center">
           <div className="w-14 h-14 mx-auto rounded-2xl bg-[#e05252]/20 text-[#e05252] flex items-center justify-center">
             <Lock className="w-6 h-6" />
@@ -1798,7 +1810,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               </div>
               <div className="overflow-hidden min-w-0">
                 <div className="text-xs font-bold text-white truncate">{state.activeUser.name}</div>
-                <div className="text-[10px] text-[#8b92a0] uppercase">{state.activeUser.role} · Cambiar</div>
+                <div className="text-xs text-[#8b92a0] uppercase">{state.activeUser.role} · Cambiar</div>
               </div>
             </button>
             <button
@@ -1811,7 +1823,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               <Lock className="w-4 h-4" />
             </button>
           </div>
-          <div className="px-2.5 py-2 rounded-2xl bg-[#16191f] border border-white/10 flex items-center justify-between gap-2 text-[10px]">
+          <div className="px-2.5 py-2 rounded-2xl bg-[#16191f] border border-white/10 flex items-center justify-between gap-2 text-xs">
             <span className="text-[#8b92a0] truncate flex items-center gap-1.5" title={firebaseUser.email || ''}>
               <Cloud className="w-3.5 h-3.5 text-[#25d366] shrink-0" />
               <span className="truncate">{firebaseUser.email}</span>
@@ -1862,7 +1874,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
             <button
               type="button"
               onClick={() => setIsDeviceModalOpen(true)}
-              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-[#122822] hover:bg-[#122822]/80 text-[#25d366] border border-[#25d366]/30 transition-colors cursor-pointer"
+              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-[#122822] hover:bg-[#122822]/80 text-[#25d366] border border-[#25d366]/30 transition-colors cursor-pointer"
               title="Gestionar Conexión de Dispositivos y Estaciones"
             >
               <Cloud className="w-3.5 h-3.5" />
@@ -1899,7 +1911,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               className="min-h-[44px] flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-[#1e222b]/90 border border-white/10 text-xs font-semibold text-white hover:border-[#d4af37]/60 transition-colors"
               title="Cambiar usuario activo con PIN"
             >
-              <span className="w-6 h-6 rounded-full bg-[#173c34] text-[#eed889] text-[10px] font-bold flex items-center justify-center">
+              <span className="w-6 h-6 rounded-full bg-[#173c34] text-[#eed889] text-xs font-bold flex items-center justify-center">
                 {state.activeUser.avatar}
               </span>
               <span className="hidden sm:inline">{state.activeUser.name.split(' ')[0]}</span>
@@ -1955,6 +1967,48 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                 </div>
               </div>
 
+              {/* Daily Sales Summary Card based on Firestore documents */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 tabular-nums animate-in fade-in duration-300">
+                <div className="p-5 ios-glass-card space-y-2 border-l-4 border-[#25d366]">
+                  <div className="flex items-center justify-between text-xs font-bold text-[#8b92a0] uppercase tracking-wider">
+                    <span>Ventas Totales de Hoy</span>
+                    <DollarSign className="w-4 h-4 text-[#25d366]" />
+                  </div>
+                  <div className="font-serif font-bold text-3xl text-white">
+                    {formatMoney(todaySalesCents)}
+                  </div>
+                  <div className="text-xs text-[#25d366] font-semibold">
+                    Calculado en tiempo real desde Firestore ({state.sales.filter(s => s.paidAt.startsWith(new Date().toISOString().slice(0, 10))).length} tickets pagados)
+                  </div>
+                </div>
+
+                <div className="p-5 ios-glass-card space-y-2 border-l-4 border-[#c8a84b]">
+                  <div className="flex items-center justify-between text-xs font-bold text-[#8b92a0] uppercase tracking-wider">
+                    <span>Comandas Registradas Hoy</span>
+                    <Receipt className="w-4 h-4 text-[#c8a84b]" />
+                  </div>
+                  <div className="font-serif font-bold text-3xl text-white">
+                    {todayOrdersCount}
+                  </div>
+                  <div className="text-xs text-[#e8d090] font-semibold">
+                    Total de cuentas procesadas en la jornada
+                  </div>
+                </div>
+
+                <div className="p-5 ios-glass-card space-y-2 border-l-4 border-[#e05252]">
+                  <div className="flex items-center justify-between text-xs font-bold text-[#8b92a0] uppercase tracking-wider">
+                    <span>Turno Actual de Caja</span>
+                    <Clock className="w-4 h-4 text-[#e05252]" />
+                  </div>
+                  <div className="font-serif font-bold text-3xl text-white">
+                    {state.shift.isOpen ? formatMoney(state.shift.expectedCashCents) : 'Turno Cerrado'}
+                  </div>
+                  <div className="text-xs text-[#eed889] font-semibold">
+                    {state.shift.isOpen ? `Efectivo esperado en caja` : 'Sin turno abierto'}
+                  </div>
+                </div>
+              </div>
+
               {/* Critical Inventory Alert Banner if low stock exists */}
               {canViewInventory && lowStockItems.length > 0 && (
                 <div className="p-4 rounded-2xl bg-gradient-to-r from-[#e05252]/20 via-[#1e222b] to-[#16191f] border border-[#e05252]/50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-lg">
@@ -1991,32 +2045,32 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               {/* Stat Cards */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 tabular-nums">
                 <div className="p-5 ios-glass-card">
-                  <div className="text-[11px] uppercase tracking-[0.08em] text-[rgba(240,230,211,0.58)] font-semibold mb-1.5">Ventas del Día</div>
+                  <div className="text-xs uppercase tracking-[0.08em] text-[rgba(240,230,211,0.58)] font-semibold mb-1.5">Ventas del Día</div>
                   <div className="text-2xl lg:text-3xl font-mono font-bold text-[#e8d090]">
                     {canViewCash || canViewReports ? formatMoney(totalSalesCents) : `${state.sales.length} cobros`}
                   </div>
-                  <div className="text-[11px] text-[rgba(240,230,211,0.58)] mt-1">
+                  <div className="text-xs text-[rgba(240,230,211,0.58)] mt-1">
                     {canViewCash || canViewReports ? `${state.sales.length} cobros registrados` : 'Resumen de turno'}
                   </div>
                 </div>
                 <div className="p-5 ios-glass-card">
-                  <div className="text-[11px] uppercase tracking-[0.08em] text-[rgba(240,230,211,0.58)] font-semibold mb-1.5">Cuentas Abiertas</div>
+                  <div className="text-xs uppercase tracking-[0.08em] text-[rgba(240,230,211,0.58)] font-semibold mb-1.5">Cuentas Abiertas</div>
                   <div className="text-2xl lg:text-3xl font-mono font-bold text-white">{openOrders.length}</div>
-                  <div className="text-[11px] text-[rgba(240,230,211,0.58)] mt-1">{totalOccupiedTables} ubicaciones</div>
+                  <div className="text-xs text-[rgba(240,230,211,0.58)] mt-1">{totalOccupiedTables} ubicaciones</div>
                 </div>
                 <div className="p-5 ios-glass-card">
-                  <div className="text-[11px] uppercase tracking-[0.08em] text-[rgba(240,230,211,0.58)] font-semibold mb-1.5">Ocupación Salón</div>
+                  <div className="text-xs uppercase tracking-[0.08em] text-[rgba(240,230,211,0.58)] font-semibold mb-1.5">Ocupación Salón</div>
                   <div className="text-2xl lg:text-3xl font-mono font-bold text-[#25d366]">
                     {openOrders.filter((o) => o.service === 'mesa').length} / 8
                   </div>
-                  <div className="text-[11px] text-[rgba(240,230,211,0.58)] mt-1">Mesas en servicio</div>
+                  <div className="text-xs text-[rgba(240,230,211,0.58)] mt-1">Mesas en servicio</div>
                 </div>
                 <div className="p-5 ios-glass-card">
-                  <div className="text-[11px] uppercase tracking-[0.08em] text-[rgba(240,230,211,0.58)] font-semibold mb-1.5">Pendientes KDS</div>
+                  <div className="text-xs uppercase tracking-[0.08em] text-[rgba(240,230,211,0.58)] font-semibold mb-1.5">Pendientes KDS</div>
                   <div className="text-2xl lg:text-3xl font-mono font-bold text-[#e05252]">
                     {openOrders.filter((o) => ['sent', 'preparing'].includes(o.status)).length}
                   </div>
-                  <div className="text-[11px] text-[rgba(240,230,211,0.58)] mt-1">En cocina y barra</div>
+                  <div className="text-xs text-[rgba(240,230,211,0.58)] mt-1">En cocina y barra</div>
                 </div>
               </div>
 
@@ -2159,7 +2213,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                               <span>Cuenta #{order.number}</span>
                               <span className="text-xs text-[#e8d090]">· {locationLabel(order.service, order.location)}</span>
                               {order.priority === 'alta' && (
-                                <span className="px-1.5 py-0.5 rounded-lg text-[10px] bg-[#e05252] text-white font-bold">ALTA</span>
+                                <span className="px-1.5 py-0.5 rounded-lg text-xs bg-[#e05252] text-white font-bold">ALTA</span>
                               )}
                             </div>
                             <div className="text-xs text-[rgba(240,230,211,0.62)] mt-0.5 tabular-nums">
@@ -2168,7 +2222,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                           </div>
                           <div className="text-right tabular-nums">
                             <div className="font-mono font-bold text-sm text-[#e8d090]">{formatMoney(order.totalCents)}</div>
-                            <span className="text-[10px] font-bold text-[rgba(240,230,211,0.58)] uppercase">{order.status}</span>
+                            <span className="text-xs font-bold text-[rgba(240,230,211,0.58)] uppercase">{order.status}</span>
                           </div>
                         </div>
                       ))}
@@ -2180,7 +2234,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               {/* Real-time Sales, Top Products and Performance Analytics with Recharts (if permitted) */}
               {canViewReports && (
                 <div className="pt-2">
-                  <PosAnalyticsDashboard state={state} />
+                  <Suspense fallback={<div className="p-8 text-center text-[#d4af37]">Cargando analíticas...</div>}>
+                    <PosAnalyticsDashboard state={state} />
+                  </Suspense>
                 </div>
               )}
             </div>
@@ -2301,7 +2357,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                         {locOrders.length > 0 ? (
                           <span className="font-mono font-bold text-[#25d366]">{formatMoney(locSum)}</span>
                         ) : (
-                          <span className="text-[11px] text-[rgba(240,230,211,0.45)]">Libre</span>
+                          <span className="text-xs text-[rgba(240,230,211,0.45)]">Libre</span>
                         )}
                       </button>
                     );
@@ -2378,7 +2434,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                         <span className="text-xs uppercase tracking-[0.06em] font-bold text-[#e8d090] inline-flex items-center gap-1.5">
                           <Sparkles className="w-3.5 h-3.5" /> Más Pedidos (1 Toque)
                         </span>
-                        <span className="text-[11px] text-[rgba(240,230,211,0.52)]">Acceso instantáneo</span>
+                        <span className="text-xs text-[rgba(240,230,211,0.52)]">Acceso instantáneo</span>
                       </div>
                       <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
                         {quickFireProducts.map((qp) => {
@@ -2398,7 +2454,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                 {qtyInCart > 0 && <span className="text-[#25d366] mr-1 tabular-nums">×{qtyInCart}</span>}
                                 {qp.name}
                               </div>
-                              <div className="text-[11px] font-mono font-bold text-[#e8d090] tabular-nums mt-0.5">
+                              <div className="text-xs font-mono font-bold text-[#e8d090] tabular-nums mt-0.5">
                                 {formatMoney(qp.priceCents)}
                               </div>
                             </button>
@@ -2627,7 +2683,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0">
                               <div className="text-xs font-bold text-white leading-snug">{item.name}</div>
-                              <div className="text-[11px] text-[rgba(240,230,211,0.58)] tabular-nums mt-0.5">
+                              <div className="text-xs text-[rgba(240,230,211,0.58)] tabular-nums mt-0.5">
                                 {formatMoney(item.priceCents)} c/u · {(item.station || 'cocina').toUpperCase()}
                               </div>
                             </div>
@@ -2651,12 +2707,12 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                           </div>
 
                           {item.note && (
-                            <div className="text-[11px] text-[#e8d090] bg-white/[0.04] px-2.5 py-1 rounded-xl">
+                            <div className="text-xs text-[#e8d090] bg-white/[0.04] px-2.5 py-1 rounded-xl">
                               Nota: {item.note}
                             </div>
                           )}
 
-                          <div className="flex items-center justify-between pt-1 border-t border-white/10 text-[11px]">
+                          <div className="flex items-center justify-between pt-1 border-t border-white/10 text-xs">
                             <div className="flex gap-3">
                               <button
                                 type="button"
@@ -2782,7 +2838,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                           <DollarSign className="w-4 h-4" /> Cobrar en Caja
                         </button>
                       ) : (
-                        <div className="flex items-center justify-center text-[11px] text-[rgba(240,230,211,0.52)] px-2 text-center">
+                        <div className="flex items-center justify-center text-xs text-[rgba(240,230,211,0.52)] px-2 text-center">
                           {currentOrderId ? 'Cobro exclusivo de Caja' : 'Envía primero para cobrar'}
                         </div>
                       )}
@@ -2987,7 +3043,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                               <div className="flex items-center justify-between gap-2">
                                 <span className="font-bold text-sm text-white truncate">{loc.label}</span>
                                 <span
-                                  className={`text-[11px] font-bold uppercase tracking-wide shrink-0 ${
+                                  className={`text-xs font-bold uppercase tracking-wide shrink-0 ${
                                     hasReady
                                       ? 'text-[#25d366]'
                                       : isBusy
@@ -3008,7 +3064,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                               </p>
 
                               {isBusy && oldestOrder && (
-                                <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#e8d090] tabular-nums">
+                                <div className="inline-flex items-center gap-1 text-xs font-semibold text-[#e8d090] tabular-nums">
                                   <Clock className="w-3 h-3" /> {formatElapsedTime(oldestOrder.createdAt, nowMs)}
                                 </div>
                               )}
@@ -3016,13 +3072,13 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
                             <div className="pt-3 border-t border-white/10 flex items-end justify-between gap-2">
                               <div>
-                                <div className="text-[10px] text-[rgba(240,230,211,0.52)]">Total</div>
+                                <div className="text-xs text-[rgba(240,230,211,0.52)]">Total</div>
                                 <div className="font-mono font-bold text-sm text-[#e8d090] tabular-nums">
                                   {isBusy ? formatMoney(totalLoc) : '$0.00'}
                                 </div>
                               </div>
                               {isBusy && (
-                                <span className="text-[11px] font-bold text-white/80">Gestionar →</span>
+                                <span className="text-xs font-bold text-white/80">Gestionar →</span>
                               )}
                             </div>
                           </div>
@@ -3085,7 +3141,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                       openOrders
                         .filter((o) => o.status === 'sent')
                         .map((order) => (
-                          <div key={order.id} className={`kds-ticket ${order.priority === 'alta' ? 'priority-alta' : ''}`}>
+                          <div key={order.id} className={`kds-ticket animate-in fade-in duration-300 ${order.priority === 'alta' ? 'priority-alta' : ''}`}>
                             <div className="flex items-start justify-between">
                               <div>
                                 <div className="text-sm font-bold text-white flex items-center gap-1.5">
@@ -3097,7 +3153,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                 </div>
                               </div>
                               {order.priority === 'alta' && (
-                                <span className="px-2 py-0.5 rounded text-[10px] bg-[#e05252] text-white font-bold">ALTA</span>
+                                <span className="px-2 py-0.5 rounded text-xs bg-[#e05252] text-white font-bold">ALTA</span>
                               )}
                             </div>
 
@@ -3111,14 +3167,14 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                     <div key={idx} className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-[#16191f]/70">
                                       <div className="min-w-0">
                                         <div className="font-bold text-white truncate">{i.qty} × {i.name}</div>
-                                        <div className="text-[10px] text-[#8b92a0] uppercase">{i.station || 'cocina'} · {st}</div>
-                                        {i.note && <span className="text-[11px] text-[#eed889] block">Nota: {i.note}</span>}
+                                        <div className="text-xs text-[#8b92a0] uppercase">{i.station || 'cocina'} · {st}</div>
+                                        {i.note && <span className="text-xs text-[#eed889] block">Nota: {i.note}</span>}
                                       </div>
                                       {nxt && (
                                         <button
                                           type="button"
                                           onClick={() => handleAdvanceItemStatus(order.id, i.key, nxt)}
-                                          className="px-2 py-1 rounded bg-[#e5a43b]/20 hover:bg-[#e5a43b] hover:text-black text-[#e5a43b] font-bold text-[10px] shrink-0"
+                                          className="px-2 py-1 rounded bg-[#e5a43b]/20 hover:bg-[#e5a43b] hover:text-black text-[#e5a43b] font-bold text-xs shrink-0"
                                         >
                                           ▶ Preparar
                                         </button>
@@ -3186,14 +3242,14 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                     <div key={idx} className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-[#16191f]/70">
                                       <div className="min-w-0">
                                         <div className="font-bold text-white truncate">{i.qty} × {i.name}</div>
-                                        <div className="text-[10px] text-[#8b92a0] uppercase">{i.station || 'cocina'} · {st}</div>
-                                        {i.note && <span className="text-[11px] text-[#eed889] block">Nota: {i.note}</span>}
+                                        <div className="text-xs text-[#8b92a0] uppercase">{i.station || 'cocina'} · {st}</div>
+                                        {i.note && <span className="text-xs text-[#eed889] block">Nota: {i.note}</span>}
                                       </div>
                                       {nxt && (
                                         <button
                                           type="button"
                                           onClick={() => handleAdvanceItemStatus(order.id, i.key, nxt)}
-                                          className="px-2 py-1 rounded bg-[#25d366]/20 hover:bg-[#25d366] hover:text-black text-[#25d366] font-bold text-[10px] shrink-0"
+                                          className="px-2 py-1 rounded bg-[#25d366]/20 hover:bg-[#25d366] hover:text-black text-[#25d366] font-bold text-xs shrink-0"
                                         >
                                           {nxt === 'ready' ? '✓ Listo' : nxt === 'served' ? '🍽️ Servido' : '▶ Preparar'}
                                         </button>
@@ -3256,13 +3312,13 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                   return (
                                     <div key={idx} className="flex items-center justify-between gap-2">
                                       <span className="font-medium text-white truncate">
-                                        {i.qty} × {i.name} <span className="text-[10px] text-[#8b92a0]">({st})</span>
+                                        {i.qty} × {i.name} <span className="text-xs text-[#8b92a0]">({st})</span>
                                       </span>
                                       {nxt === 'served' && (
                                         <button
                                           type="button"
                                           onClick={() => handleAdvanceItemStatus(order.id, i.key, 'served')}
-                                          className="px-2 py-0.5 rounded bg-[#173c34] text-[#25d366] font-bold text-[10px]"
+                                          className="px-2 py-0.5 rounded bg-[#173c34] text-[#25d366] font-bold text-xs"
                                         >
                                           🍽️ Servir
                                         </button>
@@ -3349,7 +3405,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                 <button
                                   type="button"
                                   onClick={() => handleOpenPreCheck(ord)}
-                                  className="px-2.5 py-1 rounded-lg bg-[#16191f] border border-white/15 text-[#eed889] text-[11px] font-semibold hover:border-[#d4af37] inline-flex items-center gap-1"
+                                  className="px-2.5 py-1 rounded-lg bg-[#16191f] border border-white/15 text-[#eed889] text-xs font-semibold hover:border-[#d4af37] inline-flex items-center gap-1"
                                 >
                                   <FileText className="w-3.5 h-3.5" /> Pre-cuenta
                                 </button>
@@ -3362,7 +3418,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                 <div key={idx} className="flex justify-between text-[#8b92a0]">
                                   <span>
                                     {i.qty} × {i.name}{' '}
-                                    <span className="text-[10px] uppercase text-[#d4af37]">
+                                    <span className="text-xs uppercase text-[#d4af37]">
                                       [{i.itemStatus || 'pending'}]
                                     </span>
                                   </span>
@@ -3658,7 +3714,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                               <span>{sale.receipt}</span>
                               <span className="text-[#8b92a0]">· {locationLabel(sale.service, sale.location)}</span>
                             </div>
-                            <div className="text-[11px] text-[#8b92a0]">
+                            <div className="text-xs text-[#8b92a0]">
                               {sale.paymentMethod.toUpperCase()} · {sale.waiter} · {new Date(sale.paidAt).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}
                             </div>
                           </div>
@@ -3683,32 +3739,38 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
           {/* VIEW 6: INVENTORY & STOCK */}
           {view === 'inventory' && (
-            <InventoryManagementView
-              state={state}
-              setState={setState}
-              firebaseUser={firebaseUser}
-              authorizedEmails={authorizedEmails}
-              notify={notify}
-              isFirebaseAdmin={isFirebaseAdmin}
-            />
+            <Suspense fallback={<div className="p-8 text-center text-[#d4af37]">Cargando inventario...</div>}>
+              <InventoryManagementView
+                state={state}
+                setState={setState}
+                firebaseUser={firebaseUser}
+                authorizedEmails={authorizedEmails}
+                notify={notify}
+                isFirebaseAdmin={isFirebaseAdmin}
+              />
+            </Suspense>
           )}
 
           {/* VIEW 7: REPORTS & PERFORMANCE ANALYTICS WITH RECHARTS */}
           {view === 'reports' && (
-            <PosAnalyticsDashboard state={state} />
+            <Suspense fallback={<div className="p-8 text-center text-[#d4af37]">Cargando reportes...</div>}>
+              <PosAnalyticsDashboard state={state} />
+            </Suspense>
           )}
 
           {/* VIEW 8: ADMIN DASHBOARD */}
           {view === 'admin' && (
-            <AdminDashboard
-              state={state}
-              setState={setState}
-              onClose={() => setView('pos')}
-              notify={notify}
-              firebaseUser={firebaseUser}
-              isFirebaseAdmin={isFirebaseAdmin}
-              workspaceOwnerUid={workspaceOwnerUid}
-            />
+            <Suspense fallback={<div className="p-8 text-center text-[#d4af37]">Cargando panel admin...</div>}>
+              <AdminDashboard
+                state={state}
+                setState={setState}
+                onClose={() => setView('pos')}
+                notify={notify}
+                firebaseUser={firebaseUser}
+                isFirebaseAdmin={isFirebaseAdmin}
+                workspaceOwnerUid={workspaceOwnerUid}
+              />
+            </Suspense>
           )}
         </div>
       </main>
@@ -3767,7 +3829,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
       {/* Printable Receipt Modal (Sale Ticket) */}
       {activeReceiptSale && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="bg-white/95 backdrop-blur-xl text-black rounded-[28px] max-w-sm w-full p-6 shadow-2xl border border-white/40 space-y-4">
             <div className="flex items-center justify-between pb-2 border-b border-gray-200">
               <h3 className="font-bold text-base tracking-tight">Ticket de Venta</h3>
@@ -3782,7 +3844,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
             <pre
               id="printable-receipt"
-              className="text-[11px] leading-tight font-mono bg-gray-50 p-4 rounded-2xl border border-gray-200 overflow-x-auto whitespace-pre"
+              className="text-xs leading-tight font-mono bg-gray-50 p-4 rounded-2xl border border-gray-200 overflow-x-auto whitespace-pre"
             >
               {printReceiptText(activeReceiptSale, state.config)}
             </pre>
@@ -3809,7 +3871,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
       {/* Printable Pre-Check Proforma Modal */}
       {activePreCheckOrder && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="bg-white/95 backdrop-blur-xl text-black rounded-[28px] max-w-sm w-full p-6 shadow-2xl border border-white/40 space-y-4">
             <div className="flex items-center justify-between pb-2 border-b border-gray-200">
               <h3 className="font-bold text-base tracking-tight">Pre-cuenta (Proforma)</h3>
@@ -3824,7 +3886,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
             <pre
               id="printable-receipt"
-              className="text-[11px] leading-tight font-mono bg-gray-50 p-4 rounded-2xl border border-gray-200 overflow-x-auto whitespace-pre"
+              className="text-xs leading-tight font-mono bg-gray-50 p-4 rounded-2xl border border-gray-200 overflow-x-auto whitespace-pre"
             >
               {printPreCheckText(activePreCheckOrder, state.config)}
             </pre>
@@ -3851,7 +3913,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
       {/* Reason Modal (Audited cancellation / discount) */}
       {modalReason && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal max-w-md w-full p-6 space-y-4 text-left">
             <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">{modalReason.title}</h3>
             <p className="text-xs text-[rgba(240,230,211,0.68)] leading-relaxed">
@@ -3895,7 +3957,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
       {/* Prompt Modal (Split / Discount) */}
       {promptModal && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal max-w-sm w-full p-6 space-y-4 text-left">
             <h3 className="font-serif font-bold text-base text-white tracking-[-0.02em]">{promptModal.title}</h3>
             <p className="text-xs text-[rgba(240,230,211,0.68)]">{promptModal.label}</p>
@@ -3931,7 +3993,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
       {/* Item Note Modal with 1-Tap Modifier Chips */}
       {itemNoteModal && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal max-w-md w-full p-6 space-y-4 text-left">
             <div className="flex items-center justify-between">
               <h3 className="font-serif font-bold text-base text-white tracking-[-0.02em]">Modificadores de Preparación</h3>
@@ -3969,7 +4031,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
             </div>
 
             <div>
-              <label className="block text-[11px] uppercase tracking-[0.06em] text-[rgba(240,230,211,0.58)] font-semibold mb-1.5">
+              <label className="block text-xs uppercase tracking-[0.06em] text-[rgba(240,230,211,0.58)] font-semibold mb-1.5">
                 Nota personalizada
               </label>
               <input
@@ -4009,7 +4071,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
       {/* Transfer / Merge Table Modal */}
       {moveTableModalOpen && selectedOrder && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal max-w-md w-full p-6 space-y-4 text-left">
             <div className="flex items-center justify-between">
               <h3 className="font-serif font-bold text-base text-white tracking-[-0.02em]">
@@ -4120,7 +4182,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
       {/* Cash Drawer Movement Modal (Ingreso / Retiro) */}
       {drawerModalType && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal max-w-sm w-full p-6 space-y-4 text-left">
             <div className="flex items-center justify-between">
               <h3 className="font-serif font-bold text-base text-white tracking-[-0.02em]">
@@ -4185,7 +4247,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
       {/* Inventory Intake / Adjust / MinStock Modal */}
       {inventoryModal && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal max-w-sm w-full p-6 space-y-4 text-left">
             <h3 className="font-serif font-bold text-base text-white tracking-[-0.02em]">
               {inventoryModal.type === 'entrada'
@@ -4263,7 +4325,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
       {/* iOS Table Quick-Action Sheet Modal */}
       {tableSheetLoc && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-end sm:items-center justify-center p-0 sm:p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-end sm:items-center justify-center p-0 sm:p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal w-full sm:max-w-lg rounded-b-none sm:rounded-[28px] p-6 space-y-4 text-left max-h-[85dvh] overflow-y-auto">
             {(() => {
               const ordersHere = state.orders.filter(
@@ -4452,7 +4514,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
       {/* iOS Navigation Drawer (Menú Desplegable de Navegación) */}
       {isNavDrawerOpen && (
-        <div className="fixed inset-0 z-50 ios-scrim flex justify-start">
+        <div className="fixed inset-0 z-50 ios-scrim flex justify-start" role="dialog" aria-modal="true">
           <div className="w-80 max-w-[85vw] h-full bg-[#16191f]/95 backdrop-blur-2xl border-r border-[#d4af37]/30 p-6 flex flex-col justify-between shadow-2xl overflow-y-auto animate-in slide-in-from-left duration-200">
             <div className="space-y-6">
               <div className="flex items-center justify-between pb-4 border-b border-white/10">
@@ -4460,7 +4522,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                   <BarbachuLogo className="w-8 h-auto" />
                   <div>
                     <h3 className="font-serif font-bold text-lg text-white">BARBACHU</h3>
-                    <p className="text-[10px] text-[#c8a84b] uppercase tracking-wider">Menú iOS · Navegación</p>
+                    <p className="text-xs text-[#c8a84b] uppercase tracking-wider">Menú iOS · Navegación</p>
                   </div>
                 </div>
                 <button
@@ -4479,7 +4541,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                 </div>
                 <div className="overflow-hidden min-w-0">
                   <div className="text-xs font-bold text-white truncate">{state.activeUser.name}</div>
-                  <div className="text-[10px] text-[#c8a84b] uppercase">{ROLE_LABELS[state.activeUser.role]} · {state.activeUser.area}</div>
+                  <div className="text-xs text-[#c8a84b] uppercase">{ROLE_LABELS[state.activeUser.role]} · {state.activeUser.area}</div>
                 </div>
               </div>
 
@@ -4514,7 +4576,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                       <Icon className="w-4 h-4 shrink-0" />
                       <span>{item.label}</span>
                       {typeof item.badge === 'number' && item.badge > 0 && (
-                        <span className={`ml-auto px-2 py-0.5 rounded-full text-[10px] font-bold ${isActive ? 'bg-black text-white' : 'bg-[#d4af37] text-black'}`}>
+                        <span className={`ml-auto px-2 py-0.5 rounded-full text-xs font-bold ${isActive ? 'bg-black text-white' : 'bg-[#d4af37] text-black'}`}>
                           {item.badge}
                         </span>
                       )}
@@ -4577,7 +4639,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
       {/* Device Connection & Sync Manager Modal */}
       {isDeviceModalOpen && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="ios-glass-modal w-full max-w-lg rounded-[28px] p-6 space-y-5 text-left max-h-[90dvh] overflow-y-auto">
             <div className="flex items-start justify-between gap-3 pb-3 border-b border-white/10">
               <div className="flex items-center gap-3">
@@ -4632,7 +4694,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                       <option value="barra">Monitor KDS Barra (Sólo bebidas y coctelería)</option>
                     </select>
                   </div>
-                  <div className="text-[11px] text-[rgba(240,230,211,0.6)]">
+                  <div className="text-xs text-[rgba(240,230,211,0.6)]">
                     Estación actual: <strong className="text-white">{state.deviceConfig?.stationName || 'Terminal Central'}</strong>. Todas las comandas, KDS de cocina/barra y cortes de caja se sincronizan instantáneamente en todos los dispositivos conectados a esta base en la nube.
                   </div>
                 </div>
@@ -4642,11 +4704,11 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                 <h4 className="text-xs font-bold text-[#c8a84b] uppercase tracking-wider">Estado de Sincronización Multi-Dispositivo</h4>
                 <div className="grid grid-cols-2 gap-3 text-xs pt-1">
                   <div className="p-3 rounded-xl bg-white/[0.03] border border-white/5">
-                    <div className="text-[10px] text-[#8b92a0]">Latencia Cloud</div>
+                    <div className="text-xs text-[#8b92a0]">Latencia Cloud</div>
                     <div className="font-mono font-bold text-[#25d366] text-sm mt-0.5">18 ms (Óptima)</div>
                   </div>
                   <div className="p-3 rounded-xl bg-white/[0.03] border border-white/5">
-                    <div className="text-[10px] text-[#8b92a0]">Cuentas Abiertas</div>
+                    <div className="text-xs text-[#8b92a0]">Cuentas Abiertas</div>
                     <div className="font-mono font-bold text-white text-sm mt-0.5">{openOrders.length} activas</div>
                   </div>
                 </div>

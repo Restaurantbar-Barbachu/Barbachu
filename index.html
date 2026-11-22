@@ -3,29 +3,53 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="description" content="Menú digital y sistema de punto de venta (POS) para Barbachu Restaurante Bar con toma de comandas, control de caja e inventario." />
+    <meta name="description" content="Menú digital y sistema de punto de venta para Barbachu Restaurante Bar con toma de comandas, control de caja e inventario." />
     <meta name="theme-color" content="#0a0a0b" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a0a0b'/%3E%3Ctext x='32' y='45' font-family='Georgia, serif' font-size='36' font-weight='700' fill='%23c8a84b' text-anchor='middle'%3EB%3C/text%3E%3C/svg%3E" />
-    <title>Barbachu — Restaurante Bar & POS</title>
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="canonical" href="https://barbachu.ai.studio" />
+    <title>Barbachu — Restaurante Bar · Menú</title>
     
     <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="Barbachu — Restaurante Bar & POS" />
-    <meta property="og:title" content="Barbachu — Restaurante Bar & POS" />
-    <meta property="og:description" content="Menú digital y sistema de punto de venta (POS) para Barbachu Restaurante Bar con toma de comandas, control de caja e inventario." />
-    <meta property="og:image" content="/og-image.png" />
+    <meta property="og:site_name" content="Barbachu" />
+    <meta property="og:title" content="Barbachu — Restaurante Bar · Menú" />
+    <meta property="og:description" content="Menú digital y sistema de punto de venta para Barbachu Restaurante Bar." />
+    <meta property="og:image" content="https://barbachu.ai.studio/og-image.png" />
+    <meta property="og:url" content="https://barbachu.ai.studio" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Barbachu — Restaurante Bar & POS" />
-    <meta name="twitter:description" content="Menú digital y sistema de punto de venta (POS) para Barbachu Restaurante Bar — Poza Rica #4984, San Pedrito." />
-    <meta name="twitter:image" content="/og-image.png" />
+    <meta name="twitter:title" content="Barbachu — Restaurante Bar · Menú" />
+    <meta name="twitter:description" content="Menú digital y sistema de punto de venta para Barbachu Restaurante Bar — Poza Rica #4984, San Pedrito." />
+    <meta name="twitter:image" content="https://barbachu.ai.studio/og-image.png" />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Restaurant",
+        "name": "Barbachu Restaurante Bar",
+        "image": "https://barbachu.ai.studio/og-image.png",
+        "url": "https://barbachu.ai.studio",
+        "telephone": "",
+        "address": {
+          "@type": "PostalAddress",
+          "streetAddress": "Poza Rica #4984",
+          "addressLocality": "Tlaquepaque",
+          "addressRegion": "Jal.",
+          "postalCode": "45600",
+          "addressCountry": "MX"
+        },
+        "servesCuisine": "Bar & Restaurante",
+        "priceRange": "$$"
+      }
+    </script>
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=Playfair+Display:ital,wght@0,400..900;1,400..900&display=swap" rel="stylesheet" />
   </head>
-  <body class="bg-[#0e1013] text-[#f0f2f5] font-sans antialiased min-h-screen">
+  <body class="bg-[#0e1013] text-[#f0f2f5] font-sans antialiased min-h-dvh">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

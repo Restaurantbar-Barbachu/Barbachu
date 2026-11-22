@@ -65,6 +65,14 @@ const CustomTooltip = ({ active, payload, label }: {
   return null;
 };
 
+const toLocalDateKey = (dateInput: Date | string): string => {
+  const d = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
 export const PosAnalyticsDashboard: React.FC<PosAnalyticsDashboardProps> = ({ state }) => {
   const [timeRange, setTimeRange] = useState<'hoy' | 'semana' | 'mes'>('hoy');
   const [productMetric, setProductMetric] = useState<'revenue' | 'units'>('revenue');
@@ -72,9 +80,9 @@ export const PosAnalyticsDashboard: React.FC<PosAnalyticsDashboardProps> = ({ st
 
   const filteredSales = useMemo(() => {
     const now = new Date();
-    const todayKey = now.toISOString().slice(0, 10);
+    const todayKey = toLocalDateKey(now);
     if (timeRange === 'hoy') {
-      return state.sales.filter((s) => s.paidAt.slice(0, 10) === todayKey);
+      return state.sales.filter((s) => toLocalDateKey(s.paidAt) === todayKey);
     }
     const cutoff = new Date(now);
     cutoff.setDate(cutoff.getDate() - (timeRange === 'semana' ? 7 : 30));
@@ -105,7 +113,7 @@ export const PosAnalyticsDashboard: React.FC<PosAnalyticsDashboardProps> = ({ st
   const dailySalesData = useMemo(() => {
     const dateMap = new Map<string, { revenueCents: number; count: number }>();
     state.sales.forEach((s) => {
-      const dateKey = s.paidAt.slice(0, 10);
+      const dateKey = toLocalDateKey(s.paidAt);
       const curr = dateMap.get(dateKey) || { revenueCents: 0, count: 0 };
       curr.revenueCents += s.totalCents;
       curr.count += 1;
@@ -117,7 +125,7 @@ export const PosAnalyticsDashboard: React.FC<PosAnalyticsDashboardProps> = ({ st
     for (let i = 6; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
-      const dateKey = d.toISOString().slice(0, 10);
+      const dateKey = toLocalDateKey(d);
       const dayName = days[d.getDay()];
       const dayNum = d.getDate();
       const liveData = dateMap.get(dateKey);

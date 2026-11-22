@@ -120,7 +120,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [newProdName, setNewProdName] = useState<string>('');
   const [newProdKey, setNewProdKey] = useState<string>('');
   const [newProdPrice, setNewProdPrice] = useState<string>('');
-  const [newProdCat, setNewProdCat] = useState<string>('PLATILLOS');
+  const [newProdCat, setNewProdCat] = useState<string>('BOTANAS');
   const [customCat, setCustomCat] = useState<string>('');
   const [batchPercent, setBatchPercent] = useState<string>('');
   const [confirmDeleteProd, setConfirmDeleteProd] = useState<SoftProduct | null>(null);
@@ -169,6 +169,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     String(state.config.autoLockMinutes ?? state.deviceConfig?.autoLockMinutes ?? 0)
   );
   const [savingConfig, setSavingConfig] = useState<boolean>(false);
+
+  useEffect(() => {
+    setCfgName(state.config.name || 'Barbachu');
+    setCfgTagline(state.config.tagline || 'Restaurante Bar');
+    setCfgAddress(state.config.address || '');
+    setCfgPhone(state.config.phone || '');
+    setCfgFooter(state.config.receiptFooter || '¡Gracias por su preferencia!');
+    setCfgTipPct(String(state.config.suggestedTipPct ?? 10));
+    setCfgAutoLock(String(state.config.autoLockMinutes ?? state.deviceConfig?.autoLockMinutes ?? 0));
+  }, [state.config, state.deviceConfig?.autoLockMinutes]);
 
   const [cleanLegacyStaff, setCleanLegacyStaff] = useState<boolean>(true);
   const [cleanInventory, setCleanInventory] = useState<boolean>(true);
@@ -497,6 +507,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       notify('Define un PIN numérico de exactamente 4 dígitos.');
       return;
     }
+    if ((state.users || []).some((u) => u.pin === pin)) {
+      notify('Ese PIN ya está asignado a otro empleado. Elige un código único.');
+      return;
+    }
 
     const emailNormalized = newUserEmail.trim().toLowerCase();
     const newUser: PosUser = {
@@ -583,6 +597,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const cleanPin = editUserPin.trim();
     if (!/^\d{4}$/.test(cleanPin)) {
       notify('El PIN debe tener exactamente 4 dígitos numéricos.');
+      return;
+    }
+    if ((state.users || []).some((u) => u.id !== editingUser.id && u.pin === cleanPin)) {
+      notify('Ese PIN ya está asignado a otro empleado. Elige un código único.');
       return;
     }
 
@@ -1204,13 +1222,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </thead>
               <tbody className="divide-y divide-white/[0.06]">
                 {filteredProducts.map((prod) => {
+                  const basePriceStr = String(prod.priceCents / 100);
                   const isDirty =
                     inlinePrices[prod.key] !== undefined &&
-                    inlinePrices[prod.key] !== String(prod.sourcePrice || prod.priceCents / 100);
+                    inlinePrices[prod.key] !== basePriceStr;
                   const currentVal =
                     inlinePrices[prod.key] !== undefined
                       ? inlinePrices[prod.key]
-                      : String(prod.sourcePrice || prod.priceCents / 100);
+                      : basePriceStr;
 
                   return (
                     <tr key={prod.key} className="hover:bg-white/[0.03]">
@@ -1317,6 +1336,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <span>Nuevo Empleado</span>
             </button>
           </div>
+
+          {(state.users || []).some((u) => u.role === 'admin' && u.pin === '0000') && (
+            <div className="p-3.5 rounded-2xl bg-[#e5a43b]/15 border border-[#e5a43b]/45 text-xs text-[#e8d090] flex items-center gap-2.5">
+              <AlertTriangle className="w-4 h-4 shrink-0 text-[#e5a43b]" />
+              <span>
+                Seguridad: Hay una cuenta de Administrador con el PIN predeterminado <strong>0000</strong>. Edítala para asignar un PIN secreto.
+              </span>
+            </div>
+          )}
 
           {/* Search & Apple Role Segmented Filter */}
           <div className="p-4 ios-glass-card flex flex-col lg:flex-row lg:items-center justify-between gap-3">

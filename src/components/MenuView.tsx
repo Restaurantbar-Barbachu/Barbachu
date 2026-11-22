@@ -123,9 +123,12 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
       const scrollPos = scrollY + 140;
       for (let i = chips.length - 1; i >= 0; i--) {
         const el = document.getElementById(chips[i].id);
-        if (el && el.offsetTop <= scrollPos) {
-          setActiveSection(chips[i].id);
-          break;
+        if (el) {
+          const top = el.getBoundingClientRect().top + window.scrollY;
+          if (top <= scrollPos) {
+            setActiveSection(chips[i].id);
+            break;
+          }
         }
       }
     };
@@ -147,8 +150,14 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
     }
   };
 
-  const getWhatsAppUrl = (item: MenuItemData) => {
-    const msg = `Hola, quiero pedir: ${item.name} (${item.price})`;
+  const getWhatsAppUrl = (item?: MenuItemData) => {
+    const msg = item
+      ? `Hola, quiero pedir: ${item.name} (${item.price})`
+      : 'Hola, quiero hacer un pedido';
+    const staticWa = String(import.meta.env.VITE_WA_NUMBER || '').replace(/\D/g, '');
+    if (staticWa.length >= 10) {
+      return `https://wa.me/${staticWa}?text=${encodeURIComponent(msg)}`;
+    }
     return `/api/pedir?t=${encodeURIComponent(msg)}`;
   };
 
@@ -400,7 +409,7 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
 
       {/* Protected WhatsApp Floating Action Button (uses /api/pedir server redirect) */}
       <a
-        href="/api/pedir?t=Hola%2C%20quiero%20hacer%20un%20pedido"
+        href={getWhatsAppUrl()}
         target="_blank"
         rel="noopener noreferrer nofollow"
         aria-label="Pedir por WhatsApp"

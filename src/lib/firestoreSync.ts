@@ -93,6 +93,9 @@ export function sanitizeOrderItemsForFirestore(items: OrderItem[]) {
       priceCents: Math.max(0, Math.round(Number(it.priceCents) || 0)),
       qty: Math.min(99, Math.max(1, Math.round(Number(it.qty) || 1))),
     };
+    if (it.lineId && String(it.lineId).trim()) {
+      clean.lineId = sanitizeFirestoreId(it.lineId, 'ln').slice(0, 64);
+    }
     if (it.note && it.note.trim()) clean.note = boundStr(it.note, 200);
     clean.station = it.station === 'barra' ? 'barra' : 'cocina';
     clean.itemStatus =
@@ -255,6 +258,7 @@ export async function bootstrapWorkspace(user: User): Promise<{
         suggestedTipPct: Math.min(30, Math.max(0, Math.round(Number(DEFAULT_CONFIG.suggestedTipPct) || 0))),
         autoLockMinutes: Math.min(120, Math.max(0, Math.round(Number(DEFAULT_CONFIG.autoLockMinutes) || 0))),
         nextOrderNumber: 1,
+        nextReceiptNumber: 1,
         permissions: DEFAULT_PERMISSIONS,
         authorizedEmails: emails,
         ownerUid: sanitizeFirestoreId(user.uid, 'adm'),
@@ -365,6 +369,7 @@ export interface WorkspaceCallbacks {
   onConfig: (data: {
     config: RestaurantConfig;
     nextOrderNumber: number;
+    nextReceiptNumber: number;
     permissions: Record<UserRole, RolePermissions>;
     authorizedEmails: string[];
     ownerUid: string;
@@ -383,7 +388,7 @@ export interface WorkspaceCallbacks {
 
 export function subscribePosWorkspace(
   user: User,
-  isAdmin: boolean,
+  _isAdmin: boolean,
   callbacks: WorkspaceCallbacks
 ): () => void {
   const email = (user.email || '').toLowerCase();
@@ -391,7 +396,7 @@ export function subscribePosWorkspace(
 
   const scopedQuery = (colName: string): Query<DocumentData> => {
     const colRef = collection(db, colName);
-    if (isBootstrapAdmin || isAdmin) return colRef;
+    if (isBootstrapAdmin) return colRef;
     return query(colRef, where('authorizedEmails', 'array-contains', email));
   };
 
@@ -424,6 +429,7 @@ export function subscribePosWorkspace(
             autoLockMinutes: typeof d.autoLockMinutes === 'number' ? d.autoLockMinutes : 0,
           },
           nextOrderNumber: Number(d.nextOrderNumber) || 1,
+          nextReceiptNumber: Number(d.nextReceiptNumber) || 1,
           permissions: (d.permissions as Record<UserRole, RolePermissions>) || DEFAULT_PERMISSIONS,
           authorizedEmails: Array.isArray(d.authorizedEmails) ? d.authorizedEmails : [BOOTSTRAPPED_ADMIN_EMAIL],
           ownerUid: String(d.ownerUid || user.uid),
@@ -474,8 +480,9 @@ export function subscribePosWorkspace(
             note: String(x.note || ''),
             customer: x.customer || undefined,
             items: Array.isArray(x.items)
-              ? x.items.map((it: OrderItem) => ({
+              ? x.items.map((it: OrderItem, idx: number) => ({
                   ...it,
+                  lineId: it.lineId || `${it.key}-${idx}`,
                   note: it.note || '',
                   station: it.station || 'cocina',
                   itemStatus: it.itemStatus || 'pending',
@@ -511,7 +518,12 @@ export function subscribePosWorkspace(
             location: String(x.location || '1'),
             table: String(x.table || x.location || '1'),
             waiter: String(x.waiter || 'Staff'),
-            items: Array.isArray(x.items) ? x.items : [],
+            items: Array.isArray(x.items)
+              ? x.items.map((it: OrderItem, idx: number) => ({
+                  ...it,
+                  lineId: it.lineId || `${it.key}-${idx}`,
+                }))
+              : [],
             subtotalCents: Number(x.subtotalCents) || 0,
             discountCents: Number(x.discountCents) || 0,
             totalCents: Number(x.totalCents) || 0,
@@ -814,26 +826,26 @@ export async function fsSaveOrder(
   authorizedEmails: string[],
   auditEntry: AuditLogEntry
 ): Promise<void> {
+  if (!isNew) {
+    return fsUpdateOrder(order, user, authorizedEmails, auditEntry);
+  }
   const ordId = sanitizeFirestoreId(order.id, 'ord');
   const path = `orders/${ordId}`;
   try {
     const batch = writeBatch(db);
     batch.set(
       doc(db, 'orders', ordId),
-      buildOrderPayload(order, user.uid, authorizedEmails, isNew),
-      { merge: !isNew }
+      buildOrderPayload(order, user.uid, authorizedEmails, true)
     );
-    if (isNew) {
-      batch.update(doc(db, 'pos_config', 'main'), {
-        nextOrderNumber: increment(1),
-        updatedAt: serverTimestamp(),
-      });
-    }
+    batch.update(doc(db, 'pos_config', 'main'), {
+      nextOrderNumber: increment(1),
+      updatedAt: serverTimestamp(),
+    });
     const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
     batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
     await batch.commit();
   } catch (error) {
-    handleFirestoreError(error, isNew ? OperationType.CREATE : OperationType.UPDATE, path);
+    handleFirestoreError(error, OperationType.CREATE, path);
   }
 }
 
@@ -986,6 +998,11 @@ export async function fsCloseAndPayOrder(
       transferSalesCents: Math.max(0, Math.round(updatedShift.transferSalesCents)),
       totalSalesCents: Math.max(0, Math.round(updatedShift.totalSalesCents)),
       expectedCashCents: Math.max(0, Math.round(updatedShift.expectedCashCents)),
+    });
+
+    batch.update(doc(db, 'pos_config', 'main'), {
+      nextReceiptNumber: increment(1),
+      updatedAt: serverTimestamp(),
     });
 
     const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
@@ -1159,26 +1176,43 @@ export async function fsUpdatePosPermissionsAndEmails(
     await setDoc(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, emails));
 
     // Propagate authorizedEmails to workspace collections so newly authorized operators can list them
-    const colsToSync = ['orders', 'shifts', 'inventory', 'staff_users', 'staff_clock'] as const;
+    const callerEmail = (user.email || '').toLowerCase();
+    const isBootstrap = Boolean(user.emailVerified && callerEmail === BOOTSTRAPPED_ADMIN_EMAIL);
+    const colsToSync = ['orders', 'sales', 'shifts', 'inventory', 'staff_users', 'staff_clock'] as const;
     for (const colName of colsToSync) {
-      const snap = await getDocs(collection(db, colName));
+      const colQ = isBootstrap
+        ? collection(db, colName)
+        : query(collection(db, colName), where('authorizedEmails', 'array-contains', callerEmail));
+      const snap = await getDocs(colQ);
       if (snap.empty) continue;
-      const batch = writeBatch(db);
-      let count = 0;
-      for (const d of snap.docs) {
-        if (colName === 'inventory' || colName === 'orders' || colName === 'shifts' || colName === 'staff_users' || colName === 'staff_clock') {
+      for (let i = 0; i < snap.docs.length; i += 400) {
+        const slice = snap.docs.slice(i, i + 400);
+        const batch = writeBatch(db);
+        for (const d of slice) {
           const updateData: Record<string, unknown> = { authorizedEmails: emails };
-          if (colName === 'inventory') updateData.updatedAt = serverTimestamp();
-          if (colName === 'orders') updateData.updatedAt = serverTimestamp();
+          if (colName === 'inventory' || colName === 'orders') {
+            updateData.updatedAt = serverTimestamp();
+          }
           batch.update(d.ref, updateData);
-          count++;
         }
-        if (count >= 400) break;
+        await batch.commit();
       }
-      if (count > 0) await batch.commit();
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, 'pos_config/main');
+  }
+}
+
+export async function fsRecordAudit(
+  auditEntry: AuditLogEntry,
+  user: User,
+  authorizedEmails: string[]
+): Promise<void> {
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+  try {
+    await setDoc(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `audit_logs/${audId}`);
   }
 }
 
@@ -1381,6 +1415,7 @@ export async function fsCleanupDemoData(
       });
       batch.update(doc(db, 'pos_config', 'main'), {
         nextOrderNumber: 1,
+        nextReceiptNumber: 1,
         phone: '',
         whatsappNumber: '',
         updatedAt: serverTimestamp(),
@@ -1399,7 +1434,12 @@ export async function fsCleanupDemoData(
 
 export async function fsFetchStaffUsersSnapshot(user: User, _isAdmin: boolean): Promise<PosUser[]> {
   try {
-    const snap = await getDocs(collection(db, 'staff_users'));
+    const callerEmail = (user.email || '').toLowerCase();
+    const isBootstrap = Boolean(user.emailVerified && callerEmail === BOOTSTRAPPED_ADMIN_EMAIL);
+    const staffQ = isBootstrap
+      ? collection(db, 'staff_users')
+      : query(collection(db, 'staff_users'), where('authorizedEmails', 'array-contains', callerEmail));
+    const snap = await getDocs(staffQ);
     const list: PosUser[] = snap.docs.map((d) => {
       const data = d.data();
       return {
@@ -1490,7 +1530,15 @@ export async function fsVerifyAnyAdminPinFromFirestore(
   }
 
   try {
-    const q = query(collection(db, 'staff_users'), where('role', '==', 'admin'));
+    const callerEmail = (user.email || '').toLowerCase();
+    const isBootstrap = Boolean(user.emailVerified && callerEmail === BOOTSTRAPPED_ADMIN_EMAIL);
+    const q = isBootstrap
+      ? query(collection(db, 'staff_users'), where('role', '==', 'admin'))
+      : query(
+          collection(db, 'staff_users'),
+          where('role', '==', 'admin'),
+          where('authorizedEmails', 'array-contains', callerEmail)
+        );
     const snap = await getDocs(q);
     for (const d of snap.docs) {
       const data = d.data();

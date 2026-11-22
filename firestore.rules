@@ -71,7 +71,8 @@ service cloud.firestore {
         items.size() <= 100 &&
         items[0] is map &&
         items[0].keys().hasAll(['key', 'name', 'priceCents', 'qty']) &&
-        items[0].keys().hasOnly(['key', 'name', 'priceCents', 'qty', 'note', 'station', 'itemStatus']) &&
+        items[0].keys().hasOnly(['lineId', 'key', 'name', 'priceCents', 'qty', 'note', 'station', 'itemStatus']) &&
+        (!('lineId' in items[0]) || (items[0].lineId is string && items[0].lineId.size() <= 64)) &&
         items[0].key is string && items[0].key.size() >= 1 && items[0].key.size() <= 64 &&
         items[0].name is string && items[0].name.size() >= 1 && items[0].name.size() <= 120 &&
         items[0].priceCents is int && items[0].priceCents >= 0 &&
@@ -106,7 +107,7 @@ service cloud.firestore {
 
     function isValidPosConfig(data) {
       return data.keys().hasAll(['name', 'currency', 'nextOrderNumber', 'permissions', 'authorizedEmails', 'ownerUid', 'updatedAt']) &&
-        data.keys().hasOnly(['name', 'tagline', 'address', 'phone', 'currency', 'whatsappNumber', 'receiptFooter', 'suggestedTipPct', 'autoLockMinutes', 'nextOrderNumber', 'permissions', 'authorizedEmails', 'ownerUid', 'updatedAt']) &&
+        data.keys().hasOnly(['name', 'tagline', 'address', 'phone', 'currency', 'whatsappNumber', 'receiptFooter', 'suggestedTipPct', 'autoLockMinutes', 'nextOrderNumber', 'nextReceiptNumber', 'permissions', 'authorizedEmails', 'ownerUid', 'updatedAt']) &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
         (!('tagline' in data) || (data.tagline is string && data.tagline.size() <= 120)) &&
         (!('address' in data) || (data.address is string && data.address.size() <= 200)) &&
@@ -117,6 +118,7 @@ service cloud.firestore {
         (!('suggestedTipPct' in data) || (data.suggestedTipPct is int && data.suggestedTipPct >= 0 && data.suggestedTipPct <= 30)) &&
         (!('autoLockMinutes' in data) || (data.autoLockMinutes is int && data.autoLockMinutes >= 0 && data.autoLockMinutes <= 120)) &&
         data.nextOrderNumber is int && data.nextOrderNumber >= 1 &&
+        (!('nextReceiptNumber' in data) || (data.nextReceiptNumber is int && data.nextReceiptNumber >= 1)) &&
         data.permissions is map &&
         isValidEmailList(data.authorizedEmails) &&
         data.ownerUid is string && data.ownerUid.size() <= 128 && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
@@ -341,7 +343,7 @@ service cloud.firestore {
         (
           isAdmin() ||
           (canReadWorkspaceDoc() &&
-           incoming().diff(existing()).affectedKeys().hasOnly(['nextOrderNumber', 'updatedAt']))
+           incoming().diff(existing()).affectedKeys().hasOnly(['nextOrderNumber', 'nextReceiptNumber', 'updatedAt']))
         );
       allow delete: if false;
     }
@@ -353,7 +355,6 @@ service cloud.firestore {
       allow create: if isValidId(productId) &&
         isAdmin() &&
         isValidProduct(incoming()) &&
-        incoming().ownerUid == request.auth.uid &&
         incoming().updatedAt == request.time;
       allow update: if isValidId(productId) &&
         isAdmin() &&

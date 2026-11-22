@@ -48,6 +48,7 @@ export type ItemStatus = 'pending' | 'preparing' | 'ready' | 'served';
 export type StationType = 'cocina' | 'barra';
 
 export interface OrderItem {
+  lineId?: string;
   key: string;
   name: string;
   priceCents: number;
@@ -225,6 +226,7 @@ export interface FullPosState {
   inventory: Record<number, InventoryItem>;
   inventoryMovements: InventoryMovement[];
   nextOrderNumber: number;
+  nextReceiptNumber?: number;
   users: PosUser[];
   activeUser: PosUser;
   permissions: Record<UserRole, RolePermissions>;

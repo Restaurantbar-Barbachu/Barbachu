@@ -286,7 +286,8 @@ export function closeAndPayOrder(
   if (!order) throw new Error('No se encontró la comanda pendiente para cobrar.');
 
   const now = new Date().toISOString();
-  const receiptFolio = `BC-${String(state.sales.length + 1).padStart(5, '0')}`;
+  const nextReceiptNum = state.nextReceiptNumber || state.sales.length + 1;
+  const receiptFolio = `BC-${String(nextReceiptNum).padStart(5, '0')}`;
 
   const sale: Sale = {
     id: uid(),
@@ -334,6 +335,7 @@ export function closeAndPayOrder(
     orders: updatedOrders,
     sales: [...state.sales, sale],
     shift,
+    nextReceiptNumber: nextReceiptNum + 1,
   };
 
   nextState = addAudit(

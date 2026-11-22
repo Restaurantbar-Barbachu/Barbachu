@@ -102,6 +102,9 @@
         "nextOrderNumber": {
           "type": "integer"
         },
+        "nextReceiptNumber": {
+          "type": "integer"
+        },
         "permissions": {
           "type": "object"
         },

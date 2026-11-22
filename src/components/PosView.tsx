@@ -68,6 +68,7 @@ import {
   BOOTSTRAPPED_ADMIN_EMAIL,
   signInWithGoogle,
   signOutFirebase,
+  testConnection,
 } from '../lib/firebase';
 import {
   bootstrapWorkspace,
@@ -77,6 +78,7 @@ import {
   fsCloseShift,
   fsMergeOrders,
   fsOpenNewShift,
+  fsRecordAudit,
   fsRecordCashDrawerMovement,
   fsSaveInventoryMovement,
   fsSaveOrder,
@@ -133,6 +135,14 @@ function formatElapsedTime(createdAt: string, nowMs: number): string {
   return `${h}h ${m}m`;
 }
 
+function toLocalDateKey(dateInput: Date | string): string {
+  const d = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 interface PosViewProps {
   onSwitchToMenu?: () => void;
 }
@@ -185,6 +195,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [payOrderId, setPayOrderId] = useState<string>('');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('efectivo');
   const [cashTendered, setCashTendered] = useState<string>('');
+  const [mixedCashInput, setMixedCashInput] = useState<string>('');
   const [physicalCashCount, setPhysicalCashCount] = useState<string>('');
   const [openingCashInput, setOpeningCashInput] = useState<string>('0');
   const [confirmUnservedPay, setConfirmUnservedPay] = useState<boolean>(false);
@@ -201,7 +212,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [reasonInput, setReasonInput] = useState<string>('');
   const [promptModal, setPromptModal] = useState<{ title: string; label: string; defaultValue?: string; onConfirm: (val: string) => void } | null>(null);
   const [promptValue, setPromptValue] = useState<string>('');
-  const [itemNoteModal, setItemNoteModal] = useState<{ key: string; name: string } | null>(null);
+  const [itemNoteModal, setItemNoteModal] = useState<{ targetId: string; name: string } | null>(null);
   const [itemNoteValue, setItemNoteValue] = useState<string>('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -211,7 +222,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [moveTargetLocation, setMoveTargetLocation] = useState<string>('1');
 
   // Inventory Modal
-  const [inventoryModal, setInventoryModal] = useState<{ clave: number; descripcion: string; type: 'entrada' | 'ajuste' | 'minStock' } | null>(null);
+  const [inventoryModal, setInventoryModal] = useState<{ clave: number; descripcion: string; type: 'entrada' | 'ajuste' | 'merma' | 'minStock' } | null>(null);
   const [invQty, setInvQty] = useState<string>('');
   const [invCost, setInvCost] = useState<string>('');
   const [invReason, setInvReason] = useState<string>('');
@@ -286,6 +297,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     let unsubWorkspace: (() => void) | null = null;
 
     setCloudBooting(true);
+    void testConnection();
     bootstrapWorkspace(firebaseUser)
       .then((res) => {
         if (!active) return;
@@ -306,12 +318,13 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         }
 
         unsubWorkspace = subscribePosWorkspace(firebaseUser, res.isAdmin, {
-          onConfig: ({ config, nextOrderNumber, permissions, authorizedEmails, ownerUid }) => {
+          onConfig: ({ config, nextOrderNumber, nextReceiptNumber, permissions, authorizedEmails, ownerUid }) => {
             setWorkspaceOwnerUid(ownerUid);
             setState((prev) => ({
               ...prev,
               config,
               nextOrderNumber,
+              nextReceiptNumber,
               permissions,
               authorizedEmails,
             }));
@@ -427,17 +440,37 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     canViewAdmin,
   ]);
 
+  // Detect external closure/payment of currently loaded order on another terminal
+  useEffect(() => {
+    if (!currentOrderId) return;
+    const found = state.orders.find((o) => o.id === currentOrderId);
+    if (!found || found.status === 'closed') {
+      setCurrentOrderId(null);
+      setCart([]);
+      setGeneralNote('');
+      notify('La cuenta cargada fue cobrada o cerrada en otra terminal.');
+    }
+  }, [state.orders, currentOrderId]);
+
   // Categories list from live products
   const categories = useMemo(() => {
     const set = new Set(state.products.map((p) => p.category).filter(Boolean));
     return ['TODOS', ...Array.from(set).sort((a, b) => a.localeCompare(b, 'es'))];
   }, [state.products]);
 
+  const catalogModifiers = useMemo(
+    () => state.products.filter((p) => p.category === 'MODIFICADORES'),
+    [state.products]
+  );
+
   // Filtered products for POS (category + station + search)
   const filteredProducts = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return state.products.filter((p) => {
-      const matchCat = selectedCategory === 'TODOS' || p.category === selectedCategory;
+      const matchCat =
+        selectedCategory === 'TODOS'
+          ? p.category !== 'MODIFICADORES'
+          : p.category === selectedCategory;
       const station = p.station || classifyProductStation(p.category);
       const matchStation = posStationFilter === 'todas' || station === posStationFilter;
       const matchQ = !q || p.name.toLowerCase().includes(q) || p.key.toLowerCase().includes(q) || p.category.toLowerCase().includes(q);
@@ -521,8 +554,12 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     notify(`Nueva cuenta preparada en ${locationLabel(currentService, currentTable)}.`);
   };
 
-  // Add product to cart
+  // Add product to cart (respects role permission and creates independent rounds when items already sent/noted)
   const handleAddProduct = (prod: SoftProduct) => {
+    if (!activePerms?.canTakeOrders && !isAdminRole) {
+      notify(`Tu rol (${activeRole.toUpperCase()}) no tiene permiso para tomar comandas.`);
+      return;
+    }
     if (!prod.saleEnabled) {
       notify(`El producto "${prod.name}" tiene precio pendiente.`);
       return;
@@ -530,7 +567,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     const station = prod.station || classifyProductStation(prod.category);
 
     setCart((prev) => {
-      const idx = prev.findIndex((i) => i.key === prod.key);
+      const idx = prev.findIndex(
+        (i) => i.key === prod.key && (i.itemStatus || 'pending') === 'pending' && !i.note
+      );
       if (idx >= 0) {
         const copy = [...prev];
         copy[idx] = { ...copy[idx], qty: copy[idx].qty + 1 };
@@ -539,6 +578,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       return [
         ...prev,
         {
+          lineId: uid(),
           key: prod.key,
           name: prod.name,
           priceCents: prod.priceCents,
@@ -552,18 +592,34 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     notify(`+1 ${prod.name}`);
   };
 
-  const handleUpdateQty = (key: string, delta: number) => {
+  const handleUpdateQty = (targetId: string, delta: number) => {
     setCart((prev) =>
       prev
-        .map((i) => (i.key === key ? { ...i, qty: i.qty + delta } : i))
+        .map((i) => ((i.lineId || i.key) === targetId ? { ...i, qty: i.qty + delta } : i))
         .filter((i) => i.qty > 0)
     );
   };
 
-  const handleEditItemNote = (key: string) => {
-    const item = cart.find((i) => i.key === key);
+  const handleDecrementProductByKey = (prodKey: string) => {
+    setCart((prev) => {
+      const revIdx = [...prev].reverse().findIndex((i) => i.key === prodKey);
+      if (revIdx < 0) return prev;
+      const realIdx = prev.length - 1 - revIdx;
+      const next = [...prev];
+      const nextQty = next[realIdx].qty - 1;
+      if (nextQty <= 0) {
+        next.splice(realIdx, 1);
+      } else {
+        next[realIdx] = { ...next[realIdx], qty: nextQty };
+      }
+      return next;
+    });
+  };
+
+  const handleEditItemNote = (targetId: string) => {
+    const item = cart.find((i) => (i.lineId || i.key) === targetId);
     if (!item) return;
-    setItemNoteModal({ key: item.key, name: item.name });
+    setItemNoteModal({ targetId: item.lineId || item.key, name: item.name });
     setItemNoteValue(item.note || '');
   };
 
@@ -581,29 +637,46 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     });
   };
 
-  // Cancel item line with reason
-  const handleCancelItem = (key: string) => {
-    const item = cart.find((i) => i.key === key);
+  // Cancel item line with reason and immediate Firestore sync
+  const handleCancelItem = (targetId: string) => {
+    const item = cart.find((i) => (i.lineId || i.key) === targetId);
     if (!item) return;
+    if (!canCancelOrders) {
+      notify('Tu rol no tiene permiso para cancelar productos.');
+      return;
+    }
 
     setModalReason({
       title: `Cancelar producto: ${item.name}`,
       onConfirm: (reason) => {
-        setCart((prev) => prev.filter((i) => i.key !== key));
+        const nextCart = cart.filter((i) => (i.lineId || i.key) !== targetId);
+        setCart(nextCart);
+        const auditEntry: AuditLogEntry = {
+          id: uid(),
+          at: new Date().toISOString(),
+          user: state.activeUser.name,
+          action: 'Producto cancelado',
+          detail: `${item.qty} × ${item.name} de ${locationLabel(currentService, currentTable)}`,
+          reason,
+        };
         setState((prev) => ({
           ...prev,
-          audit: [
-            ...prev.audit,
-            {
-              id: uid(),
-              at: new Date().toISOString(),
-              user: prev.activeUser.name,
-              action: 'Producto cancelado',
-              detail: `${item.qty} × ${item.name} de ${locationLabel(currentService, currentTable)}`,
-              reason,
-            },
-          ],
+          audit: [...prev.audit, auditEntry],
         }));
+        if (firebaseUser) {
+          if (selectedOrder && nextCart.length > 0) {
+            const nextTotal = Math.max(0, subtotalCents(nextCart) - (selectedOrder.discountCents || 0));
+            const updatedOrder: Order = {
+              ...selectedOrder,
+              items: nextCart,
+              totalCents: nextTotal,
+              updatedAt: new Date().toISOString(),
+            };
+            void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry);
+          } else {
+            void fsRecordAudit(auditEntry, firebaseUser, authorizedEmails);
+          }
+        }
         notify('Producto cancelado y registrado en bitácora.');
       },
     });
@@ -646,10 +719,10 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   };
 
   // Advance individual item status in KDS (Fase 2: pending -> preparing -> ready -> served)
-  const handleAdvanceItemStatus = (orderId: string, itemKey: string, targetStatus: ItemStatus) => {
+  const handleAdvanceItemStatus = (orderId: string, itemTargetId: string, targetStatus: ItemStatus) => {
     const order = state.orders.find((o) => o.id === orderId);
     if (!order) return;
-    const targetItem = order.items.find((i) => i.key === itemKey);
+    const targetItem = order.items.find((i) => (i.lineId || i.key) === itemTargetId);
     if (!targetItem) return;
 
     const currentItemStatus: ItemStatus = targetItem.itemStatus || 'pending';
@@ -666,7 +739,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
     const now = new Date().toISOString();
     const updatedItems: OrderItem[] = order.items.map((it) =>
-      it.key === itemKey ? { ...it, itemStatus: targetStatus } : it
+      (it.lineId || it.key) === itemTargetId ? { ...it, itemStatus: targetStatus } : it
     );
     const nextOrderStatus = computeOrderStatusFromItems(updatedItems, order.status);
     const updatedOrder: Order = {
@@ -870,15 +943,15 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     const now = new Date().toISOString();
     const mergedMap = new Map<string, OrderItem>();
     for (const it of [...targetOrder.items, ...selectedOrder.items]) {
-      const existing = mergedMap.get(it.key);
+      const mergeKey = `${it.key}::${it.note || ''}::${it.itemStatus || 'pending'}`;
+      const existing = mergedMap.get(mergeKey);
       if (existing) {
-        mergedMap.set(it.key, {
+        mergedMap.set(mergeKey, {
           ...existing,
           qty: existing.qty + it.qty,
-          note: [existing.note, it.note].filter(Boolean).join(' · '),
         });
       } else {
-        mergedMap.set(it.key, { ...it });
+        mergedMap.set(mergeKey, { ...it, lineId: it.lineId || uid() });
       }
     }
     const mergedItems = Array.from(mergedMap.values());
@@ -1018,8 +1091,17 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     setPromptValue('50');
   };
 
-  // Execute payment in cashier (enforces Fase 2 unserved items check)
+  // Execute payment in cashier (enforces Fase 2 unserved items check & open shift check)
   const executePaymentConfirmed = (order: Order, forceMarkServed: boolean) => {
+    if (!canCollectPayment) {
+      notify('Tu rol no tiene permiso para cobrar cuentas.');
+      return;
+    }
+    if (!state.shift.isOpen) {
+      notify('El turno de caja está cerrado. Abre un nuevo turno antes de cobrar.');
+      return;
+    }
+
     const workingOrder: Order = forceMarkServed
       ? {
           ...order,
@@ -1037,13 +1119,22 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
     const cashVal = Number(cashTendered) ? Math.round(Number(cashTendered) * 100) : undefined;
     const change = cashVal && cashVal > workingOrder.totalCents ? cashVal - workingOrder.totalCents : 0;
+    const mixedCashCents =
+      paymentMethod === 'mixto'
+        ? Math.min(workingOrder.totalCents, Math.max(0, Math.round((Number(mixedCashInput) || 0) * 100)))
+        : undefined;
 
     try {
       const nextState = closeAndPayOrder(preparedState, {
         orderId: workingOrder.id,
         paymentMethod,
-        amountCash: paymentMethod === 'efectivo' ? workingOrder.totalCents : undefined,
-        amountCard: paymentMethod === 'tarjeta' ? workingOrder.totalCents : undefined,
+        amountCash: paymentMethod === 'efectivo' ? workingOrder.totalCents : mixedCashCents,
+        amountCard:
+          paymentMethod === 'tarjeta'
+            ? workingOrder.totalCents
+            : paymentMethod === 'mixto'
+            ? workingOrder.totalCents - (mixedCashCents || 0)
+            : undefined,
       });
 
       setState(nextState);
@@ -1067,6 +1158,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       setActiveReceiptSale(sale);
       setPayOrderId('');
       setCashTendered('');
+      setMixedCashInput('');
       setConfirmUnservedPay(false);
       notify(`Cobro registrado con éxito. Folio: ${sale.receipt}${change > 0 ? ` · Cambio: ${formatMoney(change)}` : ''}`);
     } catch (err: unknown) {
@@ -1078,6 +1170,10 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     e.preventDefault();
     if (!canCollectPayment) {
       notify('Tu rol no tiene autorización para registrar cobros.');
+      return;
+    }
+    if (!state.shift.isOpen) {
+      notify('El turno de caja está cerrado. Abre un nuevo turno antes de cobrar.');
       return;
     }
     if (!payOrderId) {
@@ -1409,14 +1505,16 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       return;
     }
 
-    if (!Number.isFinite(qtyNum) || qtyNum === 0) {
-      notify('Ingresa una cantidad válida.');
+    if (!Number.isFinite(qtyNum) || (inventoryModal.type === 'ajuste' ? qtyNum < 0 : qtyNum <= 0)) {
+      notify(inventoryModal.type === 'ajuste' ? 'Ingresa un conteo válido (0 o mayor).' : 'Ingresa una cantidad mayor a 0.');
       return;
     }
 
     let newStock = currentItem.stock;
     if (inventoryModal.type === 'entrada') {
       newStock += qtyNum;
+    } else if (inventoryModal.type === 'merma') {
+      newStock = Math.max(0, currentItem.stock - qtyNum);
     } else {
       newStock = qtyNum; // Ajuste directo al stock contado
     }
@@ -1435,7 +1533,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       type: inventoryModal.type,
       qty: qtyNum,
       costUnit: costNum,
-      reason: invReason.trim() || 'Ajuste operativo',
+      reason: invReason.trim() || (inventoryModal.type === 'merma' ? 'Merma / Desperdicio' : 'Ajuste operativo'),
       user: state.activeUser.name,
     };
 
@@ -1444,7 +1542,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       at: now,
       user: state.activeUser.name,
       action: `Inventario: ${inventoryModal.type.toUpperCase()}`,
-      detail: `${inventoryModal.descripcion} (${currentItem.unidad}) · ${inventoryModal.type === 'entrada' ? `+${qtyNum}` : `fijado a ${qtyNum}`} · Nuevo stock: ${updatedItem.stock}`,
+      detail: `${inventoryModal.descripcion} (${currentItem.unidad}) · ${inventoryModal.type === 'entrada' ? `+${qtyNum}` : inventoryModal.type === 'merma' ? `-${qtyNum} (Merma)` : `fijado a ${qtyNum}`} · Nuevo stock: ${updatedItem.stock}`,
       reason: invReason,
     };
 
@@ -1535,16 +1633,23 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     return state.sales.reduce((sum, s) => sum + s.totalCents, 0);
   }, [state.sales]);
 
+  const todaySalesCount = useMemo(() => {
+    const todayStr = toLocalDateKey(new Date());
+    return state.sales.filter((s) => toLocalDateKey(s.paidAt) === todayStr).length;
+  }, [state.sales]);
+
   const todaySalesCents = useMemo(() => {
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = toLocalDateKey(new Date());
     return state.sales
-      .filter((s) => s.paidAt.startsWith(todayStr))
+      .filter((s) => toLocalDateKey(s.paidAt) === todayStr)
       .reduce((sum, s) => sum + s.totalCents, 0);
   }, [state.sales]);
 
   const todayOrdersCount = useMemo(() => {
-    const todayStr = new Date().toISOString().slice(0, 10);
-    return state.orders.filter((o) => o.createdAt.startsWith(todayStr) || o.updatedAt.startsWith(todayStr)).length;
+    const todayStr = toLocalDateKey(new Date());
+    return state.orders.filter(
+      (o) => toLocalDateKey(o.createdAt) === todayStr || toLocalDateKey(o.updatedAt) === todayStr
+    ).length;
   }, [state.orders]);
 
   // Tables map overview
@@ -1978,7 +2083,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                     {formatMoney(todaySalesCents)}
                   </div>
                   <div className="text-xs text-[#25d366] font-semibold">
-                    Calculado en tiempo real desde Firestore ({state.sales.filter(s => s.paidAt.startsWith(new Date().toISOString().slice(0, 10))).length} tickets pagados)
+                    Calculado en tiempo real desde Firestore ({todaySalesCount} tickets pagados)
                   </div>
                 </div>
 
@@ -2518,16 +2623,16 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                   {p.saleEnabled ? formatMoney(p.priceCents) : 'Sin precio'}
                                 </span>
                                 <div className="flex items-center gap-1">
-                                  {qtyInCart > 0 && (
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleUpdateQty(p.key, -1);
-                                      }}
-                                      aria-label={`Quitar uno de ${p.name}`}
-                                      className="w-7 h-7 rounded-lg bg-[#e05252]/20 hover:bg-[#e05252] text-[#e05252] hover:text-white font-bold flex items-center justify-center transition-colors"
-                                    >
+                                    {qtyInCart > 0 && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleDecrementProductByKey(p.key);
+                                        }}
+                                        aria-label={`Quitar uno de ${p.name}`}
+                                        className="w-7 h-7 rounded-lg bg-[#e05252]/20 hover:bg-[#e05252] text-[#e05252] hover:text-white font-bold flex items-center justify-center transition-colors"
+                                      >
                                       <Minus className="w-3.5 h-3.5" />
                                     </button>
                                   )}
@@ -2678,63 +2783,66 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                         Toca productos del catálogo para armar la comanda.
                       </div>
                     ) : (
-                      cart.map((item) => (
-                        <div key={item.key} className="p-3 rounded-2xl bg-[#0a0a0b]/55 border border-white/10 space-y-2">
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0">
-                              <div className="text-xs font-bold text-white leading-snug">{item.name}</div>
-                              <div className="text-xs text-[rgba(240,230,211,0.58)] tabular-nums mt-0.5">
-                                {formatMoney(item.priceCents)} c/u · {(item.station || 'cocina').toUpperCase()}
+                      cart.map((item, idx) => {
+                        const targetId = item.lineId || item.key;
+                        return (
+                          <div key={item.lineId || `${item.key}-${idx}`} className="p-3 rounded-2xl bg-[#0a0a0b]/55 border border-white/10 space-y-2">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold text-white leading-snug">{item.name}</div>
+                                <div className="text-xs text-[rgba(240,230,211,0.58)] tabular-nums mt-0.5">
+                                  {formatMoney(item.priceCents)} c/u · {(item.station || 'cocina').toUpperCase()}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => handleUpdateQty(targetId, -1)}
+                                  className="w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-white/[0.14] border border-white/10 text-white font-bold flex items-center justify-center"
+                                >
+                                  −
+                                </button>
+                                <span className="font-bold text-xs text-white min-w-[20px] text-center tabular-nums">{item.qty}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUpdateQty(targetId, 1)}
+                                  className="w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-white/[0.14] border border-white/10 text-white font-bold flex items-center justify-center"
+                                >
+                                  +
+                                </button>
                               </div>
                             </div>
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <button
-                                type="button"
-                                onClick={() => handleUpdateQty(item.key, -1)}
-                                className="w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-white/[0.14] border border-white/10 text-white font-bold flex items-center justify-center"
-                              >
-                                −
-                              </button>
-                              <span className="font-bold text-xs text-white min-w-[20px] text-center tabular-nums">{item.qty}</span>
-                              <button
-                                type="button"
-                                onClick={() => handleUpdateQty(item.key, 1)}
-                                className="w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-white/[0.14] border border-white/10 text-white font-bold flex items-center justify-center"
-                              >
-                                +
-                              </button>
+
+                            {item.note && (
+                              <div className="text-xs text-[#e8d090] bg-white/[0.04] px-2.5 py-1 rounded-xl">
+                                Nota: {item.note}
+                              </div>
+                            )}
+
+                            <div className="flex items-center justify-between pt-1 border-t border-white/10 text-xs">
+                              <div className="flex gap-3">
+                                <button
+                                  type="button"
+                                  onClick={() => handleEditItemNote(targetId)}
+                                  className="text-[rgba(240,230,211,0.68)] hover:text-[#e8d090] font-semibold"
+                                >
+                                  {item.note ? 'Editar nota' : '+ Nota'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleCancelItem(targetId)}
+                                  className="text-[#e05252] hover:underline font-semibold"
+                                >
+                                  Cancelar
+                                </button>
+                              </div>
+                              <span className="font-mono font-bold text-white tabular-nums">
+                                {formatMoney(lineTotalCents(item))}
+                              </span>
                             </div>
                           </div>
-
-                          {item.note && (
-                            <div className="text-xs text-[#e8d090] bg-white/[0.04] px-2.5 py-1 rounded-xl">
-                              Nota: {item.note}
-                            </div>
-                          )}
-
-                          <div className="flex items-center justify-between pt-1 border-t border-white/10 text-xs">
-                            <div className="flex gap-3">
-                              <button
-                                type="button"
-                                onClick={() => handleEditItemNote(item.key)}
-                                className="text-[rgba(240,230,211,0.68)] hover:text-[#e8d090] font-semibold"
-                              >
-                                {item.note ? 'Editar nota' : '+ Nota'}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleCancelItem(item.key)}
-                                className="text-[#e05252] hover:underline font-semibold"
-                              >
-                                Cancelar
-                              </button>
-                            </div>
-                            <span className="font-mono font-bold text-white tabular-nums">
-                              {formatMoney(lineTotalCents(item))}
-                            </span>
-                          </div>
-                        </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
 
@@ -3173,7 +3281,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                       {nxt && (
                                         <button
                                           type="button"
-                                          onClick={() => handleAdvanceItemStatus(order.id, i.key, nxt)}
+                                          onClick={() => handleAdvanceItemStatus(order.id, i.lineId || i.key, nxt)}
                                           className="px-2 py-1 rounded bg-[#e5a43b]/20 hover:bg-[#e5a43b] hover:text-black text-[#e5a43b] font-bold text-xs shrink-0"
                                         >
                                           ▶ Preparar
@@ -3248,7 +3356,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                       {nxt && (
                                         <button
                                           type="button"
-                                          onClick={() => handleAdvanceItemStatus(order.id, i.key, nxt)}
+                                          onClick={() => handleAdvanceItemStatus(order.id, i.lineId || i.key, nxt)}
                                           className="px-2 py-1 rounded bg-[#25d366]/20 hover:bg-[#25d366] hover:text-black text-[#25d366] font-bold text-xs shrink-0"
                                         >
                                           {nxt === 'ready' ? '✓ Listo' : nxt === 'served' ? '🍽️ Servido' : '▶ Preparar'}
@@ -3317,7 +3425,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                       {nxt === 'served' && (
                                         <button
                                           type="button"
-                                          onClick={() => handleAdvanceItemStatus(order.id, i.key, 'served')}
+                                          onClick={() => handleAdvanceItemStatus(order.id, i.lineId || i.key, 'served')}
                                           className="px-2 py-0.5 rounded bg-[#173c34] text-[#25d366] font-bold text-xs"
                                         >
                                           🍽️ Servir
@@ -3521,6 +3629,39 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                             <span className={change >= 0 ? 'text-[#25d366]' : 'text-[#e05252]'}>
                               {change >= 0 ? formatMoney(change) : `Faltan ${formatMoney(-change)}`}
                             </span>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+
+                  {/* Mixed Payment Split Input */}
+                  {paymentMethod === 'mixto' && payOrderId && (
+                    <div className="p-3 bg-[#1e222b] rounded-xl border border-[#2b303c] space-y-2 text-xs">
+                      <label className="block font-semibold text-[#8b92a0]">
+                        Monto pagado en EFECTIVO ($ MXN) — el resto va a Tarjeta
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="0.00"
+                        value={mixedCashInput}
+                        onChange={(e) => setMixedCashInput(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl bg-[#16191f] border border-[#2b303c] text-white text-sm font-mono"
+                      />
+                      {(() => {
+                        const ord = state.orders.find((o) => o.id === payOrderId);
+                        if (!ord) return null;
+                        const cashCents = Math.min(
+                          ord.totalCents,
+                          Math.max(0, Math.round((Number(mixedCashInput) || 0) * 100))
+                        );
+                        const cardCents = ord.totalCents - cashCents;
+                        return (
+                          <div className="flex justify-between font-mono font-bold pt-1 text-[#eed889]">
+                            <span>Efectivo: {formatMoney(cashCents)}</span>
+                            <span>Tarjeta: {formatMoney(cardCents)}</span>
                           </div>
                         );
                       })()}
@@ -4030,6 +4171,36 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               })}
             </div>
 
+            {catalogModifiers.length > 0 && (
+              <div className="space-y-1.5">
+                <span className="block text-xs uppercase tracking-[0.06em] text-[rgba(240,230,211,0.58)] font-semibold">
+                  Modificadores de carta
+                </span>
+                <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                  {catalogModifiers.map((mod) => {
+                    const active = itemNoteValue
+                      .split(',')
+                      .map((s) => s.trim().toLowerCase())
+                      .includes(mod.name.toLowerCase());
+                    return (
+                      <button
+                        key={mod.key}
+                        type="button"
+                        onClick={() => handleToggleQuickModifier(mod.name)}
+                        className={`min-h-[34px] px-3 py-1 rounded-full text-xs font-semibold border transition-colors ${
+                          active
+                            ? 'bg-[#c8a84b] text-[#0a0a0b] border-[#c8a84b]'
+                            : 'bg-white/[0.04] text-[#e8d090] border-white/15 hover:border-[#c8a84b]/60'
+                        }`}
+                      >
+                        {mod.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             <div>
               <label className="block text-xs uppercase tracking-[0.06em] text-[rgba(240,230,211,0.58)] font-semibold mb-1.5">
                 Nota personalizada
@@ -4055,7 +4226,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                 type="button"
                 onClick={() => {
                   setCart((prev) =>
-                    prev.map((i) => (i.key === itemNoteModal.key ? { ...i, note: itemNoteValue.trim() } : i))
+                    prev.map((i) =>
+                      (i.lineId || i.key) === itemNoteModal.targetId ? { ...i, note: itemNoteValue.trim() } : i
+                    )
                   );
                   setItemNoteModal(null);
                   notify('Nota de cocina actualizada.');
@@ -4252,6 +4425,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
             <h3 className="font-serif font-bold text-base text-white tracking-[-0.02em]">
               {inventoryModal.type === 'entrada'
                 ? 'Registrar Compra / Entrada de Insumo'
+                : inventoryModal.type === 'merma'
+                ? 'Registrar Merma / Baja de Insumo'
                 : inventoryModal.type === 'ajuste'
                 ? 'Ajustar Existencia Física'
                 : 'Configurar Umbral de Alerta de Stock Mínimo'}
@@ -4263,6 +4438,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                 <label className="block text-[rgba(240,230,211,0.68)] mb-1">
                   {inventoryModal.type === 'entrada'
                     ? 'Cantidad a ingresar'
+                    : inventoryModal.type === 'merma'
+                    ? 'Cantidad a descontar (merma)'
                     : inventoryModal.type === 'ajuste'
                     ? 'Nueva existencia contada'
                     : 'Cantidad mínima para activar alerta'}

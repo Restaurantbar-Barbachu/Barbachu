@@ -48,7 +48,7 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
   // Modal action state
   const [modalAction, setModalAction] = useState<{
     item: InventoryItem;
-    type: 'entrada' | 'ajuste' | 'minStock';
+    type: 'entrada' | 'ajuste' | 'merma' | 'minStock';
   } | null>(null);
   const [modalQty, setModalQty] = useState<string>('');
   const [modalCost, setModalCost] = useState<string>('');
@@ -178,14 +178,16 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
       return;
     }
 
-    if (!Number.isFinite(qtyVal) || qtyVal === 0) {
-      notify('Ingresa una cantidad válida.');
+    if (!Number.isFinite(qtyVal) || (type === 'ajuste' ? qtyVal < 0 : qtyVal <= 0)) {
+      notify(type === 'ajuste' ? 'Ingresa un conteo válido (0 o mayor).' : 'Ingresa una cantidad mayor a 0.');
       return;
     }
 
     let nextStock = item.stock;
     if (type === 'entrada') {
       nextStock += qtyVal;
+    } else if (type === 'merma') {
+      nextStock = Math.max(0, item.stock - qtyVal);
     } else {
       nextStock = qtyVal; // Ajuste directo
     }
@@ -196,6 +198,13 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
       costo: costVal > 0 ? costVal : item.costo,
     };
 
+    const defaultReason =
+      type === 'entrada'
+        ? 'Compra / Recepción'
+        : type === 'merma'
+        ? 'Merma / Desperdicio'
+        : 'Ajuste de inventario físico';
+
     const mov: InventoryMovement = {
       id: uid(),
       at: now,
@@ -204,16 +213,23 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
       type,
       qty: qtyVal,
       costUnit: costVal > 0 ? costVal : item.costo,
-      reason: modalReason.trim() || (type === 'entrada' ? 'Compra / Recepción' : 'Ajuste de inventario físico'),
+      reason: modalReason.trim() || defaultReason,
       user: state.activeUser.name,
     };
+
+    const actionVerb =
+      type === 'entrada'
+        ? `+${qtyVal}`
+        : type === 'merma'
+        ? `-${qtyVal} (Merma)`
+        : `ajustado a ${qtyVal}`;
 
     const auditEntry: AuditLogEntry = {
       id: uid(),
       at: now,
       user: state.activeUser.name,
       action: `Inventario: ${type.toUpperCase()}`,
-      detail: `${item.descripcion} (${item.unidad}) · ${type === 'entrada' ? `+${qtyVal}` : `ajustado a ${qtyVal}`} · Stock final: ${updatedItem.stock}`,
+      detail: `${item.descripcion} (${item.unidad}) · ${actionVerb} · Stock final: ${updatedItem.stock}`,
       reason: modalReason,
     };
 
@@ -485,6 +501,14 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
                         </button>
                         <button
                           type="button"
+                          onClick={() => setModalAction({ item, type: 'merma' })}
+                          className="min-h-[34px] px-2.5 py-1 rounded-xl bg-[#e05252]/15 hover:bg-[#e05252]/25 text-[#e05252] border border-[#e05252]/40 font-bold"
+                          title="Registrar merma o salida por desperdicio"
+                        >
+                          − Merma
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => setModalAction({ item, type: 'ajuste' })}
                           className="min-h-[34px] px-2.5 py-1 rounded-xl bg-white/[0.06] hover:bg-white/[0.14] text-white border border-white/15 font-semibold"
                           title="Ajustar conteo físico"
@@ -663,12 +687,20 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
                       </td>
                       <td className="py-3 font-bold text-white">{mov.descripcion}</td>
                       <td className="py-3">
-                        <span className={`px-2 py-0.5 rounded-lg text-xs font-bold uppercase ${mov.type === 'entrada' ? 'bg-[#25d366]/20 text-[#25d366]' : 'bg-[#e8d090]/20 text-[#e8d090]'}`}>
+                        <span
+                          className={`px-2 py-0.5 rounded-lg text-xs font-bold uppercase ${
+                            mov.type === 'entrada'
+                              ? 'bg-[#25d366]/20 text-[#25d366]'
+                              : mov.type === 'merma'
+                              ? 'bg-[#e05252]/20 text-[#e05252]'
+                              : 'bg-[#e8d090]/20 text-[#e8d090]'
+                          }`}
+                        >
                           {mov.type}
                         </span>
                       </td>
                       <td className="py-3 font-mono font-bold text-white tabular-nums">
-                        {mov.type === 'entrada' ? `+${mov.qty}` : mov.qty}
+                        {mov.type === 'entrada' ? `+${mov.qty}` : mov.type === 'merma' ? `-${mov.qty}` : mov.qty}
                       </td>
                       <td className="py-3 font-mono text-[#e8d090]">${mov.costUnit.toFixed(2)}</td>
                       <td className="py-3 text-[rgba(240,230,211,0.75)]">{mov.reason}</td>
@@ -690,6 +722,8 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
               <h3 className="font-serif font-bold text-base text-white">
                 {modalAction.type === 'entrada'
                   ? 'Registrar Compra / Entrada'
+                  : modalAction.type === 'merma'
+                  ? 'Registrar Merma / Baja'
                   : modalAction.type === 'ajuste'
                   ? 'Ajustar Conteo Físico'
                   : 'Configurar Umbral de Alerta'}
@@ -715,6 +749,8 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
                 <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">
                   {modalAction.type === 'entrada'
                     ? 'Cantidad a sumar (Compra)'
+                    : modalAction.type === 'merma'
+                    ? 'Cantidad a descontar (Merma)'
                     : modalAction.type === 'ajuste'
                     ? 'Nueva existencia física total'
                     : 'Umbral mínimo para alerta'}

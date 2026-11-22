@@ -89,6 +89,7 @@ export function handleFirestoreError(
 }
 
 export async function testConnection(): Promise<boolean> {
+  if (!auth.currentUser) return true;
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
     return true;
@@ -100,8 +101,6 @@ export async function testConnection(): Promise<boolean> {
     return true;
   }
 }
-
-void testConnection();
 
 export async function signInWithGoogle(): Promise<User> {
   const result = await signInWithPopup(auth, googleProvider);

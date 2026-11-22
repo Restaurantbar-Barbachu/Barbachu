@@ -115,6 +115,7 @@ export function createInitialPosState(): FullPosState {
     inventory: createInitialInventory(),
     inventoryMovements: [],
     nextOrderNumber: 1,
+    nextReceiptNumber: 1,
     users: DEFAULT_USERS,
     activeUser: DEFAULT_USERS[0],
     permissions: DEFAULT_PERMISSIONS,

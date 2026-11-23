@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import {
   AlertTriangle,
@@ -34,6 +35,7 @@ import {
   UserCheck,
   UtensilsCrossed,
   Wifi,
+  WifiOff,
   X,
 } from 'lucide-react';
 import {
@@ -61,7 +63,10 @@ import {
   ROLE_LABELS,
 } from './EmployeePinAuthPanel';
 import { IosPinPadModal } from './IosPinPadModal';
+import { PWAInstallButton } from './PwaControls';
+import { useOnlineStatus } from '../hooks/usePwaStatus';
 const PosAnalyticsDashboard = lazy(() => import('./PosAnalyticsDashboard').then(m => ({ default: m.PosAnalyticsDashboard })));
+const PosDashboardPanel = lazy(() => import('./PosDashboardPanel').then(m => ({ default: m.PosDashboardPanel })));
 const InventoryManagementView = lazy(() => import('./InventoryManagementView').then(m => ({ default: m.InventoryManagementView })));
 import {
   auth,
@@ -158,6 +163,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [cloudBooting, setCloudBooting] = useState<boolean>(false);
   const [syncError, setSyncError] = useState<Error | null>(null);
 
+  const isOnline = useOnlineStatus();
   const [state, setState] = useState<FullPosState>(() => loadPosState());
   const [view, setView] = useState<PosViewRoute>('dashboard');
 
@@ -1894,6 +1900,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         </div>
 
         <div className="pt-4 border-t border-white/10 space-y-2.5">
+          <PWAInstallButton />
           {onSwitchToMenu && (
             <button
               type="button"
@@ -1979,11 +1986,15 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
             <button
               type="button"
               onClick={() => setIsDeviceModalOpen(true)}
-              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-[#122822] hover:bg-[#122822]/80 text-[#25d366] border border-[#25d366]/30 transition-colors cursor-pointer"
+              className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                isOnline
+                  ? 'bg-[#122822] hover:bg-[#122822]/80 text-[#25d366] border-[#25d366]/30'
+                  : 'bg-[#e5a43b]/15 hover:bg-[#e5a43b]/25 text-[#eed889] border-[#e5a43b]/40'
+              }`}
               title="Gestionar Conexión de Dispositivos y Estaciones"
             >
-              <Cloud className="w-3.5 h-3.5" />
-              <span>SYNC CLOUD</span>
+              {isOnline ? <Cloud className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
+              <span>{isOnline ? 'SYNC CLOUD' : 'MODO OFFLINE'}</span>
             </button>
           </div>
 
@@ -2073,8 +2084,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               </div>
 
               {/* Daily Sales Summary Card based on Firestore documents */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 tabular-nums animate-in fade-in duration-300">
-                <div className="p-5 ios-glass-card space-y-2 border-l-4 border-[#25d366]">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 tabular-nums">
+                <div className="p-5 ios-glass-card space-y-2 border-[#25d366]/25">
                   <div className="flex items-center justify-between text-xs font-bold text-[#8b92a0] uppercase tracking-wider">
                     <span>Ventas Totales de Hoy</span>
                     <DollarSign className="w-4 h-4 text-[#25d366]" />
@@ -2083,11 +2094,11 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                     {formatMoney(todaySalesCents)}
                   </div>
                   <div className="text-xs text-[#25d366] font-semibold">
-                    Calculado en tiempo real desde Firestore ({todaySalesCount} tickets pagados)
+                    {isOnline ? 'En vivo desde Firestore' : 'Caché local offline'} · {todaySalesCount} tickets pagados
                   </div>
                 </div>
 
-                <div className="p-5 ios-glass-card space-y-2 border-l-4 border-[#c8a84b]">
+                <div className="p-5 ios-glass-card space-y-2 border-[#c8a84b]/25">
                   <div className="flex items-center justify-between text-xs font-bold text-[#8b92a0] uppercase tracking-wider">
                     <span>Comandas Registradas Hoy</span>
                     <Receipt className="w-4 h-4 text-[#c8a84b]" />
@@ -2100,16 +2111,16 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                   </div>
                 </div>
 
-                <div className="p-5 ios-glass-card space-y-2 border-l-4 border-[#e05252]">
+                <div className="p-5 ios-glass-card space-y-2 border-white/15">
                   <div className="flex items-center justify-between text-xs font-bold text-[#8b92a0] uppercase tracking-wider">
                     <span>Turno Actual de Caja</span>
-                    <Clock className="w-4 h-4 text-[#e05252]" />
+                    <Clock className="w-4 h-4 text-[#e8d090]" />
                   </div>
                   <div className="font-serif font-bold text-3xl text-white">
                     {state.shift.isOpen ? formatMoney(state.shift.expectedCashCents) : 'Turno Cerrado'}
                   </div>
                   <div className="text-xs text-[#eed889] font-semibold">
-                    {state.shift.isOpen ? `Efectivo esperado en caja` : 'Sin turno abierto'}
+                    {state.shift.isOpen ? 'Efectivo esperado en caja' : 'Sin turno abierto'}
                   </div>
                 </div>
               </div>
@@ -2298,52 +2309,69 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                     </div>
                   ) : (
                     <div className="space-y-2.5 max-h-[340px] overflow-y-auto pr-1">
-                      {openOrders.slice().reverse().map((order) => (
-                        <div
-                          key={order.id}
-                          onClick={() => {
-                            if (canViewPos) {
-                              loadOrderIntoDraft(order);
-                            } else if (canViewCash) {
-                              setPayOrderId(order.id);
-                              setView('cash');
-                            } else if (canViewKitchen) {
-                              setView('kitchen');
-                            }
-                          }}
-                          className="flex items-center justify-between p-3.5 rounded-2xl bg-white/[0.04] border border-white/10 hover:border-[#c8a84b]/60 cursor-pointer transition-all duration-150"
-                        >
-                          <div>
-                            <div className="text-sm font-bold text-white flex items-center gap-2 tabular-nums">
-                              <span>Cuenta #{order.number}</span>
-                              <span className="text-xs text-[#e8d090]">· {locationLabel(order.service, order.location)}</span>
-                              {order.priority === 'alta' && (
-                                <span className="px-1.5 py-0.5 rounded-lg text-xs bg-[#e05252] text-white font-bold">ALTA</span>
-                              )}
+                      <AnimatePresence initial={false}>
+                        {openOrders.slice().reverse().map((order, idx) => (
+                          <motion.div
+                            key={order.id}
+                            layout
+                            initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.96 }}
+                            whileTap={{ scale: 0.985 }}
+                            transition={{
+                              type: 'spring',
+                              stiffness: 420,
+                              damping: 32,
+                              delay: Math.min(idx * 0.02, 0.12),
+                            }}
+                            onClick={() => {
+                              if (canViewPos) {
+                                loadOrderIntoDraft(order);
+                              } else if (canViewCash) {
+                                setPayOrderId(order.id);
+                                setView('cash');
+                              } else if (canViewKitchen) {
+                                setView('kitchen');
+                              }
+                            }}
+                            className="flex items-center justify-between p-3.5 rounded-2xl bg-white/[0.04] border border-white/10 hover:border-[#c8a84b]/60 cursor-pointer transition-colors duration-150"
+                          >
+                            <div>
+                              <div className="text-sm font-bold text-white flex items-center gap-2 tabular-nums">
+                                <span>Cuenta #{order.number}</span>
+                                <span className="text-xs text-[#e8d090]">· {locationLabel(order.service, order.location)}</span>
+                                {order.priority === 'alta' && (
+                                  <span className="px-1.5 py-0.5 rounded-lg text-xs bg-[#e05252] text-white font-bold">ALTA</span>
+                                )}
+                              </div>
+                              <div className="text-xs text-[rgba(240,230,211,0.62)] mt-0.5 tabular-nums">
+                                {order.waiter} · {order.items.reduce((s, i) => s + i.qty, 0)} productos · {formatElapsedTime(order.createdAt, nowMs)}
+                              </div>
                             </div>
-                            <div className="text-xs text-[rgba(240,230,211,0.62)] mt-0.5 tabular-nums">
-                              {order.waiter} · {order.items.reduce((s, i) => s + i.qty, 0)} productos · {formatElapsedTime(order.createdAt, nowMs)}
+                            <div className="text-right tabular-nums">
+                              <div className="font-mono font-bold text-sm text-[#e8d090]">{formatMoney(order.totalCents)}</div>
+                              <span className="text-xs font-bold text-[rgba(240,230,211,0.58)] uppercase">{order.status}</span>
                             </div>
-                          </div>
-                          <div className="text-right tabular-nums">
-                            <div className="font-mono font-bold text-sm text-[#e8d090]">{formatMoney(order.totalCents)}</div>
-                            <span className="text-xs font-bold text-[rgba(240,230,211,0.58)] uppercase">{order.status}</span>
-                          </div>
-                        </div>
-                      ))}
+                          </motion.div>
+                        ))}
+                      </AnimatePresence>
                     </div>
                   )}
                 </div>
               </div>
 
-              {/* Real-time Sales, Top Products and Performance Analytics with Recharts (if permitted) */}
-              {canViewReports && (
-                <div className="pt-2">
-                  <Suspense fallback={<div className="p-8 text-center text-[#d4af37]">Cargando analíticas...</div>}>
-                    <PosAnalyticsDashboard state={state} />
-                  </Suspense>
-                </div>
-              )}
+              {/* POS Operations Dashboard: Inventory Levels & Sales Trends (Recharts) */}
+              <div className="pt-2">
+                <Suspense fallback={<div className="p-8 text-center text-[#d4af37]">Cargando panel operativo...</div>}>
+                  <PosDashboardPanel
+                    state={state}
+                    canViewInventory={canViewInventory}
+                    canViewPos={canViewPos}
+                    onOpenInventory={() => setView('inventory')}
+                    onOpenPos={() => setView('pos')}
+                  />
+                </Suspense>
+              </div>
             </div>
           )}
 
@@ -2589,13 +2617,22 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                       </div>
                     ) : (
                       <div className="pos-product-grid">
-                        {filteredProducts.map((p) => {
+                        {filteredProducts.map((p, idx) => {
                           const qtyInCart = cartQtyMap.get(p.key) || 0;
                           return (
-                            <div
+                            <motion.div
                               key={p.key}
                               role="button"
                               tabIndex={p.saleEnabled ? 0 : -1}
+                              initial={{ opacity: 0, y: 10, scale: 0.97 }}
+                              animate={{ opacity: 1, y: 0, scale: 1 }}
+                              whileTap={p.saleEnabled ? { scale: 0.96 } : undefined}
+                              transition={{
+                                type: 'spring',
+                                stiffness: 450,
+                                damping: 32,
+                                delay: Math.min(idx * 0.012, 0.15),
+                              }}
                               onClick={() => handleAddProduct(p)}
                               onKeyDown={(e) => {
                                 if (e.key === 'Enter' || e.key === ' ') {
@@ -2641,7 +2678,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                   </span>
                                 </div>
                               </div>
-                            </div>
+                            </motion.div>
                           );
                         })}
                       </div>
@@ -2783,66 +2820,78 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                         Toca productos del catálogo para armar la comanda.
                       </div>
                     ) : (
-                      cart.map((item, idx) => {
-                        const targetId = item.lineId || item.key;
-                        return (
-                          <div key={item.lineId || `${item.key}-${idx}`} className="p-3 rounded-2xl bg-[#0a0a0b]/55 border border-white/10 space-y-2">
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0">
-                                <div className="text-xs font-bold text-white leading-snug">{item.name}</div>
-                                <div className="text-xs text-[rgba(240,230,211,0.58)] tabular-nums mt-0.5">
-                                  {formatMoney(item.priceCents)} c/u · {(item.station || 'cocina').toUpperCase()}
+                      <AnimatePresence initial={false}>
+                        {cart.map((item, idx) => {
+                          const targetId = item.lineId || item.key;
+                          return (
+                            <motion.div
+                              key={item.lineId || `${item.key}-${idx}`}
+                              layout
+                              initial={{ opacity: 0, y: 10, scale: 0.97 }}
+                              animate={{ opacity: 1, y: 0, scale: 1 }}
+                              exit={{ opacity: 0, x: -18, scale: 0.95 }}
+                              transition={{ type: 'spring', stiffness: 440, damping: 30 }}
+                              className="p-3 rounded-2xl bg-[#0a0a0b]/55 border border-white/10 space-y-2"
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                  <div className="text-xs font-bold text-white leading-snug">{item.name}</div>
+                                  <div className="text-xs text-[rgba(240,230,211,0.58)] tabular-nums mt-0.5">
+                                    {formatMoney(item.priceCents)} c/u · {(item.station || 'cocina').toUpperCase()}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleUpdateQty(targetId, -1)}
+                                    aria-label={`Restar uno de ${item.name}`}
+                                    className="w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-white/[0.14] border border-white/10 text-white font-bold flex items-center justify-center"
+                                  >
+                                    −
+                                  </button>
+                                  <span className="font-bold text-xs text-white min-w-[20px] text-center tabular-nums">{item.qty}</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleUpdateQty(targetId, 1)}
+                                    aria-label={`Sumar uno de ${item.name}`}
+                                    className="w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-white/[0.14] border border-white/10 text-white font-bold flex items-center justify-center"
+                                  >
+                                    +
+                                  </button>
                                 </div>
                               </div>
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                <button
-                                  type="button"
-                                  onClick={() => handleUpdateQty(targetId, -1)}
-                                  className="w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-white/[0.14] border border-white/10 text-white font-bold flex items-center justify-center"
-                                >
-                                  −
-                                </button>
-                                <span className="font-bold text-xs text-white min-w-[20px] text-center tabular-nums">{item.qty}</span>
-                                <button
-                                  type="button"
-                                  onClick={() => handleUpdateQty(targetId, 1)}
-                                  className="w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-white/[0.14] border border-white/10 text-white font-bold flex items-center justify-center"
-                                >
-                                  +
-                                </button>
-                              </div>
-                            </div>
 
-                            {item.note && (
-                              <div className="text-xs text-[#e8d090] bg-white/[0.04] px-2.5 py-1 rounded-xl">
-                                Nota: {item.note}
-                              </div>
-                            )}
+                              {item.note && (
+                                <div className="text-xs text-[#e8d090] bg-white/[0.04] px-2.5 py-1 rounded-xl">
+                                  Nota: {item.note}
+                                </div>
+                              )}
 
-                            <div className="flex items-center justify-between pt-1 border-t border-white/10 text-xs">
-                              <div className="flex gap-3">
-                                <button
-                                  type="button"
-                                  onClick={() => handleEditItemNote(targetId)}
-                                  className="text-[rgba(240,230,211,0.68)] hover:text-[#e8d090] font-semibold"
-                                >
-                                  {item.note ? 'Editar nota' : '+ Nota'}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => handleCancelItem(targetId)}
-                                  className="text-[#e05252] hover:underline font-semibold"
-                                >
-                                  Cancelar
-                                </button>
+                              <div className="flex items-center justify-between pt-1 border-t border-white/10 text-xs">
+                                <div className="flex gap-3">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleEditItemNote(targetId)}
+                                    className="text-[rgba(240,230,211,0.68)] hover:text-[#e8d090] font-semibold"
+                                  >
+                                    {item.note ? 'Editar nota' : '+ Nota'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCancelItem(targetId)}
+                                    className="text-[#e05252] hover:underline font-semibold"
+                                  >
+                                    Cancelar
+                                  </button>
+                                </div>
+                                <span className="font-mono font-bold text-white tabular-nums">
+                                  {formatMoney(lineTotalCents(item))}
+                                </span>
                               </div>
-                              <span className="font-mono font-bold text-white tabular-nums">
-                                {formatMoney(lineTotalCents(item))}
-                              </span>
-                            </div>
-                          </div>
-                        );
-                      })
+                            </motion.div>
+                          );
+                        })}
+                      </AnimatePresence>
                     )}
                   </div>
 
@@ -3246,65 +3295,86 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                     {openOrders.filter((o) => o.status === 'sent').length === 0 ? (
                       <div className="py-16 text-center text-[#8b92a0] text-xs">Sin órdenes en espera</div>
                     ) : (
-                      openOrders
-                        .filter((o) => o.status === 'sent')
-                        .map((order) => (
-                          <div key={order.id} className={`kds-ticket animate-in fade-in duration-300 ${order.priority === 'alta' ? 'priority-alta' : ''}`}>
-                            <div className="flex items-start justify-between">
-                              <div>
-                                <div className="text-sm font-bold text-white flex items-center gap-1.5">
-                                  <span>Cuenta #{order.number}</span>
-                                  <span className="text-xs text-[#eed889]">· {locationLabel(order.service, order.location)}</span>
-                                </div>
-                                <div className="text-xs text-[#8b92a0]">
-                                  {order.waiter} · {new Date(order.createdAt).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}
-                                </div>
-                              </div>
-                              {order.priority === 'alta' && (
-                                <span className="px-2 py-0.5 rounded text-xs bg-[#e05252] text-white font-bold">ALTA</span>
-                              )}
-                            </div>
-
-                            <div className="my-3 py-2 border-y border-[#2b303c] space-y-2 text-xs">
-                              {order.items
-                                .filter((i) => kitchenStation === 'todas' || (i.station || 'cocina') === kitchenStation)
-                                .map((i, idx) => {
-                                  const st = i.itemStatus || 'pending';
-                                  const nxt = nextItemStatus(st);
-                                  return (
-                                    <div key={idx} className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-[#16191f]/70">
-                                      <div className="min-w-0">
-                                        <div className="font-bold text-white truncate">{i.qty} × {i.name}</div>
-                                        <div className="text-xs text-[#8b92a0] uppercase">{i.station || 'cocina'} · {st}</div>
-                                        {i.note && <span className="text-xs text-[#eed889] block">Nota: {i.note}</span>}
-                                      </div>
-                                      {nxt && (
-                                        <button
-                                          type="button"
-                                          onClick={() => handleAdvanceItemStatus(order.id, i.lineId || i.key, nxt)}
-                                          className="px-2 py-1 rounded bg-[#e5a43b]/20 hover:bg-[#e5a43b] hover:text-black text-[#e5a43b] font-bold text-xs shrink-0"
-                                        >
-                                          ▶ Preparar
-                                        </button>
-                                      )}
-                                    </div>
-                                  );
-                                })}
-                            </div>
-
-                            {order.note && (
-                              <p className="text-xs text-[#8b92a0] mb-3 italic">Nota general: {order.note}</p>
-                            )}
-
-                            <button
-                              type="button"
-                              onClick={() => handleAdvanceOrderStatus(order.id, 'sent')}
-                              className="w-full py-2 rounded-xl bg-[#e5a43b] hover:bg-[#d4af37] text-black font-bold text-xs"
+                      <AnimatePresence mode="popLayout">
+                        {openOrders
+                          .filter((o) => o.status === 'sent')
+                          .map((order, orderIdx) => (
+                            <motion.div
+                              key={order.id}
+                              layout
+                              initial={{ opacity: 0, y: 14, scale: 0.97 }}
+                              animate={{ opacity: 1, y: 0, scale: 1 }}
+                              exit={{ opacity: 0, scale: 0.95 }}
+                              transition={{
+                                type: 'spring',
+                                stiffness: 400,
+                                damping: 30,
+                                delay: Math.min(orderIdx * 0.03, 0.15),
+                              }}
+                              className={`kds-ticket ${order.priority === 'alta' ? 'priority-alta' : ''}`}
                             >
-                              ▶ Iniciar Preparación Completa
-                            </button>
-                          </div>
-                        ))
+                              <div className="flex items-start justify-between">
+                                <div>
+                                  <div className="text-sm font-bold text-white flex items-center gap-1.5">
+                                    <span>Cuenta #{order.number}</span>
+                                    <span className="text-xs text-[#eed889]">· {locationLabel(order.service, order.location)}</span>
+                                  </div>
+                                  <div className="text-xs text-[#8b92a0]">
+                                    {order.waiter} · {new Date(order.createdAt).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}
+                                  </div>
+                                </div>
+                                {order.priority === 'alta' && (
+                                  <span className="px-2 py-0.5 rounded text-xs bg-[#e05252] text-white font-bold">ALTA</span>
+                                )}
+                              </div>
+
+                              <div className="my-3 py-2 border-y border-[#2b303c] space-y-2 text-xs">
+                                {order.items
+                                  .filter((i) => kitchenStation === 'todas' || (i.station || 'cocina') === kitchenStation)
+                                  .map((i, idx) => {
+                                    const st = i.itemStatus || 'pending';
+                                    const nxt = nextItemStatus(st);
+                                    return (
+                                      <motion.div
+                                        key={i.lineId || `${i.key}-${idx}`}
+                                        initial={{ opacity: 0, x: -6 }}
+                                        animate={{ opacity: 1, x: 0 }}
+                                        transition={{ type: 'spring', stiffness: 440, damping: 32, delay: Math.min(idx * 0.02, 0.1) }}
+                                        className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-[#16191f]/70"
+                                      >
+                                        <div className="min-w-0">
+                                          <div className="font-bold text-white truncate">{i.qty} × {i.name}</div>
+                                          <div className="text-xs text-[#8b92a0] uppercase">{i.station || 'cocina'} · {st}</div>
+                                          {i.note && <span className="text-xs text-[#eed889] block">Nota: {i.note}</span>}
+                                        </div>
+                                        {nxt && (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleAdvanceItemStatus(order.id, i.lineId || i.key, nxt)}
+                                            className="px-2 py-1 rounded bg-[#e5a43b]/20 hover:bg-[#e5a43b] hover:text-black text-[#e5a43b] font-bold text-xs shrink-0"
+                                          >
+                                            ▶ Preparar
+                                          </button>
+                                        )}
+                                      </motion.div>
+                                    );
+                                  })}
+                              </div>
+
+                              {order.note && (
+                                <p className="text-xs text-[#8b92a0] mb-3 italic">Nota general: {order.note}</p>
+                              )}
+
+                              <button
+                                type="button"
+                                onClick={() => handleAdvanceOrderStatus(order.id, 'sent')}
+                                className="w-full py-2 rounded-xl bg-[#e5a43b] hover:bg-[#d4af37] text-black font-bold text-xs"
+                              >
+                                ▶ Iniciar Preparación Completa
+                              </button>
+                            </motion.div>
+                          ))}
+                      </AnimatePresence>
                     )}
                   </div>
                 </div>
@@ -3324,58 +3394,79 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                     {openOrders.filter((o) => o.status === 'preparing').length === 0 ? (
                       <div className="py-16 text-center text-[#8b92a0] text-xs">Sin órdenes en cocción</div>
                     ) : (
-                      openOrders
-                        .filter((o) => o.status === 'preparing')
-                        .map((order) => (
-                          <div key={order.id} className={`kds-ticket ${order.priority === 'alta' ? 'priority-alta' : ''}`}>
-                            <div className="flex items-start justify-between">
-                              <div>
-                                <div className="text-sm font-bold text-white flex items-center gap-1.5">
-                                  <span>Cuenta #{order.number}</span>
-                                  <span className="text-xs text-[#eed889]">· {locationLabel(order.service, order.location)}</span>
-                                </div>
-                                <div className="text-xs text-[#8b92a0]">
-                                  {order.waiter} · {new Date(order.createdAt).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}
+                      <AnimatePresence mode="popLayout">
+                        {openOrders
+                          .filter((o) => o.status === 'preparing')
+                          .map((order, orderIdx) => (
+                            <motion.div
+                              key={order.id}
+                              layout
+                              initial={{ opacity: 0, y: 14, scale: 0.97 }}
+                              animate={{ opacity: 1, y: 0, scale: 1 }}
+                              exit={{ opacity: 0, scale: 0.95 }}
+                              transition={{
+                                type: 'spring',
+                                stiffness: 400,
+                                damping: 30,
+                                delay: Math.min(orderIdx * 0.03, 0.15),
+                              }}
+                              className={`kds-ticket ${order.priority === 'alta' ? 'priority-alta' : ''}`}
+                            >
+                              <div className="flex items-start justify-between">
+                                <div>
+                                  <div className="text-sm font-bold text-white flex items-center gap-1.5">
+                                    <span>Cuenta #{order.number}</span>
+                                    <span className="text-xs text-[#eed889]">· {locationLabel(order.service, order.location)}</span>
+                                  </div>
+                                  <div className="text-xs text-[#8b92a0]">
+                                    {order.waiter} · {new Date(order.createdAt).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}
+                                  </div>
                                 </div>
                               </div>
-                            </div>
 
-                            <div className="my-3 py-2 border-y border-[#2b303c] space-y-2 text-xs">
-                              {order.items
-                                .filter((i) => kitchenStation === 'todas' || (i.station || 'cocina') === kitchenStation)
-                                .map((i, idx) => {
-                                  const st = i.itemStatus || 'pending';
-                                  const nxt = nextItemStatus(st);
-                                  return (
-                                    <div key={idx} className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-[#16191f]/70">
-                                      <div className="min-w-0">
-                                        <div className="font-bold text-white truncate">{i.qty} × {i.name}</div>
-                                        <div className="text-xs text-[#8b92a0] uppercase">{i.station || 'cocina'} · {st}</div>
-                                        {i.note && <span className="text-xs text-[#eed889] block">Nota: {i.note}</span>}
-                                      </div>
-                                      {nxt && (
-                                        <button
-                                          type="button"
-                                          onClick={() => handleAdvanceItemStatus(order.id, i.lineId || i.key, nxt)}
-                                          className="px-2 py-1 rounded bg-[#25d366]/20 hover:bg-[#25d366] hover:text-black text-[#25d366] font-bold text-xs shrink-0"
-                                        >
-                                          {nxt === 'ready' ? '✓ Listo' : nxt === 'served' ? '🍽️ Servido' : '▶ Preparar'}
-                                        </button>
-                                      )}
-                                    </div>
-                                  );
-                                })}
-                            </div>
+                              <div className="my-3 py-2 border-y border-[#2b303c] space-y-2 text-xs">
+                                {order.items
+                                  .filter((i) => kitchenStation === 'todas' || (i.station || 'cocina') === kitchenStation)
+                                  .map((i, idx) => {
+                                    const st = i.itemStatus || 'pending';
+                                    const nxt = nextItemStatus(st);
+                                    return (
+                                      <motion.div
+                                        key={i.lineId || `${i.key}-${idx}`}
+                                        initial={{ opacity: 0, x: -6 }}
+                                        animate={{ opacity: 1, x: 0 }}
+                                        transition={{ type: 'spring', stiffness: 440, damping: 32, delay: Math.min(idx * 0.02, 0.1) }}
+                                        className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-[#16191f]/70"
+                                      >
+                                        <div className="min-w-0">
+                                          <div className="font-bold text-white truncate">{i.qty} × {i.name}</div>
+                                          <div className="text-xs text-[#8b92a0] uppercase">{i.station || 'cocina'} · {st}</div>
+                                          {i.note && <span className="text-xs text-[#eed889] block">Nota: {i.note}</span>}
+                                        </div>
+                                        {nxt && (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleAdvanceItemStatus(order.id, i.lineId || i.key, nxt)}
+                                            className="px-2 py-1 rounded bg-[#25d366]/20 hover:bg-[#25d366] hover:text-black text-[#25d366] font-bold text-xs shrink-0"
+                                          >
+                                            {nxt === 'ready' ? '✓ Listo' : nxt === 'served' ? '🍽️ Servido' : '▶ Preparar'}
+                                          </button>
+                                        )}
+                                      </motion.div>
+                                    );
+                                  })}
+                              </div>
 
-                            <button
-                              type="button"
-                              onClick={() => handleAdvanceOrderStatus(order.id, 'preparing')}
-                              className="w-full py-2 rounded-xl bg-[#25d366] hover:bg-[#20b858] text-black font-bold text-xs"
-                            >
-                              ✓ Marcar Estación Lista
-                            </button>
-                          </div>
-                        ))
+                              <button
+                                type="button"
+                                onClick={() => handleAdvanceOrderStatus(order.id, 'preparing')}
+                                className="w-full py-2 rounded-xl bg-[#25d366] hover:bg-[#20b858] text-black font-bold text-xs"
+                              >
+                                ✓ Marcar Estación Lista
+                              </button>
+                            </motion.div>
+                          ))}
+                      </AnimatePresence>
                     )}
                   </div>
                 </div>
@@ -3395,69 +3486,90 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                     {openOrders.filter((o) => o.status === 'ready' || o.status === 'served').length === 0 ? (
                       <div className="py-16 text-center text-[#8b92a0] text-xs">Sin órdenes por servir</div>
                     ) : (
-                      openOrders
-                        .filter((o) => o.status === 'ready' || o.status === 'served')
-                        .map((order) => (
-                          <div key={order.id} className="kds-ticket border-[#25d366]/40">
-                            <div className="flex items-start justify-between">
-                              <div>
-                                <div className="text-sm font-bold text-white flex items-center gap-1.5">
-                                  <span>Cuenta #{order.number}</span>
-                                  <span className="text-xs text-[#eed889]">· {locationLabel(order.service, order.location)}</span>
-                                </div>
-                                <div className="text-xs text-[#8b92a0]">
-                                  Mesero: {order.waiter} · Estado: <span className="text-[#25d366] font-bold uppercase">{order.status}</span>
+                      <AnimatePresence mode="popLayout">
+                        {openOrders
+                          .filter((o) => o.status === 'ready' || o.status === 'served')
+                          .map((order, orderIdx) => (
+                            <motion.div
+                              key={order.id}
+                              layout
+                              initial={{ opacity: 0, y: 14, scale: 0.97 }}
+                              animate={{ opacity: 1, y: 0, scale: 1 }}
+                              exit={{ opacity: 0, scale: 0.95 }}
+                              transition={{
+                                type: 'spring',
+                                stiffness: 400,
+                                damping: 30,
+                                delay: Math.min(orderIdx * 0.03, 0.15),
+                              }}
+                              className="kds-ticket border-[#25d366]/40"
+                            >
+                              <div className="flex items-start justify-between">
+                                <div>
+                                  <div className="text-sm font-bold text-white flex items-center gap-1.5">
+                                    <span>Cuenta #{order.number}</span>
+                                    <span className="text-xs text-[#eed889]">· {locationLabel(order.service, order.location)}</span>
+                                  </div>
+                                  <div className="text-xs text-[#8b92a0]">
+                                    Mesero: {order.waiter} · Estado: <span className="text-[#25d366] font-bold uppercase">{order.status}</span>
+                                  </div>
                                 </div>
                               </div>
-                            </div>
 
-                            <div className="my-3 py-2 border-y border-[#2b303c] space-y-1.5 text-xs">
-                              {order.items
-                                .filter((i) => kitchenStation === 'todas' || (i.station || 'cocina') === kitchenStation)
-                                .map((i, idx) => {
-                                  const st = i.itemStatus || 'pending';
-                                  const nxt = nextItemStatus(st);
-                                  return (
-                                    <div key={idx} className="flex items-center justify-between gap-2">
-                                      <span className="font-medium text-white truncate">
-                                        {i.qty} × {i.name} <span className="text-xs text-[#8b92a0]">({st})</span>
-                                      </span>
-                                      {nxt === 'served' && (
-                                        <button
-                                          type="button"
-                                          onClick={() => handleAdvanceItemStatus(order.id, i.lineId || i.key, 'served')}
-                                          className="px-2 py-0.5 rounded bg-[#173c34] text-[#25d366] font-bold text-xs"
-                                        >
-                                          🍽️ Servir
-                                        </button>
-                                      )}
-                                    </div>
-                                  );
-                                })}
-                            </div>
+                              <div className="my-3 py-2 border-y border-[#2b303c] space-y-1.5 text-xs">
+                                {order.items
+                                  .filter((i) => kitchenStation === 'todas' || (i.station || 'cocina') === kitchenStation)
+                                  .map((i, idx) => {
+                                    const st = i.itemStatus || 'pending';
+                                    const nxt = nextItemStatus(st);
+                                    return (
+                                      <motion.div
+                                        key={i.lineId || `${i.key}-${idx}`}
+                                        initial={{ opacity: 0, x: -6 }}
+                                        animate={{ opacity: 1, x: 0 }}
+                                        transition={{ type: 'spring', stiffness: 440, damping: 32, delay: Math.min(idx * 0.02, 0.1) }}
+                                        className="flex items-center justify-between gap-2"
+                                      >
+                                        <span className="font-medium text-white truncate">
+                                          {i.qty} × {i.name} <span className="text-xs text-[#8b92a0]">({st})</span>
+                                        </span>
+                                        {nxt === 'served' && (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleAdvanceItemStatus(order.id, i.lineId || i.key, 'served')}
+                                            className="px-2 py-0.5 rounded bg-[#173c34] text-[#25d366] font-bold text-xs"
+                                          >
+                                            🍽️ Servir
+                                          </button>
+                                        )}
+                                      </motion.div>
+                                    );
+                                  })}
+                              </div>
 
-                            {order.status !== 'served' ? (
-                              <button
-                                type="button"
-                                onClick={() => handleAdvanceOrderStatus(order.id, 'ready')}
-                                className="w-full py-2 rounded-xl bg-[#1e222b] hover:bg-[#2b303c] border border-[#2b303c] text-white font-bold text-xs"
-                              >
-                                🤝 Marcar Todo Entregado en Mesa
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setPayOrderId(order.id);
-                                  setView('cash');
-                                }}
-                                className="w-full py-2 rounded-xl bg-[#d4af37] text-black font-bold text-xs"
-                              >
-                                💵 Lista para Cobrar en Caja
-                              </button>
-                            )}
-                          </div>
-                        ))
+                              {order.status !== 'served' ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdvanceOrderStatus(order.id, 'ready')}
+                                  className="w-full py-2 rounded-xl bg-[#1e222b] hover:bg-[#2b303c] border border-[#2b303c] text-white font-bold text-xs"
+                                >
+                                  🤝 Marcar Todo Entregado en Mesa
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setPayOrderId(order.id);
+                                    setView('cash');
+                                  }}
+                                  className="w-full py-2 rounded-xl bg-[#d4af37] text-black font-bold text-xs"
+                                >
+                                  💵 Lista para Cobrar en Caja
+                                </button>
+                              )}
+                            </motion.div>
+                          ))}
+                      </AnimatePresence>
                     )}
                   </div>
                 </div>

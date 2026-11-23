@@ -1,4 +1,6 @@
 import React, { useState, useEffect, Component, ErrorInfo, ReactNode, lazy, Suspense } from 'react';
+import { MotionConfig } from 'framer-motion';
+import { OfflineIndicator } from './components/PwaControls';
 
 const PosView = lazy(() => import('./components/PosView').then(m => ({ default: m.PosView })));
 const MenuView = lazy(() => import('./components/MenuView').then(m => ({ default: m.MenuView })));
@@ -136,21 +138,24 @@ export const App: React.FC = () => {
   }, [activeView]);
 
   return (
-    <ErrorBoundary>
-      <div className="w-full min-h-dvh">
-        <Suspense fallback={
-          <div className="min-h-dvh bg-[#0a0a0b] text-[#f0e6d3] flex items-center justify-center">
-            <div className="text-xs uppercase tracking-widest text-[#c8a84b] font-bold">Cargando Barbachu...</div>
-          </div>
-        }>
-          {activeView === 'pos' ? (
-            <PosView onSwitchToMenu={() => setActiveView('menu')} />
-          ) : (
-            <MenuView onSwitchToPos={() => setActiveView('pos')} />
-          )}
-        </Suspense>
-      </div>
-    </ErrorBoundary>
+    <MotionConfig reducedMotion="user">
+      <ErrorBoundary>
+        <div className="w-full min-h-dvh">
+          <Suspense fallback={
+            <div className="min-h-dvh bg-[#0a0a0b] text-[#f0e6d3] flex items-center justify-center">
+              <div className="text-xs uppercase tracking-widest text-[#c8a84b] font-bold">Cargando Barbachu...</div>
+            </div>
+          }>
+            {activeView === 'pos' ? (
+              <PosView onSwitchToMenu={() => setActiveView('menu')} />
+            ) : (
+              <MenuView onSwitchToPos={() => setActiveView('pos')} />
+            )}
+          </Suspense>
+          <OfflineIndicator />
+        </div>
+      </ErrorBoundary>
+    </MotionConfig>
   );
 };
 

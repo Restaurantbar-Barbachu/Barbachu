@@ -45,9 +45,23 @@ function whatsappProxyPlugin(): Plugin {
   return {
     name: 'whatsapp-server-redirect',
     configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (req.url && req.url.split('?')[0] === '/sw.js') {
+          res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+          res.setHeader('Service-Worker-Allowed', '/');
+        }
+        next();
+      });
       server.middlewares.use(handlePedir);
     },
     configurePreviewServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (req.url && req.url.split('?')[0] === '/sw.js') {
+          res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+          res.setHeader('Service-Worker-Allowed', '/');
+        }
+        next();
+      });
       server.middlewares.use(handlePedir);
     },
   };

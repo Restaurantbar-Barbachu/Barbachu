@@ -1,12 +1,41 @@
 {
+  "id": "/",
   "name": "Barbachu Restaurante Bar & POS",
-  "short_name": "Barbachu POS",
-  "description": "Punto de Venta y Menú Digital para Barbachu Restaurante Bar",
+  "short_name": "Barbachu",
+  "description": "Menú digital y punto de venta para Barbachu Restaurante Bar con modo offline.",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
+  "orientation": "any",
   "background_color": "#0a0a0b",
   "theme_color": "#0a0a0b",
+  "lang": "es-MX",
+  "categories": ["food", "business", "productivity"],
   "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
     {
       "src": "/favicon.ico",
       "sizes": "64x64 32x32 24x24 16x16",

@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { motion } from 'framer-motion';
 import { RESTAURANT_MENU_SECTIONS } from '../data/restaurantMenu';
 import { SOFT_PRODUCTS } from '../data/softRestaurantCatalog';
 import { MenuItemData, MenuSectionData, SoftProduct } from '../types';
 import { BarbachuLogo } from './BarbachuLogo';
 import { subscribePublicMenuProducts } from '../lib/firestoreSync';
+import { PWAInstallButton } from './PwaControls';
 
 interface MenuViewProps {
   onSwitchToPos?: () => void;
@@ -169,15 +171,18 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
           <BarbachuLogo className="w-4 h-4" />
           <span>Barbachu · Restaurante Bar</span>
         </span>
-        {onSwitchToPos && (
-          <button
-            type="button"
-            onClick={onSwitchToPos}
-            className="min-h-[38px] px-3.5 py-1.5 rounded-full bg-white/[0.07] hover:bg-white/[0.13] text-[#e8d090] border border-white/15 font-semibold transition-all active:scale-95 flex items-center gap-1.5"
-          >
-            <span>Acceso Personal (POS)</span>
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          <PWAInstallButton compact />
+          {onSwitchToPos && (
+            <button
+              type="button"
+              onClick={onSwitchToPos}
+              className="min-h-[38px] px-3.5 py-1.5 rounded-full bg-white/[0.07] hover:bg-white/[0.13] text-[#e8d090] border border-white/15 font-semibold transition-all active:scale-95 flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            >
+              <span>Acceso Personal (POS)</span>
+            </button>
+          )}
+        </div>
       </div>
 
       <main className="max-w-[640px] mx-auto px-4 pb-28" id="main">
@@ -259,12 +264,22 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
               {/* Cards for Especialidades */}
               {section.id === 'espec' && (
                 <div className="cards flex gap-3 overflow-x-auto no-scrollbar pb-3 -mx-4 px-4 scroll-pl-4 snap-x snap-mandatory">
-                  {section.items.map((item) => (
-                    <button
+                  {section.items.map((item, itemIdx) => (
+                    <motion.button
                       key={item.id}
                       type="button"
                       onClick={() => setSelectedItem(item)}
-                      className="card snap-start flex-none w-[224px] text-left p-4 rounded-[22px] bg-gradient-to-br from-[#c8a84b]/15 via-[#161618]/90 to-[#121215] border border-white/15 hover:border-[#c8a84b]/70 transition-all duration-150 active:scale-[0.97] shadow-[0_8px_24px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.08)] group animate-in fade-in duration-300"
+                      initial={{ opacity: 0, y: 12, scale: 0.97 }}
+                      whileInView={{ opacity: 1, y: 0, scale: 1 }}
+                      viewport={{ once: true, amount: 0.1 }}
+                      whileTap={{ scale: 0.97 }}
+                      transition={{
+                        type: 'spring',
+                        stiffness: 420,
+                        damping: 32,
+                        delay: Math.min(itemIdx * 0.03, 0.15),
+                      }}
+                      className="card snap-start flex-none w-[224px] text-left p-4 rounded-[22px] bg-gradient-to-br from-[#c8a84b]/15 via-[#161618]/90 to-[#121215] border border-white/15 hover:border-[#c8a84b]/70 transition-colors duration-150 shadow-[0_8px_24px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.08)] group"
                     >
                       <span className="c-ico text-2xl block mb-2">{item.icon}</span>
                       <strong className="c-name block font-serif font-bold text-base text-[#f0e6d3] group-hover:text-[#c8a84b] transition-colors tracking-[-0.01em]">
@@ -278,7 +293,7 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
                           {item.desc}
                         </p>
                       )}
-                    </button>
+                    </motion.button>
                   ))}
                 </div>
               )}
@@ -286,12 +301,22 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
               {/* Standard Inset-Grouped List Items */}
               {section.items.length > 0 && section.id !== 'espec' && (
                 <div className="list bg-[#161618]/85 backdrop-blur-xl border border-white/10 rounded-[22px] divide-y divide-white/[0.07] overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
-                  {section.items.map((item) => (
-                    <button
+                  {section.items.map((item, itemIdx) => (
+                    <motion.button
                       key={item.id}
                       type="button"
                       onClick={() => setSelectedItem(item)}
-                      className="row w-full min-h-[56px] flex items-center justify-between px-4 py-3.5 text-left hover:bg-white/[0.04] active:bg-white/[0.08] transition-colors animate-in fade-in duration-300"
+                      initial={{ opacity: 0, y: 10 }}
+                      whileInView={{ opacity: 1, y: 0 }}
+                      viewport={{ once: true, amount: 0.08 }}
+                      whileTap={{ scale: 0.99 }}
+                      transition={{
+                        type: 'spring',
+                        stiffness: 440,
+                        damping: 34,
+                        delay: Math.min(itemIdx * 0.015, 0.12),
+                      }}
+                      className="row w-full min-h-[56px] flex items-center justify-between px-4 py-3.5 text-left hover:bg-white/[0.04] active:bg-white/[0.08] transition-colors"
                     >
                       <div className="pr-4">
                         <span className="r-name block font-medium text-[15px] text-[#f0e6d3] leading-snug">
@@ -311,7 +336,7 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
                       <span className="r-price flex-none font-bold text-sm text-[#e8d090] tabular-nums">
                         {item.price}
                       </span>
-                    </button>
+                    </motion.button>
                   ))}
                 </div>
               )}
@@ -330,12 +355,22 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
                         </p>
                       )}
                       <div className="list bg-[#161618]/85 backdrop-blur-xl border border-white/10 rounded-[22px] divide-y divide-white/[0.07] overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
-                        {sub.items.map((item) => (
-                          <button
+                        {sub.items.map((item, subItemIdx) => (
+                          <motion.button
                             key={item.id}
                             type="button"
                             onClick={() => setSelectedItem(item)}
-                            className="row w-full min-h-[56px] flex items-center justify-between px-4 py-3.5 text-left hover:bg-white/[0.04] active:bg-white/[0.08] transition-colors animate-in fade-in duration-300"
+                            initial={{ opacity: 0, y: 10 }}
+                            whileInView={{ opacity: 1, y: 0 }}
+                            viewport={{ once: true, amount: 0.08 }}
+                            whileTap={{ scale: 0.99 }}
+                            transition={{
+                              type: 'spring',
+                              stiffness: 440,
+                              damping: 34,
+                              delay: Math.min(subItemIdx * 0.015, 0.12),
+                            }}
+                            className="row w-full min-h-[56px] flex items-center justify-between px-4 py-3.5 text-left hover:bg-white/[0.04] active:bg-white/[0.08] transition-colors"
                           >
                             <div className="pr-4">
                               <span className="r-name block font-medium text-[15px] text-[#f0e6d3] leading-snug">
@@ -350,7 +385,7 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
                             <span className="r-price flex-none font-bold text-sm text-[#e8d090] tabular-nums">
                               {item.price}
                             </span>
-                          </button>
+                          </motion.button>
                         ))}
                       </div>
                     </div>

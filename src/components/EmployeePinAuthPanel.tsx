@@ -16,6 +16,7 @@ import {
   fsFetchStaffUsersSnapshot,
   fsVerifyEmployeePinFromFirestore,
 } from '../lib/firestoreSync';
+import { sharedPinRateLimiter } from '../utils/pinSecurity';
 import { BarbachuLogo } from './BarbachuLogo';
 
 export type PosViewRoute =
@@ -106,6 +107,7 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [verifying, setVerifying] = useState<boolean>(false);
   const [refreshing, setRefreshing] = useState<boolean>(false);
+  const [lockRemainingSec, setLockRemainingSec] = useState<number>(0);
 
   const filteredUsers = useMemo(() => {
     const list = users || [];
@@ -122,11 +124,30 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
     );
   }, [users, filteredUsers, selectedId, activeUser]);
 
+  const rlScope = useMemo(
+    () => `gate:${selectedEmployee?.id || 'default'}`,
+    [selectedEmployee?.id]
+  );
+
   useEffect(() => {
     if (!selectedId && users.length > 0) {
       setSelectedId(activeUser?.id || users[0].id);
     }
   }, [users, selectedId, activeUser?.id]);
+
+  useEffect(() => {
+    const status = sharedPinRateLimiter.check(rlScope);
+    setLockRemainingSec(status.blocked ? Math.ceil(status.remainingMs / 1000) : 0);
+  }, [rlScope]);
+
+  useEffect(() => {
+    if (lockRemainingSec <= 0) return;
+    const timer = window.setInterval(() => {
+      const status = sharedPinRateLimiter.check(rlScope);
+      setLockRemainingSec(status.blocked ? Math.ceil(status.remainingMs / 1000) : 0);
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [lockRemainingSec, rlScope]);
 
   const selectedCapabilities = useMemo(() => {
     if (!selectedEmployee) return [];
@@ -150,8 +171,19 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
     }
   };
 
+  const isLocked = lockRemainingSec > 0;
+
   const submitPinAttempt = async (candidatePin: string) => {
     if (!selectedEmployee || verifying) return;
+    const preCheck = sharedPinRateLimiter.check(rlScope);
+    if (preCheck.blocked) {
+      const sec = Math.ceil(preCheck.remainingMs / 1000);
+      setLockRemainingSec(sec);
+      setErrorMsg(`Demasiados intentos. Espera ${sec}s.`);
+      setPin('');
+      return;
+    }
+
     setVerifying(true);
     setErrorMsg(null);
     try {
@@ -162,11 +194,22 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
         authorizedEmails
       );
       if (res.ok && res.user) {
+        sharedPinRateLimiter.reset(rlScope);
+        setLockRemainingSec(0);
         setPin('');
         setErrorMsg(null);
         onAuthenticated(res.user);
       } else {
-        setErrorMsg(res.error || 'PIN incorrecto. Verifica tus 4 dígitos.');
+        const nextStatus = sharedPinRateLimiter.recordFailure(rlScope);
+        if (nextStatus.blocked) {
+          const sec = Math.ceil(nextStatus.remainingMs / 1000);
+          setLockRemainingSec(sec);
+          setErrorMsg(`Demasiados intentos fallidos. Bloqueado por ${sec}s.`);
+        } else {
+          setErrorMsg(
+            `${res.error || 'PIN incorrecto.'} (${nextStatus.attemptsLeft} intento${nextStatus.attemptsLeft === 1 ? '' : 's'} restante${nextStatus.attemptsLeft === 1 ? '' : 's'})`
+          );
+        }
         setTimeout(() => setPin(''), 260);
       }
     } catch {
@@ -178,7 +221,7 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
   };
 
   const handleDigit = (digit: string) => {
-    if (verifying || !selectedEmployee || pin.length >= 4) return;
+    if (verifying || isLocked || !selectedEmployee || pin.length >= 4) return;
     const nextPin = pin + digit;
     setPin(nextPin);
     setErrorMsg(null);
@@ -188,7 +231,7 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
   };
 
   const handleBackspace = () => {
-    if (verifying) return;
+    if (verifying || isLocked) return;
     setPin((p) => p.slice(0, -1));
     setErrorMsg(null);
   };
@@ -207,7 +250,7 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pin, selectedEmployee?.id, verifying, mode]);
+  }, [pin, selectedEmployee?.id, verifying, isLocked, mode]);
 
   const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
 
@@ -350,7 +393,7 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
 
             {/* Selected Employee Capabilities Preview */}
             {selectedEmployee && (
-              <div className="p-3.5 rounded-2xl bg-[#0a0a0b]/60 border border-white/10 space-y-1">
+              <div className="p-3.5 rounded-2xl bg-[#0a0a0b]/60 border border-white/10 space-y-1.5">
                 <div className="text-xs uppercase tracking-[0.06em] font-semibold text-[#e8d090] flex items-center gap-1.5">
                   <UserCheck className="w-3.5 h-3.5" />
                   Funciones habilitadas para {selectedEmployee.name.split(' ')[0]}
@@ -358,6 +401,11 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
                 <p className="text-xs text-[rgba(240,230,211,0.72)] leading-relaxed">
                   {selectedCapabilities.join(' · ')}
                 </p>
+                {selectedEmployee.mustChangePin && (
+                  <p className="text-xs font-semibold text-[#f2a93b] pt-0.5">
+                    PIN inicial activo — deberás configurar un PIN personal al ingresar.
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -386,7 +434,7 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
                     <div
                       key={idx}
                       className={`w-3.5 h-3.5 rounded-full transition-all duration-150 border ${
-                        errorMsg
+                        errorMsg || isLocked
                           ? 'border-[#e05252] bg-[#e05252]/40 scale-105'
                           : filled
                           ? 'border-[#e8d090] bg-[#e8d090] scale-110 shadow-[0_0_12px_rgba(232,208,144,0.45)]'
@@ -396,7 +444,11 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
                   );
                 })}
               </div>
-              {verifying ? (
+              {isLocked ? (
+                <p className="text-xs font-semibold text-[#e05252] min-h-[18px]">
+                  Bloqueado temporalmente · Espera {lockRemainingSec}s
+                </p>
+              ) : verifying ? (
                 <p className="text-xs font-semibold text-[#e8d090] min-h-[18px]">
                   Verificando PIN en Firestore...
                 </p>
@@ -417,7 +469,7 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
                 <button
                   key={digit}
                   type="button"
-                  disabled={verifying || !selectedEmployee}
+                  disabled={verifying || isLocked || !selectedEmployee}
                   onClick={() => handleDigit(digit)}
                   className="w-14 h-14 sm:w-16 sm:h-16 rounded-full bg-white/[0.08] hover:bg-white/[0.16] active:scale-95 disabled:opacity-40 border border-white/10 text-xl sm:text-2xl font-medium text-white tabular-nums flex items-center justify-center transition-all"
                 >
@@ -427,19 +479,19 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
 
               <button
                 type="button"
-                disabled={verifying}
+                disabled={verifying || isLocked}
                 onClick={() => {
                   setPin('');
                   setErrorMsg(null);
                 }}
-                className="w-14 h-14 sm:w-16 sm:h-16 rounded-full text-xs font-semibold text-[rgba(240,230,211,0.68)] hover:text-white active:scale-95 flex items-center justify-center transition-all"
+                className="w-14 h-14 sm:w-16 sm:h-16 rounded-full text-xs font-semibold text-[rgba(240,230,211,0.68)] hover:text-white active:scale-95 disabled:opacity-40 flex items-center justify-center transition-all"
               >
                 Limpiar
               </button>
 
               <button
                 type="button"
-                disabled={verifying || !selectedEmployee}
+                disabled={verifying || isLocked || !selectedEmployee}
                 onClick={() => handleDigit('0')}
                 className="w-14 h-14 sm:w-16 sm:h-16 rounded-full bg-white/[0.08] hover:bg-white/[0.16] active:scale-95 disabled:opacity-40 border border-white/10 text-xl sm:text-2xl font-medium text-white tabular-nums flex items-center justify-center transition-all"
               >
@@ -448,7 +500,7 @@ export const EmployeePinAuthPanel: React.FC<EmployeePinAuthPanelProps> = ({
 
               <button
                 type="button"
-                disabled={verifying}
+                disabled={verifying || isLocked}
                 onClick={handleBackspace}
                 aria-label="Borrar dígito"
                 className="w-14 h-14 sm:w-16 sm:h-16 rounded-full text-[rgba(240,230,211,0.72)] hover:text-white active:scale-95 disabled:opacity-40 flex items-center justify-center transition-all"

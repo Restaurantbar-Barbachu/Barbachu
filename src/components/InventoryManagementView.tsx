@@ -12,7 +12,8 @@ import {
 import { FullPosState, InventoryItem, InventoryMovement, AuditLogEntry } from '../types';
 import { formatMoney } from '../storage';
 import { uid } from '../core';
-import { fsSaveInventoryMovement } from '../lib/firestoreSync';
+import { fsCreateInventoryItem, fsDeleteInventoryItem, fsSaveInventoryMovement } from '../lib/firestoreSync';
+import { downloadCsvFile } from '../utils/csv';
 
 interface InventoryManagementViewProps {
   state: FullPosState;
@@ -103,6 +104,11 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
       return;
     }
 
+    if (firebaseUser && !isFirebaseAdmin) {
+      notify('Solo un Administrador puede registrar nuevos insumos en Firestore.');
+      return;
+    }
+
     const newItem: InventoryItem = {
       clave: claveNum,
       descripcion: newDesc.trim(),
@@ -132,7 +138,9 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
     }));
 
     if (firebaseUser) {
-      void fsSaveInventoryMovement(newItem, null, firebaseUser, authorizedEmails, auditEntry);
+      void fsCreateInventoryItem(newItem, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
+        notify(`Error guardando insumo en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+      });
     }
 
     notify(`Insumo "${newItem.descripcion}" registrado con éxito.`);
@@ -169,7 +177,9 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
       }));
 
       if (firebaseUser) {
-        void fsSaveInventoryMovement(updatedItem, null, firebaseUser, authorizedEmails, auditEntry);
+        void fsSaveInventoryMovement(updatedItem, null, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
+          notify(`Error actualizando umbral en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+        });
       }
 
       setModalAction(null);
@@ -241,7 +251,12 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
     }));
 
     if (firebaseUser) {
-      void fsSaveInventoryMovement(updatedItem, mov, firebaseUser, authorizedEmails, auditEntry);
+      const costChanged = isFirebaseAdmin && costVal > 0 && costVal !== item.costo;
+      void fsSaveInventoryMovement(updatedItem, mov, firebaseUser, authorizedEmails, auditEntry, {
+        updateCost: costChanged,
+      }).catch((err) => {
+        notify(`Error guardando movimiento en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+      });
     }
 
     setModalAction(null);
@@ -254,6 +269,11 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
   const handleDeleteItem = (clave: number) => {
     const item = state.inventory[clave];
     if (!item) return;
+    if (firebaseUser && !isFirebaseAdmin) {
+      notify('Solo un Administrador puede eliminar insumos.');
+      setConfirmDeleteClave(null);
+      return;
+    }
 
     const now = new Date().toISOString();
     const auditEntry: AuditLogEntry = {
@@ -274,6 +294,12 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
       };
     });
 
+    if (firebaseUser) {
+      void fsDeleteInventoryItem(clave, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
+        notify(`Error eliminando insumo en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+      });
+    }
+
     setConfirmDeleteClave(null);
     notify(`Insumo "${item.descripcion}" eliminado del inventario.`);
   };
@@ -282,21 +308,14 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
     const headers = ['Clave', 'Descripcion', 'Categoria', 'Unidad', 'Costo_Unitario', 'Stock_Actual', 'Stock_Minimo'];
     const rows = inventoryList.map((i) => [
       i.clave,
-      `"${i.descripcion.replace(/"/g, '""')}"`,
-      `"${i.categoria.replace(/"/g, '""')}"`,
+      i.descripcion,
+      i.categoria,
       i.unidad,
       i.costo.toFixed(2),
       i.stock,
       i.minStock,
     ]);
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `inventario_barbachu_${new Date().toISOString().slice(0, 10)}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    downloadCsvFile(`inventario_barbachu_${new Date().toISOString().slice(0, 10)}.csv`, headers, rows);
     notify('Inventario exportado en CSV.');
   };
 
@@ -378,7 +397,7 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
             <button
               key={tab.id}
               type="button"
-              onClick={() => setActiveSubTab(tab.id as any)}
+              onClick={() => setActiveSubTab(tab.id)}
               className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap shrink-0 flex items-center gap-2 ${
                 activeSubTab === tab.id
                   ? 'bg-[#c8a84b] text-[#0a0a0b] shadow-md'
@@ -409,6 +428,7 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
                 <button
                   type="button"
                   onClick={() => setSearchQuery('')}
+                  aria-label="Limpiar búsqueda de insumos"
                   className="absolute right-2 top-2 w-7 h-7 rounded-xl flex items-center justify-center text-[rgba(240,230,211,0.6)] hover:text-white"
                 >
                   <X className="w-3.5 h-3.5" />
@@ -519,6 +539,7 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
                           <button
                             type="button"
                             onClick={() => setConfirmDeleteClave(item.clave)}
+                            aria-label={`Eliminar ${item.descripcion}`}
                             className="min-h-[34px] px-2 py-1 rounded-xl bg-[#e05252]/15 hover:bg-[#e05252]/25 text-[#e05252] border border-[#e05252]/30"
                             title="Eliminar insumo"
                           >

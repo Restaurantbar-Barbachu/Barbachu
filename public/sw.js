@@ -7,6 +7,7 @@ const SHELL_ASSETS = [
   '/icon.svg',
   '/pwa-192x192.png',
   '/pwa-512x512.png',
+  '/pwa-maskable-512x512.png',
   '/apple-touch-icon.png',
 ];
 
@@ -128,7 +129,7 @@ self.addEventListener('fetch', (event) => {
             return toNonRedirectedResponse(cachedShell);
           }
           return new Response(
-            '<!doctype html><html lang="es"><body style="background:#0a0a0b;color:#f0e6d3;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center;padding:24px;"><div><h1>Barbachu POS · Sin conexión</h1><p>Reconecta a internet para cargar la versión inicial en caché.</p></div></body></html>',
+            '<!doctype html><html lang="es"><body style="background:#0a0a0b;color:#f0e6d3;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100dvh;text-align:center;padding:24px;"><div><h1>Barbachu POS · Sin conexión</h1><p>Reconecta a internet para cargar la versión inicial en caché.</p></div></body></html>',
             { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
           );
         })

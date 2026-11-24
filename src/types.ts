@@ -172,6 +172,8 @@ export interface PosUser {
   role: UserRole;
   avatar: string;
   pin: string;
+  pinHash?: string;
+  mustChangePin?: boolean;
   area: string;
   email?: string;
 }

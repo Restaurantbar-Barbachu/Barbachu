@@ -102,6 +102,23 @@ export async function testConnection(): Promise<boolean> {
   }
 }
 
+export async function measureCloudLatencyMs(): Promise<number | null> {
+  if (!auth.currentUser || (typeof navigator !== 'undefined' && !navigator.onLine)) {
+    return null;
+  }
+  const start = performance.now();
+  try {
+    await getDocFromServer(doc(db, 'test', 'connection'));
+    return Math.max(1, Math.round(performance.now() - start));
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      return null;
+    }
+    // Permission-denied or missing doc still confirms server round-trip completed
+    return Math.max(1, Math.round(performance.now() - start));
+  }
+}
+
 export async function signInWithGoogle(): Promise<User> {
   const result = await signInWithPopup(auth, googleProvider);
   return result.user;

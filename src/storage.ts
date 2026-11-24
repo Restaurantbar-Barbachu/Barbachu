@@ -1,10 +1,19 @@
 import { FullPosState, PosUser, InventoryItem, CashShift, RestaurantConfig, UserRole, RolePermissions, DeviceConfig } from './types';
 import { SOFT_INGREDIENTS, SOFT_PRODUCTS } from './data/softRestaurantCatalog';
 
-export const POS_STORAGE_KEY = 'barbachu.pos.production.v1';
+export const POS_STORAGE_KEY = 'barbachu.pos.device.v2';
+const LEGACY_POS_STORAGE_KEY = 'barbachu.pos.production.v1';
 
 export const DEFAULT_USERS: PosUser[] = [
-  { id: 'usr-admin', name: 'Administrador Principal', role: 'admin', avatar: 'AD', pin: '0000', area: 'Gerencia General' },
+  {
+    id: 'usr-admin',
+    name: 'Administrador Principal',
+    role: 'admin',
+    avatar: 'AD',
+    pin: '****',
+    mustChangePin: true,
+    area: 'Gerencia General',
+  },
 ];
 
 export const DEFAULT_PERMISSIONS: Record<UserRole, RolePermissions> = {
@@ -125,50 +134,54 @@ export function createInitialPosState(): FullPosState {
   };
 }
 
+interface LightweightTerminalPrefs {
+  deviceConfig?: DeviceConfig;
+  config?: Partial<RestaurantConfig>;
+}
+
 export function loadPosState(storage: Storage = window.localStorage): FullPosState {
+  const base = createInitialPosState();
   try {
+    // Purge legacy v1 full-state dump that stored plaintext PINs and full collections
+    if (storage.getItem(LEGACY_POS_STORAGE_KEY)) {
+      storage.removeItem(LEGACY_POS_STORAGE_KEY);
+    }
     const raw = storage.getItem(POS_STORAGE_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && Array.isArray(parsed.orders) && Array.isArray(parsed.sales)) {
-        const users: PosUser[] =
-          Array.isArray(parsed.users) && parsed.users.length > 0 ? parsed.users : DEFAULT_USERS;
-        const activeUser =
-          parsed.activeUser && users.some((u) => u.id === parsed.activeUser.id)
-            ? parsed.activeUser
-            : users[0];
-
+      const parsed = JSON.parse(raw) as LightweightTerminalPrefs;
+      if (parsed && typeof parsed === 'object') {
         return {
-          ...createInitialPosState(),
-          ...parsed,
-          users,
-          activeUser,
-          permissions: parsed.permissions || DEFAULT_PERMISSIONS,
-          deviceConfig: parsed.deviceConfig || DEFAULT_DEVICE_CONFIG,
-          config: { ...DEFAULT_CONFIG, ...(parsed.config || {}) },
-          staffClock: Array.isArray(parsed.staffClock) ? parsed.staffClock : [],
-          products:
-            Array.isArray(parsed.products) && parsed.products.length > 0
-              ? parsed.products
-              : SOFT_PRODUCTS.map((p) => ({ ...p })),
-          inventory: {
-            ...createInitialInventory(),
-            ...(parsed.inventory || {}),
-          },
+          ...base,
+          deviceConfig: parsed.deviceConfig
+            ? { ...DEFAULT_DEVICE_CONFIG, ...parsed.deviceConfig }
+            : DEFAULT_DEVICE_CONFIG,
+          config: parsed.config ? { ...DEFAULT_CONFIG, ...parsed.config } : DEFAULT_CONFIG,
         };
       }
     }
   } catch (err) {
-    console.warn('Error loading POS state, returning initial state:', err);
+    console.warn('Error loading terminal preferences, returning initial state:', err);
   }
-  return createInitialPosState();
+  return base;
 }
 
 export function savePosState(state: FullPosState, storage: Storage = window.localStorage): void {
   try {
-    storage.setItem(POS_STORAGE_KEY, JSON.stringify(state));
+    const prefs: LightweightTerminalPrefs = {
+      deviceConfig: state.deviceConfig,
+      config: {
+        name: state.config.name,
+        tagline: state.config.tagline,
+        address: state.config.address,
+        currency: state.config.currency,
+        receiptFooter: state.config.receiptFooter,
+        suggestedTipPct: state.config.suggestedTipPct,
+        autoLockMinutes: state.config.autoLockMinutes,
+      },
+    };
+    storage.setItem(POS_STORAGE_KEY, JSON.stringify(prefs));
   } catch (err) {
-    console.error('Error saving POS state:', err);
+    console.error('Error saving terminal preferences:', err);
   }
 }
 

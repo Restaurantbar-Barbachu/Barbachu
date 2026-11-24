@@ -17,6 +17,7 @@ import {
 import { BarChart3, Clock, CreditCard, TrendingUp, UtensilsCrossed } from 'lucide-react';
 import { FullPosState } from '../types';
 import { formatMoney } from '../storage';
+import { buildSalesTrend, toLocalDateKey } from '../utils/dashboardMetrics';
 
 interface PosAnalyticsDashboardProps {
   state: FullPosState;
@@ -65,14 +66,6 @@ const CustomTooltip = ({ active, payload, label }: {
   return null;
 };
 
-const toLocalDateKey = (dateInput: Date | string): string => {
-  const d = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-};
-
 export const PosAnalyticsDashboard: React.FC<PosAnalyticsDashboardProps> = ({ state }) => {
   const [timeRange, setTimeRange] = useState<'hoy' | 'semana' | 'mes'>('hoy');
   const [productMetric, setProductMetric] = useState<'revenue' | 'units'>('revenue');
@@ -110,35 +103,7 @@ export const PosAnalyticsDashboard: React.FC<PosAnalyticsDashboardProps> = ({ st
   }, [state.orders]);
 
   // Real 7-day daily sales history (zero fake baselines)
-  const dailySalesData = useMemo(() => {
-    const dateMap = new Map<string, { revenueCents: number; count: number }>();
-    state.sales.forEach((s) => {
-      const dateKey = toLocalDateKey(s.paidAt);
-      const curr = dateMap.get(dateKey) || { revenueCents: 0, count: 0 };
-      curr.revenueCents += s.totalCents;
-      curr.count += 1;
-      dateMap.set(dateKey, curr);
-    });
-
-    const days = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
-    const result = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const dateKey = toLocalDateKey(d);
-      const dayName = days[d.getDay()];
-      const dayNum = d.getDate();
-      const liveData = dateMap.get(dateKey);
-
-      result.push({
-        date: `${dayName} ${dayNum}`,
-        dateKey,
-        ventas: liveData ? Math.round((liveData.revenueCents / 100) * 100) / 100 : 0,
-        tickets: liveData ? liveData.count : 0,
-      });
-    }
-    return result;
-  }, [state.sales]);
+  const dailySalesData = useMemo(() => buildSalesTrend(state.sales, 7), [state.sales]);
 
   // Real hourly sales data (zero mock curves)
   const hourlySalesData = useMemo(() => {
@@ -637,7 +602,7 @@ export const PosAnalyticsDashboard: React.FC<PosAnalyticsDashboardProps> = ({ st
                     <XAxis
                       dataKey="categoria"
                       stroke="rgba(240,230,211,0.5)"
-                      tick={{ fill: 'rgba(240,230,211,0.7)', fontSize: 10 }}
+                      tick={{ fill: 'rgba(240,230,211,0.7)', fontSize: 11 }}
                       interval={0}
                       angle={-25}
                       textAnchor="end"

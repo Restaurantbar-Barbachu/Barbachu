@@ -42,28 +42,35 @@ function whatsappProxyPlugin(): Plugin {
     return res.end();
   };
 
+  const attachMiddlewares = (server: {
+    middlewares: {
+      use: (
+        fn: (
+          req: { method?: string; url?: string },
+          res: {
+            statusCode: number;
+            setHeader: (name: string, value: string) => void;
+            end: (body?: string) => void;
+          },
+          next: () => void
+        ) => void
+      ) => void;
+    };
+  }) => {
+    server.middlewares.use((req, res, next) => {
+      if (req.url && req.url.split('?')[0] === '/sw.js') {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        res.setHeader('Service-Worker-Allowed', '/');
+      }
+      next();
+    });
+    server.middlewares.use(handlePedir);
+  };
+
   return {
     name: 'whatsapp-server-redirect',
-    configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        if (req.url && req.url.split('?')[0] === '/sw.js') {
-          res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-          res.setHeader('Service-Worker-Allowed', '/');
-        }
-        next();
-      });
-      server.middlewares.use(handlePedir);
-    },
-    configurePreviewServer(server) {
-      server.middlewares.use((req, res, next) => {
-        if (req.url && req.url.split('?')[0] === '/sw.js') {
-          res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-          res.setHeader('Service-Worker-Allowed', '/');
-        }
-        next();
-      });
-      server.middlewares.use(handlePedir);
-    },
+    configureServer: attachMiddlewares,
+    configurePreviewServer: attachMiddlewares,
   };
 }
 

@@ -33,6 +33,8 @@ function normalizeLabel(value: string): string {
     .replace(/[^a-z0-9]/g, '');
 }
 
+const KNOWN_CATALOG_NORMS = new Set(SOFT_PRODUCTS.map((p) => normalizeLabel(p.name)));
+
 function formatMenuPrice(priceCents: number): string {
   const pesos = priceCents / 100;
   return Number.isInteger(pesos) ? `$${pesos}` : `$${pesos.toFixed(2)}`;
@@ -62,32 +64,41 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
       byNormName.set(normalizeLabel(prod.name), prod);
     }
 
-    const mapItem = (item: MenuItemData): MenuItemData => {
+    const mapItem = (item: MenuItemData): MenuItemData | null => {
       const candidates = [
         normalizeLabel(item.name),
         normalizeLabel(`${item.group} ${item.name}`),
       ];
       for (const candidate of candidates) {
         const match = byNormName.get(candidate);
-        if (match && match.priceCents > 0) {
+        if (match) {
           return {
             ...item,
-            price: formatMenuPrice(match.priceCents),
-            priceCents: match.priceCents,
+            price: match.priceCents > 0 ? formatMenuPrice(match.priceCents) : item.price,
+            priceCents: match.priceCents > 0 ? match.priceCents : item.priceCents,
           };
         }
+      }
+      if (candidates.some((candidate) => KNOWN_CATALOG_NORMS.has(candidate))) {
+        return null;
       }
       return item;
     };
 
-    const updatedSections: MenuSectionData[] = RESTAURANT_MENU_SECTIONS.map((sec) => ({
-      ...sec,
-      items: sec.items.map(mapItem),
-      subcategories: sec.subcategories?.map((sub) => ({
-        ...sub,
-        items: sub.items.map(mapItem),
-      })),
-    }));
+    const updatedSections: MenuSectionData[] = RESTAURANT_MENU_SECTIONS.map((sec) => {
+      const items = sec.items.map(mapItem).filter((x): x is MenuItemData => x !== null);
+      const subcategories = sec.subcategories
+        ?.map((sub) => ({
+          ...sub,
+          items: sub.items.map(mapItem).filter((x): x is MenuItemData => x !== null),
+        }))
+        .filter((sub) => sub.items.length > 0);
+      return {
+        ...sec,
+        items,
+        subcategories,
+      };
+    }).filter((sec) => sec.items.length > 0 || (sec.subcategories?.length ?? 0) > 0);
 
     const customProducts = liveProducts.filter(
       (p) => p.saleEnabled && !DEFAULT_PRODUCT_KEYS.has(p.key)
@@ -109,9 +120,11 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
       });
     }
 
+    const renderedIds = new Set(updatedSections.map((s) => s.id));
+    const filteredBaseChips = BASE_CHIPS.filter((c) => renderedIds.has(c.id));
     const nextChips = customProducts.length > 0
-      ? [...BASE_CHIPS, { id: 'sec-nuevos', label: 'Nuevos' }]
-      : BASE_CHIPS;
+      ? [...filteredBaseChips, { id: 'sec-nuevos', label: 'Nuevos' }]
+      : filteredBaseChips;
 
     return { menuSections: updatedSections, chips: nextChips };
   }, [liveProducts]);

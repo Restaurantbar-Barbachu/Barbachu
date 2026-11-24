@@ -34,7 +34,6 @@ import {
   Tag,
   UserCheck,
   UtensilsCrossed,
-  Wifi,
   WifiOff,
   X,
 } from 'lucide-react';
@@ -63,6 +62,7 @@ import {
   ROLE_LABELS,
 } from './EmployeePinAuthPanel';
 import { IosPinPadModal } from './IosPinPadModal';
+import { DeviceSyncModal } from './DeviceSyncModal';
 import { PWAInstallButton } from './PwaControls';
 import { useOnlineStatus } from '../hooks/usePwaStatus';
 const PosAnalyticsDashboard = lazy(() => import('./PosAnalyticsDashboard').then(m => ({ default: m.PosAnalyticsDashboard })));
@@ -89,6 +89,7 @@ import {
   fsSaveOrder,
   fsSplitOrder,
   fsUpdateOrder,
+  fsUpdateStaffPin,
   fsVerifyAnyAdminPinFromFirestore,
   subscribePosWorkspace,
 } from '../lib/firestoreSync';
@@ -118,6 +119,9 @@ import {
   loadPosState,
   savePosState,
 } from '../storage';
+import { toLocalDateKey } from '../utils/dashboardMetrics';
+import { downloadCsvFile } from '../utils/csv';
+import { isValidFourDigitPin, isWeakDefaultPin } from '../utils/pinSecurity';
 
 const QUICK_ITEM_MODIFIERS = [
   'Sin cebolla',
@@ -138,14 +142,6 @@ function formatElapsedTime(createdAt: string, nowMs: number): string {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   return `${h}h ${m}m`;
-}
-
-function toLocalDateKey(dateInput: Date | string): string {
-  const d = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
 }
 
 interface PosViewProps {
@@ -238,6 +234,12 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [pinPadMode, setPinPadMode] = useState<'switch' | 'admin' | 'unlock' | null>(null);
   const [isSessionLocked, setIsSessionLocked] = useState<boolean>(false);
 
+  // Forced PIN change modal state for default 0000 admin PIN
+  const [forcePinNew, setForcePinNew] = useState<string>('');
+  const [forcePinConfirm, setForcePinConfirm] = useState<string>('');
+  const [forcePinError, setForcePinError] = useState<string | null>(null);
+  const [savingForcedPin, setSavingForcedPin] = useState<boolean>(false);
+
   // New Feature & Navigation States
   const [isDeviceModalOpen, setIsDeviceModalOpen] = useState<boolean>(false);
   const [isNavDrawerOpen, setIsNavDrawerOpen] = useState<boolean>(false);
@@ -309,9 +311,6 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         if (!active) return;
         setIsFirebaseAdmin(res.isAdmin);
         setWorkspaceAuthorized(res.authorized);
-        if (res.authorized) {
-          setEmployeeAuthenticated(true);
-        }
         setWorkspaceOwnerUid(res.workspaceOwnerUid || firebaseUser.uid);
 
         if (!res.authorized) {
@@ -678,9 +677,13 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               totalCents: nextTotal,
               updatedAt: new Date().toISOString(),
             };
-            void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry);
+            void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
+              notify(`Error actualizando orden en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+            });
           } else {
-            void fsRecordAudit(auditEntry, firebaseUser, authorizedEmails);
+            void fsRecordAudit(auditEntry, firebaseUser, authorizedEmails).catch((err) => {
+              notify(`Error registrando bitácora en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+            });
           }
         }
         notify('Producto cancelado y registrado en bitácora.');
@@ -717,9 +720,19 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     const savedOrder = nextState.orders.find((o) => o.id === orderId);
     const latestAudit = nextState.audit[nextState.audit.length - 1];
     if (firebaseUser && savedOrder && latestAudit) {
-      void fsSaveOrder(savedOrder, isNew, firebaseUser, authorizedEmails, latestAudit).catch((err) => {
-        notify(`Error guardando comanda en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
-      });
+      void fsSaveOrder(savedOrder, isNew, firebaseUser, authorizedEmails, latestAudit)
+        .then((assignedNum) => {
+          if (isNew && assignedNum !== savedOrder.number) {
+            setState((prev) => ({
+              ...prev,
+              orders: prev.orders.map((o) => (o.id === orderId ? { ...o, number: assignedNum } : o)),
+              nextOrderNumber: Math.max(prev.nextOrderNumber, assignedNum + 1),
+            }));
+          }
+        })
+        .catch((err) => {
+          notify(`Error guardando comanda en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+        });
     }
     notify(`Comanda guardada y enviada a cocina/barra exitosamente.`);
   };
@@ -881,9 +894,20 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         }));
 
         if (firebaseUser) {
-          void fsSplitOrder(updatedOriginal, splitOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-            notify(`Error dividiendo cuenta en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
-          });
+          void fsSplitOrder(updatedOriginal, splitOrder, firebaseUser, authorizedEmails, auditEntry)
+            .then((assignedNum) => {
+              if (assignedNum !== splitOrder.number) {
+                setState((prev) => ({
+                  ...prev,
+                  orders: prev.orders.map((o) => (o.id === newSplitId ? { ...o, number: assignedNum } : o)),
+                  nextOrderNumber: Math.max(prev.nextOrderNumber, assignedNum + 1),
+                }));
+              }
+            })
+            .catch((err) => {
+              const rawMsg = err instanceof Error ? err.message : 'Sin permisos';
+              notify(`Error dividiendo cuenta en Firestore: ${rawMsg.replace(/^ORDER_CLOSED:/, '')}`);
+            });
         }
 
         loadOrderIntoDraft(splitOrder);
@@ -936,7 +960,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       audit: [...prev.audit, auditEntry],
     }));
     if (firebaseUser) {
-      void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry);
+      void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
+        notify(`Error cambiando mesa en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+      });
     }
     setCurrentService(moveTargetService);
     setCurrentTable(moveTargetLocation);
@@ -1032,7 +1058,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           audit: [...prev.audit, auditEntry],
         }));
         if (firebaseUser) {
-          void fsCancelOrder(selectedOrder, isFirebaseAdmin, firebaseUser, authorizedEmails, auditEntry);
+          void fsCancelOrder(selectedOrder, isFirebaseAdmin, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
+            notify(`Error cancelando cuenta en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+          });
         }
         startNewAccount();
         notify(`Cuenta #${selectedOrder.number} cancelada y registrada en bitácora.`);
@@ -1087,7 +1115,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               audit: [...prev.audit, auditEntry],
             }));
             if (firebaseUser) {
-              void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry);
+              void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
+                notify(`Error aplicando descuento en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+              });
             }
             notify(`Descuento de ${formatMoney(discountCents)} aplicado.`);
           },
@@ -1156,9 +1186,24 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           firebaseUser,
           authorizedEmails,
           latestAudit
-        ).catch((err) => {
-          notify(`Error guardando cobro en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
-        });
+        )
+          .then(({ assignedReceipt }) => {
+            if (assignedReceipt && assignedReceipt !== sale.receipt) {
+              setState((prev) => ({
+                ...prev,
+                sales: prev.sales.map((s) => (s.id === sale.id ? { ...s, receipt: assignedReceipt } : s)),
+              }));
+              setActiveReceiptSale((prev) => (prev && prev.id === sale.id ? { ...prev, receipt: assignedReceipt } : prev));
+            }
+          })
+          .catch((err) => {
+            const rawMsg = err instanceof Error ? err.message : 'Sin permisos';
+            if (rawMsg.startsWith('ALREADY_PAID:')) {
+              notify(rawMsg.replace('ALREADY_PAID:', ''));
+            } else {
+              notify(`Error guardando cobro en Firestore: ${rawMsg}`);
+            }
+          });
       }
 
       setActiveReceiptSale(sale);
@@ -1243,7 +1288,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     }));
 
     if (firebaseUser) {
-      void fsCloseShift(shift, firebaseUser, authorizedEmails, auditEntry);
+      void fsCloseShift(shift, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
+        notify(`Error cerrando turno en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+      });
     }
 
     notify(`Corte de turno completado: ${detail}`);
@@ -1277,7 +1324,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     setPhysicalCashCount('');
     setOpeningCashInput('0');
     if (firebaseUser) {
-      void fsOpenNewShift(newShift, firebaseUser, authorizedEmails, auditEntry);
+      void fsOpenNewShift(newShift, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
+        notify(`Error abriendo turno en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+      });
     }
     notify(`Nuevo turno abierto (${newShift.id}) con fondo ${formatMoney(initialCents)}.`);
   };
@@ -1391,7 +1440,19 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         }));
 
         if (firebaseUser) {
-          void fsSaveOrder(reopenedOrder, true, firebaseUser, authorizedEmails, auditEntry);
+          void fsSaveOrder(reopenedOrder, true, firebaseUser, authorizedEmails, auditEntry)
+            .then((assignedNum) => {
+              if (assignedNum !== reopenedOrder.number) {
+                setState((prev) => ({
+                  ...prev,
+                  orders: prev.orders.map((o) => (o.id === newOrderId ? { ...o, number: assignedNum } : o)),
+                  nextOrderNumber: Math.max(prev.nextOrderNumber, assignedNum + 1),
+                }));
+              }
+            })
+            .catch((err) => {
+              notify(`Error reabriendo venta en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+            });
         }
 
         loadOrderIntoDraft(reopenedOrder);
@@ -1423,7 +1484,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       'Total_MXN',
     ];
 
-    const rows: string[][] = [headers];
+    const rows: unknown[][] = [];
     state.sales.forEach((s) => {
       const dateObj = new Date(s.paidAt);
       const d = dateObj.toLocaleDateString('es-MX');
@@ -1448,16 +1509,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       });
     });
 
-    const csvContent = '\uFEFF' + rows.map((r) => r.map((c) => `"${c.replace(/"/g, '""')}"`).join(',')).join('\r\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `barbachu-ventas-${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    downloadCsvFile(`barbachu-ventas-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows);
     notify('Reporte de ventas exportado a CSV.');
   };
 
@@ -1503,7 +1555,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         audit: [...prev.audit, auditEntry],
       }));
       if (firebaseUser) {
-        void fsSaveInventoryMovement(updatedItem, null, firebaseUser, authorizedEmails, auditEntry);
+        void fsSaveInventoryMovement(updatedItem, null, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
+          notify(`Error actualizando umbral en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+        });
       }
       setInventoryModal(null);
       setInvQty('');
@@ -1538,7 +1592,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       descripcion: inventoryModal.descripcion,
       type: inventoryModal.type,
       qty: qtyNum,
-      costUnit: costNum,
+      costUnit: costNum > 0 ? costNum : currentItem.costo,
       reason: invReason.trim() || (inventoryModal.type === 'merma' ? 'Merma / Desperdicio' : 'Ajuste operativo'),
       user: state.activeUser.name,
     };
@@ -1563,7 +1617,12 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     }));
 
     if (firebaseUser) {
-      void fsSaveInventoryMovement(updatedItem, mov, firebaseUser, authorizedEmails, auditEntry);
+      const costChanged = isFirebaseAdmin && costNum > 0 && costNum !== currentItem.costo;
+      void fsSaveInventoryMovement(updatedItem, mov, firebaseUser, authorizedEmails, auditEntry, {
+        updateCost: costChanged,
+      }).catch((err) => {
+        notify(`Error guardando inventario en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+      });
     }
 
     setInventoryModal(null);
@@ -4741,7 +4800,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       )}
 
       {/* Employee Firestore PIN Authentication Module (Gate / Switch / Lock) */}
-      {(pinPadMode === 'switch' || pinPadMode === 'unlock' || isSessionLocked) && (
+      {(!employeeAuthenticated || pinPadMode === 'switch' || pinPadMode === 'unlock' || isSessionLocked) && (
         <EmployeePinAuthPanel
           users={state.users || []}
           activeUser={state.activeUser}
@@ -4770,18 +4829,154 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
             if (!isSessionLocked) {
               setView(defaultViewForRole(verifiedUser.role, rolePerms));
             }
-            notify(
-              `Bienvenido, ${verifiedUser.name} (${ROLE_LABELS[verifiedUser.role]} · ${verifiedUser.area}).`
-            );
+            if (verifiedUser.mustChangePin && !(verifiedUser.role === 'admin' && isFirebaseAdmin)) {
+              notify('Tu PIN inicial es 0000. Solicita al Administrador actualizarlo por seguridad.');
+            } else {
+              notify(
+                `Bienvenido, ${verifiedUser.name} (${ROLE_LABELS[verifiedUser.role]} · ${verifiedUser.area}).`
+              );
+            }
           }}
         />
       )}
+
+      {/* Mandatory 0000 Admin PIN Replacement Modal */}
+      {employeeAuthenticated &&
+        !isSessionLocked &&
+        !pinPadMode &&
+        state.activeUser?.mustChangePin &&
+        state.activeUser?.role === 'admin' &&
+        isFirebaseAdmin && (
+          <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!firebaseUser) return;
+                if (!isValidFourDigitPin(forcePinNew)) {
+                  setForcePinError('El nuevo PIN debe tener exactamente 4 dígitos numéricos.');
+                  return;
+                }
+                if (isWeakDefaultPin(forcePinNew)) {
+                  setForcePinError('Por seguridad, elige un PIN distinto a 0000.');
+                  return;
+                }
+                if (forcePinNew !== forcePinConfirm) {
+                  setForcePinError('Los PIN ingresados no coinciden.');
+                  return;
+                }
+                setSavingForcedPin(true);
+                setForcePinError(null);
+                const now = new Date().toISOString();
+                const auditEntry: AuditLogEntry = {
+                  id: uid(),
+                  at: now,
+                  user: state.activeUser.name,
+                  action: 'PIN inicial actualizado',
+                  detail: `${state.activeUser.name} reemplazó el PIN inicial 0000 por un código personal`,
+                };
+                try {
+                  const newHash = await fsUpdateStaffPin(
+                    state.activeUser.id,
+                    forcePinNew,
+                    firebaseUser,
+                    authorizedEmails,
+                    auditEntry
+                  );
+                  setState((prev) => ({
+                    ...prev,
+                    activeUser: { ...prev.activeUser, pin: '****', pinHash: newHash, mustChangePin: false },
+                    users: prev.users.map((u) =>
+                      u.id === prev.activeUser.id
+                        ? { ...u, pin: '****', pinHash: newHash, mustChangePin: false }
+                        : u
+                    ),
+                    audit: [...prev.audit, auditEntry],
+                  }));
+                  setForcePinNew('');
+                  setForcePinConfirm('');
+                  notify('PIN personal de administrador actualizado con éxito.');
+                } catch (err) {
+                  setForcePinError(err instanceof Error ? err.message : 'No se pudo actualizar el PIN.');
+                } finally {
+                  setSavingForcedPin(false);
+                }
+              }}
+              className="w-full max-w-md ios-glass-modal border-[#c8a84b]/40 p-6 space-y-4 text-left"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-[#f2a93b]/15 border border-[#f2a93b]/40 flex items-center justify-center text-[#f2a93b] shrink-0">
+                  <Lock className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-serif font-bold text-lg text-white">Cambia el PIN Inicial (0000)</h3>
+                  <p className="text-xs text-[rgba(240,230,211,0.68)]">
+                    Por seguridad, asigna un PIN personal de 4 dígitos para {state.activeUser.name} antes de operar.
+                  </p>
+                </div>
+              </div>
+
+              {forcePinError && (
+                <div className="p-3 rounded-2xl bg-[#e05252]/15 border border-[#e05252]/40 text-xs text-[#e05252]">
+                  {forcePinError}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-[rgba(240,230,211,0.75)] mb-1">
+                    Nuevo PIN (4 dígitos)
+                  </label>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={4}
+                    value={forcePinNew}
+                    onChange={(e) => {
+                      setForcePinNew(e.target.value.replace(/\D/g, '').slice(0, 4));
+                      setForcePinError(null);
+                    }}
+                    placeholder="••••"
+                    className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/80 border border-white/15 text-white font-mono text-center text-lg tracking-[0.4em] focus:outline-none focus:border-[#c8a84b]"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[rgba(240,230,211,0.75)] mb-1">
+                    Confirmar PIN
+                  </label>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={4}
+                    value={forcePinConfirm}
+                    onChange={(e) => {
+                      setForcePinConfirm(e.target.value.replace(/\D/g, '').slice(0, 4));
+                      setForcePinError(null);
+                    }}
+                    placeholder="••••"
+                    className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/80 border border-white/15 text-white font-mono text-center text-lg tracking-[0.4em] focus:outline-none focus:border-[#c8a84b]"
+                    required
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={savingForcedPin}
+                className="w-full min-h-[46px] rounded-2xl bg-[#c8a84b] hover:bg-[#e8d090] disabled:opacity-50 text-[#0a0a0b] font-bold text-xs uppercase tracking-wider transition-colors"
+              >
+                {savingForcedPin ? 'Guardando PIN...' : 'Guardar Nuevo PIN y Continuar'}
+              </button>
+            </form>
+          </div>
+        )}
 
       {/* Tactile iOS PIN Pad Modal for Admin Elevation (verified against Firestore) */}
       <IosPinPadModal
         open={pinPadMode === 'admin'}
         title="Autorización de Administrador"
         subtitle={`El usuario actual (${state.activeUser.name}) requiere PIN de Administrador verificado en Firestore.`}
+        rateLimitScope="admin-elevation"
         allowCancel={true}
         onCancel={() => setPinPadMode(null)}
         onValidatePin={async (enteredPin) => {
@@ -4927,95 +5122,14 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       )}
 
       {/* Device Connection & Sync Manager Modal */}
-      {isDeviceModalOpen && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
-          <div className="ios-glass-modal w-full max-w-lg rounded-[28px] p-6 space-y-5 text-left max-h-[90dvh] overflow-y-auto">
-            <div className="flex items-start justify-between gap-3 pb-3 border-b border-white/10">
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 rounded-2xl bg-[#122822] text-[#25d366] flex items-center justify-center border border-[#25d366]/40">
-                  <Wifi className="w-6 h-6" />
-                </div>
-                <div>
-                  <h3 className="font-serif font-bold text-xl text-white tracking-[-0.02em]">
-                    Conexión de Dispositivos & Cloud Sync
-                  </h3>
-                  <p className="text-xs text-[#25d366] font-mono mt-0.5">
-                    ● En línea · Firestore Realtime Active
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsDeviceModalOpen(false)}
-                className="w-11 h-11 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-[rgba(240,230,211,0.72)] hover:text-white transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              <div className="p-4 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 space-y-3">
-                <h4 className="text-xs font-bold text-[#c8a84b] uppercase tracking-wider">Configuración de esta Terminal</h4>
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-xs text-[rgba(240,230,211,0.68)] mb-1.5">Rol / Estación de este Dispositivo</label>
-                    <select
-                      id="device-station-select-modal"
-                      aria-label="Rol o Estación de este Dispositivo"
-                      defaultValue={state.deviceConfig?.station || 'todos'}
-                      onChange={(e) => {
-                        const val = e.target.value as DeviceStation;
-                        const nameMap: Record<DeviceStation, string> = {
-                          todos: 'Terminal Central / Multi-Área',
-                          comandero: 'Comandero Portátil / Salón',
-                          caja: 'Caja Principal / Cobros',
-                          cocina: 'Monitor KDS Cocina',
-                          barra: 'Monitor KDS Barra',
-                        };
-                        handleUpdateDeviceStation(val, nameMap[val], state.deviceConfig?.autoLockMinutes || 0);
-                      }}
-                      className="w-full min-h-[46px] px-3.5 py-2 rounded-2xl bg-[#16191f] border border-white/10 text-white font-semibold text-xs focus:outline-none focus:border-[#c8a84b]"
-                    >
-                      <option value="todos">Terminal Central / Multi-Área (Todos los permisos)</option>
-                      <option value="comandero">Comandero Portátil / Salón (Toma de órdenes)</option>
-                      <option value="caja">Caja Principal / Cobros (Tickets y Turnos)</option>
-                      <option value="cocina">Monitor KDS Cocina (Sólo alimentos)</option>
-                      <option value="barra">Monitor KDS Barra (Sólo bebidas y coctelería)</option>
-                    </select>
-                  </div>
-                  <div className="text-xs text-[rgba(240,230,211,0.6)]">
-                    Estación actual: <strong className="text-white">{state.deviceConfig?.stationName || 'Terminal Central'}</strong>. Todas las comandas, KDS de cocina/barra y cortes de caja se sincronizan instantáneamente en todos los dispositivos conectados a esta base en la nube.
-                  </div>
-                </div>
-              </div>
-
-              <div className="p-4 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 space-y-2">
-                <h4 className="text-xs font-bold text-[#c8a84b] uppercase tracking-wider">Estado de Sincronización Multi-Dispositivo</h4>
-                <div className="grid grid-cols-2 gap-3 text-xs pt-1">
-                  <div className="p-3 rounded-xl bg-white/[0.03] border border-white/5">
-                    <div className="text-xs text-[#8b92a0]">Latencia Cloud</div>
-                    <div className="font-mono font-bold text-[#25d366] text-sm mt-0.5">18 ms (Óptima)</div>
-                  </div>
-                  <div className="p-3 rounded-xl bg-white/[0.03] border border-white/5">
-                    <div className="text-xs text-[#8b92a0]">Cuentas Abiertas</div>
-                    <div className="font-mono font-bold text-white text-sm mt-0.5">{openOrders.length} activas</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="pt-2">
-              <button
-                type="button"
-                onClick={() => setIsDeviceModalOpen(false)}
-                className="w-full min-h-[46px] rounded-2xl bg-[#c8a84b] hover:bg-[#e8d090] text-[#0a0a0b] font-bold text-xs uppercase tracking-wider transition-colors"
-              >
-                Cerrar Panel de Conexión
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <DeviceSyncModal
+        open={isDeviceModalOpen}
+        onClose={() => setIsDeviceModalOpen(false)}
+        isOnline={isOnline}
+        openOrdersCount={openOrders.length}
+        deviceConfig={state.deviceConfig}
+        onUpdateDeviceStation={handleUpdateDeviceStation}
+      />
 
       {/* Floating Toast */}
       {toastMessage && (

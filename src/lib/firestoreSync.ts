@@ -6,8 +6,11 @@ import {
   getDocFromServer,
   getDocs,
   increment,
+  limit,
   onSnapshot,
+  orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   Timestamp,
@@ -48,6 +51,7 @@ import {
 } from '../storage';
 import { SOFT_PRODUCTS } from '../data/softRestaurantCatalog';
 import { classifyProductStation } from '../core';
+import { hashPin, isValidFourDigitPin, isWeakDefaultPin, verifyPinSecret } from '../utils/pinSecurity';
 
 export function sanitizeFirestoreId(raw: string, fallbackPrefix = 'doc'): string {
   const cleaned = String(raw || '')
@@ -308,12 +312,15 @@ export async function bootstrapWorkspace(user: User): Promise<{
 
       for (const u of DEFAULT_USERS) {
         const uId = sanitizeFirestoreId(u.id, 'usr');
+        const initialPinHash = await hashPin('0000');
         const staffDoc: Record<string, unknown> = {
           id: uId,
           name: boundStr(user.displayName || u.name, 80, 'Administrador'),
           role: u.role,
           avatar: boundStr((user.displayName || u.avatar).slice(0, 2).toUpperCase(), 4, 'AD'),
-          pin: boundStr(u.pin, 8, '0000'),
+          pin: '****',
+          pinHash: initialPinHash,
+          mustChangePin: true,
           area: boundStr(u.area, 80, 'Gerencia'),
           ownerUid: sanitizeFirestoreId(user.uid, 'adm'),
           authorizedEmails: emails,
@@ -394,10 +401,23 @@ export function subscribePosWorkspace(
   const email = (user.email || '').toLowerCase();
   const isBootstrapAdmin = Boolean(user.emailVerified && email === BOOTSTRAPPED_ADMIN_EMAIL);
 
-  const scopedQuery = (colName: string): Query<DocumentData> => {
+  const scopedQuery = (
+    colName: string,
+    orderField?: string,
+    maxDocs?: number
+  ): Query<DocumentData> => {
     const colRef = collection(db, colName);
-    if (isBootstrapAdmin) return colRef;
-    return query(colRef, where('authorizedEmails', 'array-contains', email));
+    const constraints = [];
+    if (!isBootstrapAdmin) {
+      constraints.push(where('authorizedEmails', 'array-contains', email));
+    }
+    if (orderField) {
+      constraints.push(orderBy(orderField, 'desc'));
+    }
+    if (maxDocs && maxDocs > 0) {
+      constraints.push(limit(maxDocs));
+    }
+    return constraints.length > 0 ? query(colRef, ...constraints) : colRef;
   };
 
   const reportErr = (op: OperationType, path: string) => (err: unknown) => {
@@ -466,7 +486,7 @@ export function subscribePosWorkspace(
 
   unsubs.push(
     onSnapshot(
-      scopedQuery('orders'),
+      scopedQuery('orders', 'updatedAt', 200),
       (snap) => {
         const orders: Order[] = snap.docs.map((d) => {
           const x = d.data();
@@ -506,7 +526,7 @@ export function subscribePosWorkspace(
 
   unsubs.push(
     onSnapshot(
-      scopedQuery('sales'),
+      scopedQuery('sales', 'paidAt', 300),
       (snap) => {
         const sales: Sale[] = snap.docs.map((d) => {
           const x = d.data();
@@ -543,7 +563,7 @@ export function subscribePosWorkspace(
 
   unsubs.push(
     onSnapshot(
-      scopedQuery('shifts'),
+      scopedQuery('shifts', 'openedAt', 20),
       (snap) => {
         if (snap.empty) return;
         const shifts: CashShift[] = snap.docs.map((d) => {
@@ -602,7 +622,7 @@ export function subscribePosWorkspace(
 
   unsubs.push(
     onSnapshot(
-      scopedQuery('inventory_movements'),
+      scopedQuery('inventory_movements', 'at', 250),
       (snap) => {
         const list: InventoryMovement[] = snap.docs.map((d) => {
           const x = d.data();
@@ -632,12 +652,16 @@ export function subscribePosWorkspace(
         if (snap.empty) return;
         const users: PosUser[] = snap.docs.map((d) => {
           const x = d.data();
+          const hasHash = typeof x.pinHash === 'string' && x.pinHash.length > 0;
+          const legacyPlain = !hasHash ? String(x.pin || '').trim() : '';
           return {
             id: String(x.id || d.id),
             name: String(x.name || ''),
             role: (x.role as UserRole) || 'mesero',
             avatar: String(x.avatar || 'OP'),
-            pin: String(x.pin || ''),
+            pin: '****',
+            pinHash: hasHash ? String(x.pinHash) : undefined,
+            mustChangePin: Boolean(x.mustChangePin) || legacyPlain === '0000',
             area: String(x.area || 'Salón'),
             email: x.email ? String(x.email) : undefined,
           };
@@ -650,7 +674,7 @@ export function subscribePosWorkspace(
 
   unsubs.push(
     onSnapshot(
-      scopedQuery('staff_clock'),
+      scopedQuery('staff_clock', 'clockIn', 200),
       (snap) => {
         const list: TimeClockRecord[] = snap.docs.map((d) => {
           const x = d.data();
@@ -673,7 +697,7 @@ export function subscribePosWorkspace(
 
   unsubs.push(
     onSnapshot(
-      scopedQuery('audit_logs'),
+      scopedQuery('audit_logs', 'at', 250),
       (snap) => {
         const list: AuditLogEntry[] = snap.docs.map((d) => {
           const x = d.data();
@@ -819,33 +843,76 @@ export async function fsDeleteProduct(
   }
 }
 
+function isOfflineTransactionError(error: unknown): boolean {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
+  const code = (error as { code?: string })?.code;
+  return code === 'unavailable' || code === 'failed-precondition';
+}
+
 export async function fsSaveOrder(
   order: Order,
   isNew: boolean,
   user: User,
   authorizedEmails: string[],
   auditEntry: AuditLogEntry
-): Promise<void> {
+): Promise<number> {
   if (!isNew) {
-    return fsUpdateOrder(order, user, authorizedEmails, auditEntry);
+    await fsUpdateOrder(order, user, authorizedEmails, auditEntry);
+    return order.number;
   }
   const ordId = sanitizeFirestoreId(order.id, 'ord');
   const path = `orders/${ordId}`;
+  const cfgRef = doc(db, 'pos_config', 'main');
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+
   try {
-    const batch = writeBatch(db);
-    batch.set(
-      doc(db, 'orders', ordId),
-      buildOrderPayload(order, user.uid, authorizedEmails, true)
-    );
-    batch.update(doc(db, 'pos_config', 'main'), {
-      nextOrderNumber: increment(1),
-      updatedAt: serverTimestamp(),
+    const assignedNumber = await runTransaction(db, async (tx) => {
+      const cfgSnap = await tx.get(cfgRef);
+      const nextNum = cfgSnap.exists()
+        ? Math.max(1, Math.round(Number(cfgSnap.data().nextOrderNumber) || order.number || 1))
+        : Math.max(1, Math.round(Number(order.number) || 1));
+
+      const orderWithNum: Order = { ...order, number: nextNum };
+      tx.set(
+        doc(db, 'orders', ordId),
+        buildOrderPayload(orderWithNum, user.uid, authorizedEmails, true)
+      );
+      if (cfgSnap.exists()) {
+        tx.update(cfgRef, {
+          nextOrderNumber: nextNum + 1,
+          updatedAt: serverTimestamp(),
+        });
+      }
+      const syncedAudit: AuditLogEntry = {
+        ...auditEntry,
+        detail: auditEntry.detail.replace(`#${order.number}`, `#${nextNum}`),
+      };
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(syncedAudit, user.uid, authorizedEmails));
+      return nextNum;
     });
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
+    return assignedNumber;
   } catch (error) {
+    if (isOfflineTransactionError(error)) {
+      try {
+        const batch = writeBatch(db);
+        batch.set(
+          doc(db, 'orders', ordId),
+          buildOrderPayload(order, user.uid, authorizedEmails, true)
+        );
+        batch.update(cfgRef, {
+          nextOrderNumber: increment(1),
+          updatedAt: serverTimestamp(),
+        });
+        batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+        await batch.commit();
+        return order.number;
+      } catch (offlineErr) {
+        handleFirestoreError(offlineErr, OperationType.CREATE, path);
+        return order.number;
+      }
+    }
     handleFirestoreError(error, OperationType.CREATE, path);
+    return order.number;
   }
 }
 
@@ -898,26 +965,75 @@ export async function fsSplitOrder(
   user: User,
   authorizedEmails: string[],
   auditEntry: AuditLogEntry
-): Promise<void> {
-  const path = `orders/${updatedOriginal.id}`;
+): Promise<number> {
+  const origId = sanitizeFirestoreId(updatedOriginal.id, 'ord');
+  const newId = sanitizeFirestoreId(splitOrder.id, 'ord');
+  const path = `orders/${origId}`;
+  const origRef = doc(db, 'orders', origId);
+  const cfgRef = doc(db, 'pos_config', 'main');
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+
   try {
-    const batch = writeBatch(db);
-    batch.update(doc(db, 'orders', sanitizeFirestoreId(updatedOriginal.id, 'ord')), {
-      items: sanitizeOrderItemsForFirestore(updatedOriginal.items),
-      totalCents: Math.max(0, Math.round(updatedOriginal.totalCents)),
-      updatedAt: serverTimestamp(),
+    const assignedNumber = await runTransaction(db, async (tx) => {
+      const [origSnap, cfgSnap] = await Promise.all([tx.get(origRef), tx.get(cfgRef)]);
+      if (origSnap.exists()) {
+        const origData = origSnap.data();
+        if (origData.paid === true || origData.status === 'closed') {
+          throw new Error('ORDER_CLOSED:La orden original ya fue cerrada o cobrada.');
+        }
+      }
+      const nextNum = cfgSnap.exists()
+        ? Math.max(1, Math.round(Number(cfgSnap.data().nextOrderNumber) || splitOrder.number || 1))
+        : Math.max(1, Math.round(Number(splitOrder.number) || 1));
+
+      tx.update(origRef, {
+        items: sanitizeOrderItemsForFirestore(updatedOriginal.items),
+        totalCents: Math.max(0, Math.round(updatedOriginal.totalCents)),
+        updatedAt: serverTimestamp(),
+      });
+      const syncedSplit: Order = { ...splitOrder, number: nextNum };
+      tx.set(doc(db, 'orders', newId), buildOrderPayload(syncedSplit, user.uid, authorizedEmails, true));
+      if (cfgSnap.exists()) {
+        tx.update(cfgRef, {
+          nextOrderNumber: nextNum + 1,
+          updatedAt: serverTimestamp(),
+        });
+      }
+      const syncedAudit: AuditLogEntry = {
+        ...auditEntry,
+        detail: auditEntry.detail.replace(`#${splitOrder.number}`, `#${nextNum}`),
+      };
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(syncedAudit, user.uid, authorizedEmails));
+      return nextNum;
     });
-    const newId = sanitizeFirestoreId(splitOrder.id, 'ord');
-    batch.set(doc(db, 'orders', newId), buildOrderPayload(splitOrder, user.uid, authorizedEmails, true));
-    batch.update(doc(db, 'pos_config', 'main'), {
-      nextOrderNumber: increment(1),
-      updatedAt: serverTimestamp(),
-    });
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
+    return assignedNumber;
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith('ORDER_CLOSED:')) {
+      throw error;
+    }
+    if (isOfflineTransactionError(error)) {
+      try {
+        const batch = writeBatch(db);
+        batch.update(origRef, {
+          items: sanitizeOrderItemsForFirestore(updatedOriginal.items),
+          totalCents: Math.max(0, Math.round(updatedOriginal.totalCents)),
+          updatedAt: serverTimestamp(),
+        });
+        batch.set(doc(db, 'orders', newId), buildOrderPayload(splitOrder, user.uid, authorizedEmails, true));
+        batch.update(cfgRef, {
+          nextOrderNumber: increment(1),
+          updatedAt: serverTimestamp(),
+        });
+        batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+        await batch.commit();
+        return splitOrder.number;
+      } catch (offlineErr) {
+        handleFirestoreError(offlineErr, OperationType.WRITE, path);
+        return splitOrder.number;
+      }
+    }
     handleFirestoreError(error, OperationType.WRITE, path);
+    return splitOrder.number;
   }
 }
 
@@ -958,21 +1074,19 @@ export async function fsCloseAndPayOrder(
   user: User,
   authorizedEmails: string[],
   auditEntry: AuditLogEntry
-): Promise<void> {
+): Promise<{ assignedReceipt: string }> {
   const ordId = sanitizeFirestoreId(updatedOrder.id, 'ord');
   const saleId = sanitizeFirestoreId(sale.id, 'sale');
   const shiftId = sanitizeFirestoreId(updatedShift.id, 'TURNO');
-  try {
-    const batch = writeBatch(db);
-    batch.update(doc(db, 'orders', ordId), {
-      items: sanitizeOrderItemsForFirestore(updatedOrder.items),
-      status: 'closed',
-      paid: true,
-      updatedAt: serverTimestamp(),
-    });
+  const ordRef = doc(db, 'orders', ordId);
+  const shiftRef = doc(db, 'shifts', shiftId);
+  const cfgRef = doc(db, 'pos_config', 'main');
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+
+  const buildSalePayload = (receiptCode: string): Record<string, unknown> => {
     const salePayload: Record<string, unknown> = {
       id: saleId,
-      receipt: boundStr(sale.receipt, 40, 'BC-00001'),
+      receipt: boundStr(receiptCode, 40, 'BC-00001'),
       orderId: ordId,
       service: sale.service,
       location: boundStr(sale.location, 40, '1'),
@@ -990,26 +1104,116 @@ export async function fsCloseAndPayOrder(
     if (typeof sale.amountCash === 'number') salePayload.amountCash = Math.round(sale.amountCash);
     if (typeof sale.amountCard === 'number') salePayload.amountCard = Math.round(sale.amountCard);
     if (typeof sale.changeGiven === 'number') salePayload.changeGiven = Math.round(sale.changeGiven);
-    batch.set(doc(db, 'sales', saleId), salePayload);
+    return salePayload;
+  };
 
-    batch.update(doc(db, 'shifts', shiftId), {
-      cashSalesCents: Math.max(0, Math.round(updatedShift.cashSalesCents)),
-      cardSalesCents: Math.max(0, Math.round(updatedShift.cardSalesCents)),
-      transferSalesCents: Math.max(0, Math.round(updatedShift.transferSalesCents)),
-      totalSalesCents: Math.max(0, Math.round(updatedShift.totalSalesCents)),
-      expectedCashCents: Math.max(0, Math.round(updatedShift.expectedCashCents)),
+  const totalDelta = Math.max(0, Math.round(sale.totalCents));
+  let cashDelta = 0;
+  let cardDelta = 0;
+  let transferDelta = 0;
+  if (sale.paymentMethod === 'efectivo') {
+    cashDelta = totalDelta;
+  } else if (sale.paymentMethod === 'tarjeta') {
+    cardDelta = totalDelta;
+  } else if (sale.paymentMethod === 'transferencia') {
+    transferDelta = totalDelta;
+  } else if (sale.paymentMethod === 'mixto') {
+    cashDelta = Math.max(0, Math.round(sale.amountCash || 0));
+    cardDelta = Math.max(0, Math.round(sale.amountCard || 0));
+  }
+
+  try {
+    const assignedReceipt = await runTransaction(db, async (tx) => {
+      const [ordSnap, shiftSnap, cfgSnap] = await Promise.all([
+        tx.get(ordRef),
+        tx.get(shiftRef),
+        tx.get(cfgRef),
+      ]);
+
+      if (ordSnap.exists()) {
+        const ordData = ordSnap.data();
+        if (ordData.paid === true || ordData.status === 'closed') {
+          throw new Error('ALREADY_PAID:Esta cuenta ya fue cobrada en otro dispositivo.');
+        }
+      }
+
+      const nextReceiptNum = cfgSnap.exists()
+        ? Math.max(1, Math.round(Number(cfgSnap.data().nextReceiptNumber) || 1))
+        : 1;
+      const receiptCode = cfgSnap.exists()
+        ? `BC-${String(nextReceiptNum).padStart(5, '0')}`
+        : sale.receipt;
+
+      tx.update(ordRef, {
+        items: sanitizeOrderItemsForFirestore(updatedOrder.items),
+        status: 'closed',
+        paid: true,
+        updatedAt: serverTimestamp(),
+      });
+      tx.set(doc(db, 'sales', saleId), buildSalePayload(receiptCode));
+
+      if (shiftSnap.exists()) {
+        const s = shiftSnap.data();
+        tx.update(shiftRef, {
+          cashSalesCents: Math.max(0, Math.round((Number(s.cashSalesCents) || 0) + cashDelta)),
+          cardSalesCents: Math.max(0, Math.round((Number(s.cardSalesCents) || 0) + cardDelta)),
+          transferSalesCents: Math.max(0, Math.round((Number(s.transferSalesCents) || 0) + transferDelta)),
+          totalSalesCents: Math.max(0, Math.round((Number(s.totalSalesCents) || 0) + totalDelta)),
+          expectedCashCents: Math.max(0, Math.round((Number(s.expectedCashCents) || 0) + cashDelta)),
+        });
+      }
+
+      if (cfgSnap.exists()) {
+        tx.update(cfgRef, {
+          nextReceiptNumber: nextReceiptNum + 1,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      const syncedAudit: AuditLogEntry = {
+        ...auditEntry,
+        detail: auditEntry.detail.replace(sale.receipt, receiptCode),
+      };
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(syncedAudit, user.uid, authorizedEmails));
+      return receiptCode;
     });
 
-    batch.update(doc(db, 'pos_config', 'main'), {
-      nextReceiptNumber: increment(1),
-      updatedAt: serverTimestamp(),
-    });
-
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
+    return { assignedReceipt };
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith('ALREADY_PAID:')) {
+      throw error;
+    }
+    if (isOfflineTransactionError(error)) {
+      try {
+        const batch = writeBatch(db);
+        batch.update(ordRef, {
+          items: sanitizeOrderItemsForFirestore(updatedOrder.items),
+          status: 'closed',
+          paid: true,
+          updatedAt: serverTimestamp(),
+        });
+        batch.set(doc(db, 'sales', saleId), buildSalePayload(sale.receipt));
+        batch.update(shiftRef, {
+          cashSalesCents: Math.max(0, Math.round(updatedShift.cashSalesCents)),
+          cardSalesCents: Math.max(0, Math.round(updatedShift.cardSalesCents)),
+          transferSalesCents: Math.max(0, Math.round(updatedShift.transferSalesCents)),
+          totalSalesCents: Math.max(0, Math.round(updatedShift.totalSalesCents)),
+          expectedCashCents: Math.max(0, Math.round(updatedShift.expectedCashCents)),
+        });
+        batch.update(cfgRef, {
+          nextReceiptNumber: increment(1),
+          updatedAt: serverTimestamp(),
+        });
+        batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+        await batch.commit();
+        return { assignedReceipt: sale.receipt };
+      } catch (offlineErr) {
+        handleFirestoreError(offlineErr, OperationType.WRITE, `sales/${saleId}`);
+        return { assignedReceipt: sale.receipt };
+      }
+    }
     handleFirestoreError(error, OperationType.WRITE, `sales/${saleId}`);
+    return { assignedReceipt: sale.receipt };
   }
 }
 
@@ -1069,9 +1273,8 @@ export async function fsOpenNewShift(
   }
 }
 
-export async function fsSaveInventoryMovement(
+export async function fsCreateInventoryItem(
   item: InventoryItem,
-  movement: InventoryMovement | null,
   user: User,
   authorizedEmails: string[],
   auditEntry: AuditLogEntry
@@ -1079,12 +1282,64 @@ export async function fsSaveInventoryMovement(
   const itemId = sanitizeFirestoreId(String(item.clave), 'inv');
   try {
     const batch = writeBatch(db);
-    batch.update(doc(db, 'inventory', itemId), {
-      stock: Number(item.stock) || 0,
-      minStock: Number(item.minStock) || 0,
-      costo: Number(item.costo) || 0,
+    batch.set(doc(db, 'inventory', itemId), {
+      clave: Math.round(Number(item.clave) || 0),
+      descripcion: boundStr(item.descripcion, 140, 'Insumo'),
+      unidad: boundStr(item.unidad, 20, 'PZA'),
+      categoria: boundStr(item.categoria, 80, 'GENERAL'),
+      costo: Math.max(0, Number(item.costo) || 0),
+      stock: Math.max(0, Number(item.stock) || 0),
+      minStock: Math.max(0, Number(item.minStock) || 0),
+      ownerUid: sanitizeFirestoreId(user.uid, 'usr'),
+      authorizedEmails: ensureEmailList(authorizedEmails),
       updatedAt: serverTimestamp(),
     });
+    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    await batch.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `inventory/${itemId}`);
+  }
+}
+
+export async function fsDeleteInventoryItem(
+  clave: number,
+  user: User,
+  authorizedEmails: string[],
+  auditEntry: AuditLogEntry
+): Promise<void> {
+  const itemId = sanitizeFirestoreId(String(clave), 'inv');
+  try {
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'inventory', itemId));
+    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    await batch.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `inventory/${itemId}`);
+  }
+}
+
+export async function fsSaveInventoryMovement(
+  item: InventoryItem,
+  movement: InventoryMovement | null,
+  user: User,
+  authorizedEmails: string[],
+  auditEntry: AuditLogEntry,
+  options?: { updateCost?: boolean }
+): Promise<void> {
+  const itemId = sanitizeFirestoreId(String(item.clave), 'inv');
+  try {
+    const batch = writeBatch(db);
+    const updatePayload: Record<string, unknown> = {
+      stock: Number(item.stock) || 0,
+      minStock: Number(item.minStock) || 0,
+      updatedAt: serverTimestamp(),
+    };
+    if (options?.updateCost) {
+      updatePayload.costo = Number(item.costo) || 0;
+    }
+    batch.update(doc(db, 'inventory', itemId), updatePayload);
     if (movement) {
       const movId = sanitizeFirestoreId(movement.id, 'mov');
       batch.set(doc(db, 'inventory_movements', movId), {
@@ -1118,13 +1373,25 @@ export async function fsSaveStaffUser(
 ): Promise<void> {
   const staffId = sanitizeFirestoreId(staffUser.id, 'usr');
   try {
+    let resolvedPinHash = typeof staffUser.pinHash === 'string' ? staffUser.pinHash.trim() : '';
+    let resolvedMustChangePin = Boolean(staffUser.mustChangePin);
+
+    if (isValidFourDigitPin(staffUser.pin)) {
+      resolvedPinHash = await hashPin(staffUser.pin);
+      resolvedMustChangePin = isWeakDefaultPin(staffUser.pin);
+    } else if (!resolvedPinHash) {
+      throw new Error('El operador requiere un PIN numérico válido de 4 dígitos.');
+    }
+
     const batch = writeBatch(db);
     const docData: Record<string, unknown> = {
       id: staffId,
       name: boundStr(staffUser.name, 80, 'Personal'),
       role: staffUser.role,
       avatar: boundStr(staffUser.avatar, 4, 'OP'),
-      pin: boundStr(staffUser.pin, 8, '0000'),
+      pin: '****',
+      pinHash: boundStr(resolvedPinHash, 180),
+      mustChangePin: resolvedMustChangePin,
       area: boundStr(staffUser.area, 80, 'Salón'),
       ownerUid: sanitizeFirestoreId(workspaceOwnerUid || user.uid, 'usr'),
       authorizedEmails: ensureEmailList(authorizedEmails, staffUser.email),
@@ -1138,6 +1405,35 @@ export async function fsSaveStaffUser(
     await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `staff_users/${staffId}`);
+  }
+}
+
+export async function fsUpdateStaffPin(
+  staffId: string,
+  newPin: string,
+  user: User,
+  authorizedEmails: string[],
+  auditEntry: AuditLogEntry
+): Promise<string> {
+  const cleanId = sanitizeFirestoreId(staffId, 'usr');
+  if (!isValidFourDigitPin(newPin) || isWeakDefaultPin(newPin)) {
+    throw new Error('Ingresa un nuevo PIN de 4 dígitos distinto a 0000.');
+  }
+  try {
+    const newHash = await hashPin(newPin);
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'staff_users', cleanId), {
+      pin: '****',
+      pinHash: boundStr(newHash, 180),
+      mustChangePin: false,
+    });
+    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    await batch.commit();
+    return newHash;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `staff_users/${cleanId}`);
+    return '';
   }
 }
 
@@ -1352,20 +1648,26 @@ export async function fsCleanupDemoData(
     if (options.removeLegacyUsers) {
       const staffSnap = await getDocs(collection(db, 'staff_users'));
       const clockSnap = await getDocs(collection(db, 'staff_clock'));
-      const batch = writeBatch(db);
+      const deleteRefs = [];
       for (const d of staffSnap.docs) {
         if (legacyStaffIds.has(d.id)) {
-          batch.delete(d.ref);
+          deleteRefs.push(d.ref);
           removedStaff++;
         }
       }
       for (const d of clockSnap.docs) {
         const data = d.data();
         if (legacyClockIds.has(d.id) || legacyStaffIds.has(String(data.userId || ''))) {
-          batch.delete(d.ref);
+          deleteRefs.push(d.ref);
         }
       }
-      await batch.commit();
+      for (let i = 0; i < deleteRefs.length; i += 400) {
+        const batch = writeBatch(db);
+        for (const ref of deleteRefs.slice(i, i + 400)) {
+          batch.delete(ref);
+        }
+        await batch.commit();
+      }
     }
 
     if (options.resetInventoryStock) {
@@ -1432,6 +1734,21 @@ export async function fsCleanupDemoData(
   }
 }
 
+function mapStaffDocToPosUser(id: string, data: DocumentData): PosUser {
+  const legacyPlain = typeof data.pin === 'string' && isValidFourDigitPin(data.pin) ? data.pin : undefined;
+  return {
+    id: String(data.id || id),
+    name: String(data.name || 'Operador'),
+    role: (data.role as UserRole) || 'mesero',
+    avatar: String(data.avatar || 'OP'),
+    pin: '****',
+    pinHash: typeof data.pinHash === 'string' && data.pinHash ? data.pinHash : undefined,
+    mustChangePin: Boolean(data.mustChangePin || legacyPlain === '0000'),
+    area: String(data.area || 'General'),
+    email: typeof data.email === 'string' && data.email ? data.email : undefined,
+  };
+}
+
 export async function fsFetchStaffUsersSnapshot(user: User, _isAdmin: boolean): Promise<PosUser[]> {
   try {
     const callerEmail = (user.email || '').toLowerCase();
@@ -1440,19 +1757,7 @@ export async function fsFetchStaffUsersSnapshot(user: User, _isAdmin: boolean): 
       ? collection(db, 'staff_users')
       : query(collection(db, 'staff_users'), where('authorizedEmails', 'array-contains', callerEmail));
     const snap = await getDocs(staffQ);
-    const list: PosUser[] = snap.docs.map((d) => {
-      const data = d.data();
-      return {
-        id: String(data.id || d.id),
-        name: String(data.name || 'Operador'),
-        role: (data.role as UserRole) || 'mesero',
-        avatar: String(data.avatar || 'OP'),
-        pin: String(data.pin || ''),
-        area: String(data.area || 'General'),
-        email: typeof data.email === 'string' && data.email ? data.email : undefined,
-      };
-    });
-    return list;
+    return snap.docs.map((d) => mapStaffDocToPosUser(d.id, d.data()));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, `staff_users?uid=${user.uid}`);
     return [];
@@ -1466,7 +1771,7 @@ export async function fsVerifyEmployeePinFromFirestore(
   authorizedEmails: string[]
 ): Promise<{ ok: boolean; user?: PosUser; error?: string }> {
   const cleanPin = String(enteredPin || '').trim();
-  if (!/^\d{4}$/.test(cleanPin)) {
+  if (!isValidFourDigitPin(cleanPin)) {
     return { ok: false, error: 'El PIN debe tener 4 dígitos numéricos.' };
   }
 
@@ -1486,19 +1791,18 @@ export async function fsVerifyEmployeePinFromFirestore(
     }
 
     const data = snap.data();
-    const storedPin = String(data.pin || '').trim();
-    if (!storedPin || storedPin !== cleanPin) {
+    const valid = await verifyPinSecret(
+      cleanPin,
+      typeof data.pinHash === 'string' ? data.pinHash : undefined,
+      typeof data.pin === 'string' ? data.pin : undefined
+    );
+    if (!valid) {
       return { ok: false, error: 'PIN incorrecto. Verifica tus 4 dígitos.' };
     }
 
     const verifiedUser: PosUser = {
-      id: String(data.id || snap.id),
-      name: String(data.name || 'Operador'),
-      role: (data.role as UserRole) || 'mesero',
-      avatar: String(data.avatar || 'OP'),
-      pin: storedPin,
-      area: String(data.area || 'General'),
-      email: typeof data.email === 'string' && data.email ? data.email : undefined,
+      ...mapStaffDocToPosUser(snap.id, data),
+      mustChangePin: Boolean(data.mustChangePin || isWeakDefaultPin(cleanPin)),
     };
 
     const auditEntry: AuditLogEntry = {
@@ -1525,7 +1829,7 @@ export async function fsVerifyAnyAdminPinFromFirestore(
   authorizedEmails: string[]
 ): Promise<{ ok: boolean; user?: PosUser; error?: string }> {
   const cleanPin = String(enteredPin || '').trim();
-  if (!/^\d{4}$/.test(cleanPin)) {
+  if (!isValidFourDigitPin(cleanPin)) {
     return { ok: false, error: 'El PIN debe tener 4 dígitos numéricos.' };
   }
 
@@ -1542,15 +1846,16 @@ export async function fsVerifyAnyAdminPinFromFirestore(
     const snap = await getDocs(q);
     for (const d of snap.docs) {
       const data = d.data();
-      if (String(data.pin || '').trim() === cleanPin) {
+      const valid = await verifyPinSecret(
+        cleanPin,
+        typeof data.pinHash === 'string' ? data.pinHash : undefined,
+        typeof data.pin === 'string' ? data.pin : undefined
+      );
+      if (valid) {
         const verifiedAdmin: PosUser = {
-          id: String(data.id || d.id),
-          name: String(data.name || 'Administrador'),
+          ...mapStaffDocToPosUser(d.id, data),
           role: 'admin',
-          avatar: String(data.avatar || 'AD'),
-          pin: cleanPin,
-          area: String(data.area || 'Gerencia General'),
-          email: typeof data.email === 'string' && data.email ? data.email : undefined,
+          mustChangePin: Boolean(data.mustChangePin || isWeakDefaultPin(cleanPin)),
         };
         const auditEntry: AuditLogEntry = {
           id: `aud-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,

@@ -31,12 +31,16 @@ service cloud.firestore {
       return isSignedIn() && request.auth.token.email_verified == true;
     }
 
+    function userEmail() {
+      return request.auth.token.email is string ? request.auth.token.email.lower() : '';
+    }
+
     function isOwner(userId) {
       return isVerified() && request.auth.uid == userId;
     }
 
     function isAdminEmail() {
-      return isVerified() && request.auth.token.email == 'maurocazqiez013@gmail.com';
+      return isVerified() && userEmail() == 'maurocazqiez013@gmail.com';
     }
 
     function isAdmin() {
@@ -51,7 +55,7 @@ service cloud.firestore {
       return isVerified() && (
         isAdmin() ||
         existing().ownerUid == request.auth.uid ||
-        (existing().authorizedEmails is list && request.auth.token.email in existing().authorizedEmails)
+        (existing().authorizedEmails is list && userEmail() in existing().authorizedEmails)
       );
     }
 
@@ -60,26 +64,34 @@ service cloud.firestore {
       return isAdminEmail() || (
         isVerified() && (
           existing().ownerUid == request.auth.uid ||
-          (existing().authorizedEmails is list && request.auth.token.email in existing().authorizedEmails)
+          (existing().authorizedEmails is list && userEmail() in existing().authorizedEmails)
         )
       );
+    }
+
+    function isValidOrderItem(item) {
+      return item is map &&
+        item.keys().hasAll(['key', 'name', 'priceCents', 'qty']) &&
+        item.keys().hasOnly(['lineId', 'key', 'name', 'priceCents', 'qty', 'note', 'station', 'itemStatus']) &&
+        (!('lineId' in item) || (item.lineId is string && item.lineId.size() <= 64)) &&
+        item.key is string && item.key.size() >= 1 && item.key.size() <= 64 &&
+        item.name is string && item.name.size() >= 1 && item.name.size() <= 120 &&
+        item.priceCents is int && item.priceCents >= 0 && item.priceCents <= 10000000 &&
+        item.qty is int && item.qty >= 1 && item.qty <= 99 &&
+        (!('note' in item) || (item.note is string && item.note.size() <= 200)) &&
+        (!('station' in item) || item.station in ['cocina', 'barra']) &&
+        (!('itemStatus' in item) || item.itemStatus in ['pending', 'preparing', 'ready', 'served']);
     }
 
     function isValidOrderItems(items) {
       return items is list &&
         items.size() >= 1 &&
         items.size() <= 100 &&
-        items[0] is map &&
-        items[0].keys().hasAll(['key', 'name', 'priceCents', 'qty']) &&
-        items[0].keys().hasOnly(['lineId', 'key', 'name', 'priceCents', 'qty', 'note', 'station', 'itemStatus']) &&
-        (!('lineId' in items[0]) || (items[0].lineId is string && items[0].lineId.size() <= 64)) &&
-        items[0].key is string && items[0].key.size() >= 1 && items[0].key.size() <= 64 &&
-        items[0].name is string && items[0].name.size() >= 1 && items[0].name.size() <= 120 &&
-        items[0].priceCents is int && items[0].priceCents >= 0 &&
-        items[0].qty is int && items[0].qty >= 1 && items[0].qty <= 99 &&
-        (!('note' in items[0]) || (items[0].note is string && items[0].note.size() <= 200)) &&
-        (!('station' in items[0]) || items[0].station in ['cocina', 'barra']) &&
-        (!('itemStatus' in items[0]) || items[0].itemStatus in ['pending', 'preparing', 'ready', 'served']);
+        isValidOrderItem(items[0]) &&
+        (items.size() < 2 || isValidOrderItem(items[1])) &&
+        (items.size() < 3 || isValidOrderItem(items[2])) &&
+        (items.size() < 4 || isValidOrderItem(items[3])) &&
+        isValidOrderItem(items[items.size() - 1]);
     }
 
     // -------------------------------------------------------------------------
@@ -179,9 +191,9 @@ service cloud.firestore {
         data.totalCents is int && data.totalCents >= 0 &&
         data.paymentMethod in ['efectivo', 'tarjeta', 'transferencia', 'mixto'] &&
         data.paidAt is timestamp &&
-        (!('amountCash' in data) || data.amountCash is int) &&
-        (!('amountCard' in data) || data.amountCard is int) &&
-        (!('changeGiven' in data) || data.changeGiven is int) &&
+        (!('amountCash' in data) || (data.amountCash is int && data.amountCash >= 0)) &&
+        (!('amountCard' in data) || (data.amountCard is int && data.amountCard >= 0)) &&
+        (!('changeGiven' in data) || (data.changeGiven is int && data.changeGiven >= 0)) &&
         data.ownerUid is string && data.ownerUid.size() <= 128 && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
         isValidEmailList(data.authorizedEmails);
     }
@@ -215,9 +227,9 @@ service cloud.firestore {
         data.descripcion is string && data.descripcion.size() >= 1 && data.descripcion.size() <= 140 &&
         data.unidad is string && data.unidad.size() <= 20 &&
         data.categoria is string && data.categoria.size() <= 80 &&
-        data.costo is number &&
-        data.stock is number &&
-        data.minStock is number &&
+        data.costo is number && data.costo >= 0 &&
+        data.stock is number && data.stock >= 0 &&
+        data.minStock is number && data.minStock >= 0 &&
         data.ownerUid is string && data.ownerUid.size() <= 128 && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
         isValidEmailList(data.authorizedEmails) &&
         data.updatedAt is timestamp;
@@ -231,8 +243,8 @@ service cloud.firestore {
         data.clave is int &&
         data.descripcion is string && data.descripcion.size() <= 140 &&
         data.type in ['entrada', 'ajuste', 'consumo', 'merma'] &&
-        data.qty is number &&
-        data.costUnit is number &&
+        data.qty is number && data.qty >= 0 &&
+        data.costUnit is number && data.costUnit >= 0 &&
         data.reason is string && data.reason.size() <= 200 &&
         data.user is string && data.user.size() <= 80 &&
         data.ownerUid is string && data.ownerUid.size() <= 128 && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
@@ -241,12 +253,14 @@ service cloud.firestore {
 
     function isValidStaffUser(data) {
       return data.keys().hasAll(['id', 'name', 'role', 'avatar', 'pin', 'area', 'ownerUid', 'authorizedEmails']) &&
-        data.keys().hasOnly(['id', 'name', 'role', 'avatar', 'pin', 'area', 'email', 'ownerUid', 'authorizedEmails']) &&
+        data.keys().hasOnly(['id', 'name', 'role', 'avatar', 'pin', 'pinHash', 'mustChangePin', 'area', 'email', 'ownerUid', 'authorizedEmails']) &&
         data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
         data.role in ['admin', 'caja', 'mesero', 'cocina'] &&
         data.avatar is string && data.avatar.size() >= 1 && data.avatar.size() <= 4 &&
         data.pin is string && data.pin.size() >= 4 && data.pin.size() <= 8 &&
+        (!('pinHash' in data) || (data.pinHash is string && data.pinHash.size() >= 16 && data.pinHash.size() <= 180)) &&
+        (!('mustChangePin' in data) || data.mustChangePin is bool) &&
         data.area is string && data.area.size() <= 80 &&
         (!('email' in data) || (data.email is string && data.email.size() <= 180)) &&
         data.ownerUid is string && data.ownerUid.size() <= 128 && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
@@ -427,6 +441,7 @@ service cloud.firestore {
           isAdmin() ||
           (canReadWorkspaceDoc() &&
            existing().isOpen == true &&
+           incoming().totalSalesCents >= existing().totalSalesCents &&
            incoming().diff(existing()).affectedKeys().hasOnly([
              'cashSalesCents', 'cardSalesCents', 'transferSalesCents', 'totalSalesCents', 'expectedCashCents',
              'retirosCents', 'depositosCents',
@@ -470,7 +485,7 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    // Staff directory & PINs
+    // Staff directory & hashed PINs
     match /staff_users/{staffId} {
       allow get: if isValidId(staffId) && canReadWorkspaceDoc();
       allow list: if canListWorkspaceDoc();

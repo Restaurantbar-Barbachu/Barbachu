@@ -55,10 +55,13 @@ import {
   fsSaveTimeClock,
   fsUpdatePosPermissionsAndEmails,
   fsUpdateRestaurantConfig,
+  fsVerifyAnyAdminPinFromFirestore,
   sanitizeFirestoreId,
 } from '../lib/firestoreSync';
 import { BarbachuLogo } from './BarbachuLogo';
 import { IosPinPadModal } from './IosPinPadModal';
+import { downloadCsvFile } from '../utils/csv';
+import { hashPin, isValidFourDigitPin, isWeakDefaultPin, verifyPinSecret } from '../utils/pinSecurity';
 
 interface AdminDashboardProps {
   state: FullPosState;
@@ -276,7 +279,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const auditEntry: AuditLogEntry = {
       id: uid(),
       at: now,
-      user: state.activeUser.name,
+      user: actingAdminName,
       action: 'Precio modificado',
       detail: `Clave ${prod.key} (${prod.name}): ${oldPriceStr} → ${newPriceStr}`,
     };
@@ -491,7 +494,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   // Create Employee (strict Admin role guard)
-  const handleCreateUser = (e: React.FormEvent) => {
+  const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isAdminAuthorized) {
       notify('Solo usuarios con rol de Administrador pueden crear empleados.');
@@ -503,22 +506,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       return;
     }
     const pin = newUserPin.trim();
-    if (!/^\d{4}$/.test(pin)) {
+    if (!isValidFourDigitPin(pin)) {
       notify('Define un PIN numérico de exactamente 4 dígitos.');
       return;
     }
-    if ((state.users || []).some((u) => u.pin === pin)) {
-      notify('Ese PIN ya está asignado a otro empleado. Elige un código único.');
+    if (newUserRole === 'admin' && isWeakDefaultPin(pin)) {
+      notify('Por seguridad, una cuenta de Administrador no puede usar el PIN 0000.');
       return;
     }
+    for (const u of state.users || []) {
+      if (await verifyPinSecret(pin, u.pinHash, u.pin)) {
+        notify('Ese PIN ya está asignado a otro empleado. Elige un código único.');
+        return;
+      }
+    }
 
+    const pinHash = await hashPin(pin);
     const emailNormalized = newUserEmail.trim().toLowerCase();
     const newUser: PosUser = {
       id: `usr-${Date.now().toString(36)}`,
       name,
       role: newUserRole,
       avatar: name.slice(0, 2).toUpperCase(),
-      pin,
+      pin: '****',
+      pinHash,
+      mustChangePin: isWeakDefaultPin(pin),
       area: newUserArea.trim() || (newUserRole === 'cocina' ? 'Cocina' : newUserRole === 'caja' ? 'Caja' : 'Salón'),
       email: emailNormalized || undefined,
     };
@@ -564,7 +576,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     notify(`Empleado "${name}" registrado y sincronizado.`);
   };
 
-  // Open Full Edit Employee Modal (PIN masked by default)
+  // Open Full Edit Employee Modal (PIN left blank unless operator wants to rotate it)
   const openEditUserModal = (u: PosUser) => {
     if (!isAdminAuthorized) {
       notify('Solo usuarios con rol de Administrador pueden editar empleados.');
@@ -575,13 +587,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setEditUserRole(u.role);
     setEditUserArea(u.area || '');
     setEditUserAvatar(u.avatar || u.name.slice(0, 2).toUpperCase());
-    setEditUserPin(u.pin || '');
+    setEditUserPin('');
     setShowEditPin(false);
     setEditUserEmail(u.email || '');
   };
 
   // Save Full Edit Employee (strict Admin role guard)
-  const handleSaveEditUser = (e: React.FormEvent) => {
+  const handleSaveEditUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingUser) return;
     if (!isAdminAuthorized) {
@@ -595,13 +607,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       return;
     }
     const cleanPin = editUserPin.trim();
-    if (!/^\d{4}$/.test(cleanPin)) {
-      notify('El PIN debe tener exactamente 4 dígitos numéricos.');
+    let nextPinHash = editingUser.pinHash;
+    let nextMustChangePin = Boolean(editingUser.mustChangePin);
+
+    if (cleanPin.length > 0) {
+      if (!isValidFourDigitPin(cleanPin)) {
+        notify('El nuevo PIN debe tener exactamente 4 dígitos numéricos.');
+        return;
+      }
+      if (editUserRole === 'admin' && isWeakDefaultPin(cleanPin)) {
+        notify('Por seguridad, una cuenta de Administrador no puede usar el PIN 0000.');
+        return;
+      }
+      for (const u of state.users || []) {
+        if (u.id !== editingUser.id && (await verifyPinSecret(cleanPin, u.pinHash, u.pin))) {
+          notify('Ese PIN ya está asignado a otro empleado. Elige un código único.');
+          return;
+        }
+      }
+      nextPinHash = await hashPin(cleanPin);
+      nextMustChangePin = isWeakDefaultPin(cleanPin);
+    } else if (!nextPinHash && !isValidFourDigitPin(editingUser.pin)) {
+      notify('Asigna un nuevo PIN de 4 dígitos para este empleado.');
       return;
-    }
-    if ((state.users || []).some((u) => u.id !== editingUser.id && u.pin === cleanPin)) {
-      notify('Ese PIN ya está asignado a otro empleado. Elige un código único.');
-      return;
+    } else if (!nextPinHash && isValidFourDigitPin(editingUser.pin)) {
+      nextPinHash = await hashPin(editingUser.pin);
+      nextMustChangePin = isWeakDefaultPin(editingUser.pin);
     }
 
     const cleanAvatar = (editUserAvatar.trim() || cleanName.slice(0, 2)).toUpperCase().slice(0, 4);
@@ -613,7 +644,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       name: cleanName,
       role: editUserRole,
       avatar: cleanAvatar,
-      pin: cleanPin,
+      pin: '****',
+      pinHash: nextPinHash,
+      mustChangePin: nextMustChangePin,
       area: cleanArea,
       email: cleanEmail || undefined,
     };
@@ -942,57 +975,37 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // CSV Downloads
   const downloadProductsCsv = () => {
     const headers = ['Clave', 'Descripción', 'Categoría', 'Grupo', 'Precio_MXN', 'Estado_Venta'];
-    const rows = [headers];
-    state.products.forEach((p) => {
-      rows.push([
-        p.key,
-        p.name,
-        p.category,
-        p.group,
-        (p.priceCents / 100).toFixed(2),
-        p.saleEnabled ? 'HABILITADO' : 'DESHABILITADO',
-      ]);
-    });
-    const csvContent =
-      '\uFEFF' + rows.map((r) => r.map((c) => `"${c.replace(/"/g, '""')}"`).join(',')).join('\r\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `barbachu-catalogo-productos-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const rows = state.products.map((p) => [
+      p.key,
+      p.name,
+      p.category,
+      p.group,
+      (p.priceCents / 100).toFixed(2),
+      p.saleEnabled ? 'HABILITADO' : 'DESHABILITADO',
+    ]);
+    downloadCsvFile(`barbachu-catalogo-productos-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows);
     notify('Catálogo de productos descargado en CSV.');
   };
 
   const downloadIngredientsCsv = () => {
     const headers = ['Clave', 'Descripción', 'Unidad', 'Categoría', 'Costo_Unitario_MXN', 'Stock_Actual', 'Alerta_Minima'];
-    const rows = [headers];
-    Object.values(state.inventory).forEach((i) => {
-      rows.push([
-        String(i.clave),
-        i.descripcion,
-        i.unidad,
-        i.categoria,
-        i.costo.toFixed(2),
-        String(i.stock),
-        String(i.minStock),
-      ]);
-    });
-    const csvContent =
-      '\uFEFF' + rows.map((r) => r.map((c) => `"${c.replace(/"/g, '""')}"`).join(',')).join('\r\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `barbachu-catalogo-insumos-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const rows = Object.values(state.inventory).map((i) => [
+      String(i.clave),
+      i.descripcion,
+      i.unidad,
+      i.categoria,
+      i.costo.toFixed(2),
+      String(i.stock),
+      String(i.minStock),
+    ]);
+    downloadCsvFile(`barbachu-catalogo-insumos-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows);
     notify('Catálogo de insumos descargado en CSV.');
   };
 
   const appUrl =
-    typeof window !== 'undefined' ? window.location.origin : 'https://barbachu-pos.web.app';
+    typeof window !== 'undefined'
+      ? window.location.origin
+      : import.meta.env.VITE_SITE_URL || 'https://barbachu.ai.studio';
 
   // Admin PIN lock gate: strictly enforces role === 'admin' (no non-admin bypass)
   if (!isAdminAuthorized) {
@@ -1015,16 +1028,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             open={true}
             title="Autorización de Administrador"
             subtitle={`Operador activo: ${state.activeUser.name} (${state.activeUser.role.toUpperCase()}). Ingresa el PIN de un Administrador para continuar.`}
+            rateLimitScope="admin-dashboard-unlock"
             allowCancel={Boolean(onClose)}
             onCancel={onClose}
             cancelLabel="Volver al TPV"
-            onValidatePin={(pinVal) => {
-              const matched = state.users.find((u) => u.role === 'admin' && u.pin === pinVal);
-              if (matched) {
-                setUnlockedByAdmin(matched);
-                setIsAdminUnlocked(true);
-                notify(`Acceso administrativo concedido (${matched.name}).`);
-                return true;
+            onValidatePin={async (pinVal) => {
+              if (firebaseUser) {
+                const res = await fsVerifyAnyAdminPinFromFirestore(
+                  pinVal,
+                  firebaseUser,
+                  authorizedEmails
+                );
+                if (res.ok && res.user) {
+                  setUnlockedByAdmin(res.user);
+                  setIsAdminUnlocked(true);
+                  notify(`Acceso administrativo concedido (${res.user.name}).`);
+                  return true;
+                }
+                return false;
+              }
+              for (const u of state.users) {
+                if (u.role === 'admin' && (await verifyPinSecret(pinVal, u.pinHash, u.pin))) {
+                  setUnlockedByAdmin(u);
+                  setIsAdminUnlocked(true);
+                  notify(`Acceso administrativo concedido (${u.name}).`);
+                  return true;
+                }
               }
               return false;
             }}
@@ -1337,7 +1366,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </button>
           </div>
 
-          {(state.users || []).some((u) => u.role === 'admin' && u.pin === '0000') && (
+          {(state.users || []).some((u) => u.role === 'admin' && (u.mustChangePin || u.pin === '0000')) && (
             <div className="p-3.5 rounded-2xl bg-[#e5a43b]/15 border border-[#e5a43b]/45 text-xs text-[#e8d090] flex items-center gap-2.5">
               <AlertTriangle className="w-4 h-4 shrink-0 text-[#e5a43b]" />
               <span>
@@ -1873,7 +1902,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                   firebaseUser,
                                   authorizedEmails,
                                   auditEntry
-                                );
+                                ).catch((err) => {
+                                  notify(`Error guardando salida en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+                                });
                               }
                               notify(`Salida registrada para ${rec.userName}.`);
                             }}
@@ -2514,14 +2545,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
 
                 <div>
-                  <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">PIN (4 dígitos) *</label>
+                  <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">Nuevo PIN (opcional)</label>
                   <div className="relative">
                     <input
-                      required
                       type={showEditPin ? 'text' : 'password'}
                       autoComplete="new-password"
                       inputMode="numeric"
                       maxLength={4}
+                      placeholder="••••"
                       value={editUserPin}
                       onChange={(e) => setEditUserPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
                       className="w-full min-h-[44px] pl-3 pr-10 py-2 rounded-2xl bg-[#0a0a0b]/80 border border-[#c8a84b]/60 text-white font-mono font-bold tracking-widest text-center focus:outline-none focus:border-[#c8a84b]"
@@ -2719,7 +2750,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     audit: [...prev.audit, auditEntry],
                   }));
                   if (firebaseUser) {
-                    void fsSaveTimeClock(newRecord, true, firebaseUser, authorizedEmails, auditEntry);
+                    void fsSaveTimeClock(newRecord, true, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
+                      notify(`Error guardando asistencia en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+                    });
                   }
                   setClockModalOpen(false);
                   notify(`Entrada registrada para ${user.name}.`);
@@ -2787,7 +2820,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       firebaseUser,
                       authorizedEmails,
                       auditEntry
-                    );
+                    ).catch((err) => {
+                      notify(`Error actualizando umbral en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+                    });
                   }
                   setEditingMinStockItem(null);
                   notify(`Umbral de ${editingMinStockItem.descripcion} actualizado a ${num}.`);

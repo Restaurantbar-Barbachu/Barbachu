@@ -191,8 +191,16 @@ export const DIRTY_DOZEN_CASES: DirtyDozenCase[] = [
 ];
 
 // Structural verification when executed directly with Node
+import fs from 'node:fs';
+const rulesText = fs.readFileSync(new URL('./firestore.rules', import.meta.url), 'utf8');
+
 assert.equal(DIRTY_DOZEN_CASES.length, 12, 'Must define all 12 Dirty Dozen adversarial payloads');
 for (const tc of DIRTY_DOZEN_CASES) {
   assert.equal(tc.expectedResult, 'PERMISSION_DENIED');
   assert.ok(tc.enforcedByGate.length > 0, `Case ${tc.id} must map to an explicit rule gate`);
 }
+assert.ok(rulesText.includes('.lower()'), 'Rules must normalize email case with .lower()');
+assert.ok(rulesText.includes('isValidOrderItem(items[items.size() - 1])'), 'Rules must validate trailing order items as well as head items');
+assert.ok(rulesText.includes("'pinHash'"), 'Staff user rules must validate salted pinHash field');
+assert.ok(rulesText.includes('incoming().totalSalesCents >= existing().totalSalesCents'), 'Shift rules must enforce monotonic sales totals for non-admin writes');
+

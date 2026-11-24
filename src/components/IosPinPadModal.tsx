@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Delete, Lock, ShieldCheck, X } from 'lucide-react';
 import type { PosUser } from '../types';
+import { sharedPinRateLimiter } from '../utils/pinSecurity';
 
 interface IosPinPadModalProps {
   open: boolean;
@@ -14,6 +15,7 @@ interface IosPinPadModalProps {
   onCancel?: () => void;
   cancelLabel?: string;
   allowCancel?: boolean;
+  rateLimitScope?: string;
 }
 
 export const IosPinPadModal: React.FC<IosPinPadModalProps> = ({
@@ -28,18 +30,38 @@ export const IosPinPadModal: React.FC<IosPinPadModalProps> = ({
   onCancel,
   cancelLabel = 'Cancelar',
   allowCancel = true,
+  rateLimitScope,
 }) => {
   const [pin, setPin] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [verifying, setVerifying] = useState<boolean>(false);
+  const [lockRemainingSec, setLockRemainingSec] = useState<number>(0);
+
+  const rlScope = useMemo(
+    () => rateLimitScope || `modal:${selectedUser?.id || title}`,
+    [rateLimitScope, selectedUser?.id, title]
+  );
 
   useEffect(() => {
     if (open) {
       setPin('');
       setErrorMsg(null);
       setVerifying(false);
+      const status = sharedPinRateLimiter.check(rlScope);
+      setLockRemainingSec(status.blocked ? Math.ceil(status.remainingMs / 1000) : 0);
     }
-  }, [open, selectedUser?.id]);
+  }, [open, selectedUser?.id, rlScope]);
+
+  useEffect(() => {
+    if (!open || lockRemainingSec <= 0) return;
+    const timer = window.setInterval(() => {
+      const status = sharedPinRateLimiter.check(rlScope);
+      setLockRemainingSec(status.blocked ? Math.ceil(status.remainingMs / 1000) : 0);
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [open, lockRemainingSec, rlScope]);
+
+  const isLocked = lockRemainingSec > 0;
 
   useEffect(() => {
     if (!open) return;
@@ -48,8 +70,10 @@ export const IosPinPadModal: React.FC<IosPinPadModalProps> = ({
       if (e.key >= '0' && e.key <= '9') {
         void handleDigit(e.key);
       } else if (e.key === 'Backspace') {
-        setPin((p) => p.slice(0, -1));
-        setErrorMsg(null);
+        if (!isLocked) {
+          setPin((p) => p.slice(0, -1));
+          setErrorMsg(null);
+        }
       } else if (e.key === 'Escape' && allowCancel && onCancel) {
         onCancel();
       }
@@ -57,26 +81,46 @@ export const IosPinPadModal: React.FC<IosPinPadModalProps> = ({
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, pin, selectedUser, allowCancel, verifying]);
+  }, [open, pin, selectedUser, allowCancel, verifying, isLocked]);
 
   if (!open) return null;
 
   const handleDigit = async (digit: string) => {
-    if (verifying || pin.length >= 4) return;
+    if (verifying || isLocked || pin.length >= 4) return;
     const nextPin = pin + digit;
     setPin(nextPin);
     setErrorMsg(null);
 
     if (nextPin.length === 4) {
+      const preCheck = sharedPinRateLimiter.check(rlScope);
+      if (preCheck.blocked) {
+        const sec = Math.ceil(preCheck.remainingMs / 1000);
+        setLockRemainingSec(sec);
+        setErrorMsg(`Bloqueado temporalmente. Espera ${sec}s.`);
+        setPin('');
+        return;
+      }
+
       setVerifying(true);
       try {
         const ok = await onValidatePin(nextPin, selectedUser);
         if (ok) {
+          sharedPinRateLimiter.reset(rlScope);
+          setLockRemainingSec(0);
           setPin('');
           setErrorMsg(null);
           if (onSuccess) onSuccess();
         } else {
-          setErrorMsg('PIN incorrecto. Intenta nuevamente.');
+          const nextStatus = sharedPinRateLimiter.recordFailure(rlScope);
+          if (nextStatus.blocked) {
+            const sec = Math.ceil(nextStatus.remainingMs / 1000);
+            setLockRemainingSec(sec);
+            setErrorMsg(`Demasiados intentos. Bloqueado por ${sec}s.`);
+          } else {
+            setErrorMsg(
+              `PIN incorrecto (${nextStatus.attemptsLeft} intento${nextStatus.attemptsLeft === 1 ? '' : 's'} restante${nextStatus.attemptsLeft === 1 ? '' : 's'}).`
+            );
+          }
           setTimeout(() => setPin(''), 260);
         }
       } catch {
@@ -89,7 +133,7 @@ export const IosPinPadModal: React.FC<IosPinPadModalProps> = ({
   };
 
   const handleBackspace = () => {
-    if (verifying) return;
+    if (verifying || isLocked) return;
     setPin((p) => p.slice(0, -1));
     setErrorMsg(null);
   };
@@ -160,7 +204,7 @@ export const IosPinPadModal: React.FC<IosPinPadModalProps> = ({
                 <div
                   key={idx}
                   className={`w-3.5 h-3.5 rounded-full transition-all duration-150 border ${
-                    errorMsg
+                    errorMsg || isLocked
                       ? 'border-[#e05252] bg-[#e05252]/40 scale-105'
                       : filled
                       ? 'border-[#e8d090] bg-[#e8d090] scale-110 shadow-[0_0_12px_rgba(232,208,144,0.45)]'
@@ -170,7 +214,11 @@ export const IosPinPadModal: React.FC<IosPinPadModalProps> = ({
               );
             })}
           </div>
-          {verifying ? (
+          {isLocked ? (
+            <p className="text-xs font-semibold text-[#e05252] min-h-[16px]">
+              Bloqueado temporalmente · Espera {lockRemainingSec}s
+            </p>
+          ) : verifying ? (
             <p className="text-xs font-semibold text-[#e8d090] min-h-[16px]">Verificando con Firestore...</p>
           ) : errorMsg ? (
             <p className="text-xs font-semibold text-[#e05252] min-h-[16px]">{errorMsg}</p>
@@ -187,9 +235,9 @@ export const IosPinPadModal: React.FC<IosPinPadModalProps> = ({
             <button
               key={digit}
               type="button"
-              disabled={verifying}
+              disabled={verifying || isLocked}
               onClick={() => void handleDigit(digit)}
-              className="w-16 h-16 rounded-full bg-white/[0.08] hover:bg-white/[0.15] active:scale-95 disabled:opacity-50 border border-white/10 text-2xl font-medium text-white tabular-nums flex items-center justify-center transition-all"
+              className="w-16 h-16 rounded-full bg-white/[0.08] hover:bg-white/[0.15] active:scale-95 disabled:opacity-40 border border-white/10 text-2xl font-medium text-white tabular-nums flex items-center justify-center transition-all"
             >
               {digit}
             </button>
@@ -209,19 +257,19 @@ export const IosPinPadModal: React.FC<IosPinPadModalProps> = ({
 
           <button
             type="button"
-            disabled={verifying}
+            disabled={verifying || isLocked}
             onClick={() => void handleDigit('0')}
-            className="w-16 h-16 rounded-full bg-white/[0.08] hover:bg-white/[0.15] active:scale-95 disabled:opacity-50 border border-white/10 text-2xl font-medium text-white tabular-nums flex items-center justify-center transition-all"
+            className="w-16 h-16 rounded-full bg-white/[0.08] hover:bg-white/[0.15] active:scale-95 disabled:opacity-40 border border-white/10 text-2xl font-medium text-white tabular-nums flex items-center justify-center transition-all"
           >
             0
           </button>
 
           <button
             type="button"
-            disabled={verifying}
+            disabled={verifying || isLocked}
             onClick={handleBackspace}
             aria-label="Borrar dígito"
-            className="w-16 h-16 rounded-full text-[rgba(240,230,211,0.72)] hover:text-white active:scale-95 disabled:opacity-50 flex items-center justify-center transition-all"
+            className="w-16 h-16 rounded-full text-[rgba(240,230,211,0.72)] hover:text-white active:scale-95 disabled:opacity-40 flex items-center justify-center transition-all"
           >
             <Delete className="w-5 h-5" />
           </button>

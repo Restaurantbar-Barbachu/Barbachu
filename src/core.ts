@@ -65,8 +65,17 @@ export function locationOptions(service: ServiceType): { value: string; label: s
   ];
 }
 
+export function modifiersTotalCents(item: OrderItem): number {
+  const list = item.modifiers || item.modificadores || [];
+  return list.reduce((sum, m) => sum + Math.max(0, Math.round(Number(m.priceCents) || 0)), 0);
+}
+
+export function unitTotalCents(item: OrderItem): number {
+  return item.priceCents + modifiersTotalCents(item);
+}
+
 export function lineTotalCents(item: OrderItem): number {
-  return item.priceCents * item.qty;
+  return unitTotalCents(item) * item.qty;
 }
 
 export function subtotalCents(items: OrderItem[]): number {
@@ -399,6 +408,11 @@ export function printReceiptText(
     const itemDesc = item.name.slice(0, 24).padEnd(24, ' ');
     const itemQty = String(item.qty).padEnd(5, ' ');
     lines.push(`${itemQty} ${itemDesc} $${totalItem.padStart(8, ' ')}`);
+    const mods = item.modifiers || item.modificadores || [];
+    for (const m of mods) {
+      const modPrice = m.priceCents > 0 ? ` (+$${(m.priceCents / 100).toFixed(2)})` : '';
+      lines.push(`      + ${m.name}${modPrice}`);
+    }
     if (item.note) {
       lines.push(`      * ${item.note}`);
     }
@@ -450,6 +464,11 @@ export function printPreCheckText(
     const itemDesc = item.name.slice(0, 24).padEnd(24, ' ');
     const itemQty = String(item.qty).padEnd(5, ' ');
     lines.push(`${itemQty} ${itemDesc} $${totalItem.padStart(8, ' ')}`);
+    const mods = item.modifiers || item.modificadores || [];
+    for (const m of mods) {
+      const modPrice = m.priceCents > 0 ? ` (+$${(m.priceCents / 100).toFixed(2)})` : '';
+      lines.push(`      + ${m.name}${modPrice}`);
+    }
   }
 
   lines.push(

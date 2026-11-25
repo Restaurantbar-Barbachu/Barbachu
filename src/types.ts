@@ -47,6 +47,11 @@ export type PaymentMethod = 'efectivo' | 'tarjeta' | 'transferencia' | 'mixto';
 export type ItemStatus = 'pending' | 'preparing' | 'ready' | 'served';
 export type StationType = 'cocina' | 'barra';
 
+export interface OrderItemModifier {
+  name: string;
+  priceCents: number;
+}
+
 export interface OrderItem {
   lineId?: string;
   key: string;
@@ -56,6 +61,8 @@ export interface OrderItem {
   note: string;
   station?: StationType;
   itemStatus?: ItemStatus;
+  modifiers?: OrderItemModifier[];
+  modificadores?: OrderItemModifier[];
 }
 
 export interface CustomerDelivery {
@@ -184,6 +191,19 @@ export interface DeviceConfig {
   station: DeviceStation;
   stationName: string;
   autoLockMinutes: number;
+}
+
+export interface TerminalSession {
+  deviceId: string;
+  station: DeviceStation;
+  stationName: string;
+  staffName: string;
+  staffRole: UserRole;
+  operatorEmail: string;
+  online: boolean;
+  platform: string;
+  lastSeenAt: string;
+  updatedAt: string;
 }
 
 export interface RestaurantConfig {

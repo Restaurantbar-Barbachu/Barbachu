@@ -172,7 +172,7 @@
     },
     "Order": {
       "title": "Order",
-      "description": "Active or closed restaurant order with station items",
+      "description": "Active or closed restaurant order with station items and modifiers",
       "type": "object",
       "properties": {
         "id": {
@@ -204,7 +204,8 @@
           "maxLength": 300
         },
         "items": {
-          "type": "array"
+          "type": "array",
+          "description": "Order line items including optional modifiers [{name, priceCents}]"
         },
         "totalCents": {
           "type": "integer"
@@ -586,6 +587,75 @@
         }
       },
       "required": ["id", "at", "user", "action", "detail", "ownerUid", "authorizedEmails"]
+    },
+    "TerminalSession": {
+      "title": "TerminalSession",
+      "description": "Connected employee POS device heartbeat, station assignment, and active operator",
+      "type": "object",
+      "properties": {
+        "deviceId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "station": {
+          "type": "string",
+          "enum": ["todos", "comandero", "caja", "cocina", "barra"]
+        },
+        "stationName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "staffName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "staffRole": {
+          "type": "string",
+          "enum": ["admin", "caja", "mesero", "cocina"]
+        },
+        "operatorEmail": {
+          "type": "string",
+          "maxLength": 180
+        },
+        "online": {
+          "type": "boolean"
+        },
+        "platform": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorizedEmails": {
+          "type": "array"
+        },
+        "lastSeenAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "deviceId",
+        "station",
+        "stationName",
+        "staffName",
+        "staffRole",
+        "operatorEmail",
+        "online",
+        "platform",
+        "ownerUid",
+        "authorizedEmails",
+        "lastSeenAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -636,6 +706,10 @@
     "/audit_logs/{auditId}": {
       "schema": { "$ref": "#/entities/AuditLogEntry" },
       "description": "Append-only operational audit logs"
+    },
+    "/pos_terminals/{terminalId}": {
+      "schema": { "$ref": "#/entities/TerminalSession" },
+      "description": "Connected employee POS terminals and live sync heartbeats"
     }
   }
 }

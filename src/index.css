@@ -48,6 +48,7 @@ body {
   -webkit-font-smoothing: antialiased;
   padding-bottom: calc(18px + var(--bot));
   overflow-x: hidden;
+  overflow-x: clip;
 }
 
 button {
@@ -107,6 +108,14 @@ button {
 }
 
 /* Scrollbar styles */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -250,27 +259,42 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 24px;
+  gap: 8px;
+  padding: 10px 12px;
   background: var(--mat);
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
   border-bottom: 1px solid var(--line);
-  min-height: 64px;
+  min-height: 60px;
   position: sticky;
   top: 0;
   z-index: 30;
 }
 
 .pos-topbar h2 {
-  font: 700 1.25rem/1.2 var(--serif);
+  font: 700 1.05rem/1.2 var(--serif);
   margin: 0;
   color: var(--cream);
+  min-width: 0;
 }
 
 .pos-content {
   flex: 1;
-  padding: 20px 24px 32px;
+  padding: 12px 12px 28px;
   overflow-y: auto;
+}
+
+@media (min-width: 640px) {
+  .pos-topbar {
+    padding: 12px 24px;
+    min-height: 64px;
+  }
+  .pos-topbar h2 {
+    font-size: 1.25rem;
+  }
+  .pos-content {
+    padding: 20px 24px 32px;
+  }
 }
 
 /* Category Chips */
@@ -320,25 +344,46 @@ button {
   font-weight: 700;
 }
 
-/* Product Cards */
+/* Product Cards — Responsive Auto-Layout CSS Grid */
 .pos-product-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, clamp(142px, 44%, 190px)), 1fr));
+  grid-auto-rows: 1fr;
+  align-items: stretch;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+}
+
+@media (min-width: 640px) {
+  .pos-product-grid {
+    grid-template-columns: repeat(auto-fill, minmax(clamp(164px, 28%, 212px), 1fr));
+    gap: 12px;
+  }
+}
+
+@media (min-width: 1280px) {
+  .pos-product-grid {
+    grid-template-columns: repeat(auto-fill, minmax(clamp(172px, 22%, 220px), 1fr));
+  }
 }
 
 .pos-prod-card {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
   background: linear-gradient(160deg, rgba(200, 168, 75, 0.08), var(--card) 65%);
   border: 1px solid var(--golddim);
   border-radius: 18px;
-  padding: 14px;
+  padding: 12px 13px;
   text-align: left;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  min-height: 108px;
+  min-height: 128px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
   box-shadow: inset 0 1px 0 var(--edge);
 }
 
@@ -359,18 +404,29 @@ button {
 }
 
 .pos-prod-card .prod-key {
-  font-size: 12px;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 11px;
   color: var(--dim);
   font-weight: 600;
   margin-bottom: 4px;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 
 .pos-prod-card .prod-name {
-  font: 600 0.92rem/1.25 var(--serif);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font: 600 0.9rem/1.25 var(--serif);
   color: var(--cream);
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .pos-prod-card .prod-price {
@@ -548,13 +604,14 @@ button {
     justify-content: center;
     min-height: 46px;
     gap: 3px;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 600;
     color: var(--dim);
     background: transparent;
     border: 0;
     border-radius: 12px;
-    padding: 4px;
+    padding: 4px 2px;
+    white-space: nowrap;
     cursor: pointer;
     transition: color 0.15s ease, transform 0.12s ease;
   }

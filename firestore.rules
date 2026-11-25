@@ -69,16 +69,35 @@ service cloud.firestore {
       );
     }
 
+    function isValidOrderItemModifier(m) {
+      return m is map &&
+        m.keys().hasAll(['name', 'priceCents']) &&
+        m.keys().hasOnly(['name', 'priceCents']) &&
+        m.name is string && m.name.size() >= 1 && m.name.size() <= 60 &&
+        m.priceCents is int && m.priceCents >= 0 && m.priceCents <= 1000000;
+    }
+
+    function isValidOrderItemModifiers(mods) {
+      return mods is list &&
+        mods.size() <= 15 &&
+        (mods.size() == 0 || (
+          isValidOrderItemModifier(mods[0]) &&
+          (mods.size() < 2 || isValidOrderItemModifier(mods[1])) &&
+          isValidOrderItemModifier(mods[mods.size() - 1])
+        ));
+    }
+
     function isValidOrderItem(item) {
       return item is map &&
         item.keys().hasAll(['key', 'name', 'priceCents', 'qty']) &&
-        item.keys().hasOnly(['lineId', 'key', 'name', 'priceCents', 'qty', 'note', 'station', 'itemStatus']) &&
+        item.keys().hasOnly(['lineId', 'key', 'name', 'priceCents', 'qty', 'note', 'modifiers', 'station', 'itemStatus']) &&
         (!('lineId' in item) || (item.lineId is string && item.lineId.size() <= 64)) &&
         item.key is string && item.key.size() >= 1 && item.key.size() <= 64 &&
         item.name is string && item.name.size() >= 1 && item.name.size() <= 120 &&
         item.priceCents is int && item.priceCents >= 0 && item.priceCents <= 10000000 &&
         item.qty is int && item.qty >= 1 && item.qty <= 99 &&
         (!('note' in item) || (item.note is string && item.note.size() <= 200)) &&
+        (!('modifiers' in item) || isValidOrderItemModifiers(item.modifiers)) &&
         (!('station' in item) || item.station in ['cocina', 'barra']) &&
         (!('itemStatus' in item) || item.itemStatus in ['pending', 'preparing', 'ready', 'served']);
     }
@@ -292,6 +311,23 @@ service cloud.firestore {
         (!('reason' in data) || (data.reason is string && data.reason.size() <= 200)) &&
         data.ownerUid is string && data.ownerUid.size() <= 128 && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
         isValidEmailList(data.authorizedEmails);
+    }
+
+    function isValidTerminalSession(data) {
+      return data.keys().hasAll(['deviceId', 'station', 'stationName', 'staffName', 'staffRole', 'operatorEmail', 'online', 'platform', 'ownerUid', 'authorizedEmails', 'lastSeenAt', 'updatedAt']) &&
+        data.keys().hasOnly(['deviceId', 'station', 'stationName', 'staffName', 'staffRole', 'operatorEmail', 'online', 'platform', 'ownerUid', 'authorizedEmails', 'lastSeenAt', 'updatedAt']) &&
+        data.deviceId is string && data.deviceId.size() >= 4 && data.deviceId.size() <= 64 && data.deviceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.station in ['todos', 'comandero', 'caja', 'cocina', 'barra'] &&
+        data.stationName is string && data.stationName.size() >= 1 && data.stationName.size() <= 80 &&
+        data.staffName is string && data.staffName.size() >= 1 && data.staffName.size() <= 80 &&
+        data.staffRole in ['admin', 'caja', 'mesero', 'cocina'] &&
+        data.operatorEmail is string && data.operatorEmail.size() <= 180 &&
+        data.online is bool &&
+        data.platform is string && data.platform.size() >= 1 && data.platform.size() <= 60 &&
+        data.ownerUid is string && data.ownerUid.size() <= 128 && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        isValidEmailList(data.authorizedEmails) &&
+        data.lastSeenAt is timestamp &&
+        data.updatedAt is timestamp;
     }
 
     // -------------------------------------------------------------------------
@@ -532,6 +568,26 @@ service cloud.firestore {
         incoming().ownerUid == request.auth.uid &&
         incoming().at == request.time;
       allow update, delete: if false;
+    }
+
+    // Connected employee terminals & multi-device sync heartbeats
+    match /pos_terminals/{terminalId} {
+      allow get: if isValidId(terminalId) && canReadWorkspaceDoc();
+      allow list: if canListWorkspaceDoc();
+      allow create: if isValidId(terminalId) &&
+        isVerified() &&
+        isValidTerminalSession(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().lastSeenAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(terminalId) &&
+        isVerified() &&
+        isValidTerminalSession(incoming()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().lastSeenAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (isAdmin() || canReadWorkspaceDoc());
+      allow delete: if isValidId(terminalId) && isAdmin();
     }
   }
 }

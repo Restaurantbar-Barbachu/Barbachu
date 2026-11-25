@@ -41,6 +41,7 @@ import {
   FullPosState,
   Order,
   OrderItem,
+  OrderItemModifier,
   OrderStatus,
   PaymentMethod,
   Priority,
@@ -51,9 +52,11 @@ import {
   AuditLogEntry,
   ItemStatus,
   DeviceStation,
+  TerminalSession,
 } from '../types';
 const AdminDashboard = lazy(() => import('./AdminDashboard').then(m => ({ default: m.AdminDashboard })));
 import { BarbachuLogo } from './BarbachuLogo';
+import { CategorySidebar } from './CategorySidebar';
 import {
   defaultViewForRole,
   describeRoleCapabilities,
@@ -77,6 +80,7 @@ import {
 } from '../lib/firebase';
 import {
   bootstrapWorkspace,
+  deleteTerminalSession,
   ensureEmailList,
   fsCancelOrder,
   fsCloseAndPayOrder,
@@ -91,7 +95,10 @@ import {
   fsUpdateOrder,
   fsUpdateStaffPin,
   fsVerifyAnyAdminPinFromFirestore,
+  subscribeFirestoreSyncPulse,
   subscribePosWorkspace,
+  subscribeTerminalSessions,
+  upsertTerminalHeartbeat,
 } from '../lib/firestoreSync';
 import {
   canActOnItem,
@@ -104,6 +111,7 @@ import {
   lineTotalCents,
   locationLabel,
   locationOptions,
+  modifiersTotalCents,
   nextItemStatus,
   printPreCheckText,
   printReceiptText,
@@ -111,17 +119,26 @@ import {
   subtotalCents,
   totalCents,
   uid,
+  unitTotalCents,
 } from '../core';
 import {
   createInitialShift,
   DEFAULT_PERMISSIONS,
+  DEVICE_STATION_NAMES,
+  detectDevicePlatformLabel,
   formatMoney,
+  getOrCreateDeviceId,
   loadPosState,
   savePosState,
 } from '../storage';
 import { toLocalDateKey } from '../utils/dashboardMetrics';
 import { downloadCsvFile } from '../utils/csv';
 import { isValidFourDigitPin, isWeakDefaultPin } from '../utils/pinSecurity';
+import {
+  buildCatalogHierarchy,
+  filterCatalogProductsByHierarchy,
+  MainCatalogCategory,
+} from '../utils/catalogHierarchy';
 
 const QUICK_ITEM_MODIFIERS = [
   'Sin cebolla',
@@ -144,6 +161,103 @@ function formatElapsedTime(createdAt: string, nowMs: number): string {
   return `${h}h ${m}m`;
 }
 
+export interface ModifierOption {
+  id: string;
+  name: string;
+  priceCents: number;
+}
+
+const DEFAULT_MODIFIER_OPTIONS: ModifierOption[] = [
+  { id: 'sin_cebolla', name: 'Sin cebolla', priceCents: 0 },
+  { id: 'sin_tomate', name: 'Sin tomate', priceCents: 0 },
+  { id: 'sin_chile', name: 'Sin chile', priceCents: 0 },
+  { id: 'sin_mayonesa', name: 'Sin mayonesa', priceCents: 0 },
+  { id: 'salsa_aparte', name: 'Salsa aparte', priceCents: 0 },
+  { id: 'para_llevar', name: 'Para llevar', priceCents: 0 },
+  { id: 'extra_queso', name: 'Extra queso', priceCents: 1500 },
+  { id: 'tocino_extra', name: 'Tocino extra', priceCents: 2000 },
+  { id: 'aguacate_extra', name: 'Aguacate extra', priceCents: 2500 },
+  { id: 'carne_extra', name: 'Carne extra', priceCents: 3500 },
+  { id: 'termino_medio', name: 'Término: Medio', priceCents: 0 },
+  { id: 'termino_3_4', name: 'Término: Tres cuartos', priceCents: 0 },
+  { id: 'termino_bien', name: 'Término: Bien cocido', priceCents: 0 },
+];
+
+export function useModifiers(initialModifiers: ModifierOption[] = DEFAULT_MODIFIER_OPTIONS) {
+  const [modifiers, setModifiers] = useState<ModifierOption[]>(initialModifiers);
+
+  const addCustomModifier = (rawName: string, pricePesos: number): { id: string; error?: string } => {
+    const cleanName = rawName.trim().slice(0, 50);
+    if (!cleanName) {
+      return { id: '', error: 'Escribe el nombre del modificador o extra.' };
+    }
+    const safePesos = Number.isFinite(pricePesos) ? Math.max(0, pricePesos) : 0;
+    const priceCents = Math.round(safePesos * 100);
+
+    const existing = modifiers.find((m) => m.name.toLowerCase() === cleanName.toLowerCase());
+    if (existing) {
+      if (existing.priceCents !== priceCents) {
+        setModifiers((prev) =>
+          prev.map((m) => (m.id === existing.id ? { ...m, priceCents } : m))
+        );
+      }
+      return { id: existing.id };
+    }
+
+    const slug = cleanName
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_|_$/g, '');
+    const id = `custom_${slug || 'extra'}_${Date.now().toString(36)}`;
+    setModifiers((prev) => [...prev, { id, name: cleanName, priceCents }]);
+    return { id };
+  };
+
+  const calculateModifierTotal = (selected: Record<string, boolean>): number => {
+    return modifiers
+      .filter((m) => selected[m.id])
+      .reduce((sum, m) => sum + m.priceCents, 0);
+  };
+
+  const getModifiersArray = (selected: Record<string, boolean>): OrderItemModifier[] => {
+    return modifiers
+      .filter((m) => selected[m.id])
+      .map((m) => ({ name: m.name, priceCents: m.priceCents }));
+  };
+
+  const buildSelectionFromItem = (item: OrderItem): Record<string, boolean> => {
+    const itemMods = item.modifiers || item.modificadores || [];
+    const selectedMap: Record<string, boolean> = {};
+    const missingMods: ModifierOption[] = [];
+
+    for (const mod of itemMods) {
+      const existing = modifiers.find((m) => m.name.toLowerCase() === mod.name.toLowerCase());
+      if (existing) {
+        selectedMap[existing.id] = true;
+      } else {
+        const customId = `custom_loaded_${mod.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${missingMods.length}`;
+        missingMods.push({ id: customId, name: mod.name, priceCents: mod.priceCents || 0 });
+        selectedMap[customId] = true;
+      }
+    }
+
+    if (missingMods.length > 0) {
+      setModifiers((prev) => [...prev, ...missingMods]);
+    }
+    return selectedMap;
+  };
+
+  return {
+    modifiers,
+    addCustomModifier,
+    calculateModifierTotal,
+    getModifiersArray,
+    buildSelectionFromItem,
+  };
+}
+
 interface PosViewProps {
   onSwitchToMenu?: () => void;
 }
@@ -160,6 +274,10 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [syncError, setSyncError] = useState<Error | null>(null);
 
   const isOnline = useOnlineStatus();
+  const deviceId = useMemo(() => getOrCreateDeviceId(), []);
+  const platformLabel = useMemo(() => detectDevicePlatformLabel(), []);
+  const [terminals, setTerminals] = useState<TerminalSession[]>([]);
+  const [lastSyncMs, setLastSyncMs] = useState<number | null>(null);
   const [state, setState] = useState<FullPosState>(() => loadPosState());
   const [view, setView] = useState<PosViewRoute>('dashboard');
 
@@ -172,10 +290,51 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [generalNote, setGeneralNote] = useState<string>('');
   const [priority, setPriority] = useState<Priority>('normal');
   const [deliveryData, setDeliveryData] = useState({ name: '', phone: '', address: '', reference: '' });
+  const [modifierModalProduct, setModifierModalProduct] = useState<SoftProduct | null>(null);
+  const [selectedModifiers, setSelectedModifiers] = useState<Record<string, boolean>>({});
+  const [editingCartItemIndex, setEditingCartItemIndex] = useState<number | null>(null);
+  const [editingItemModifiers, setEditingItemModifiers] = useState<Record<string, boolean>>({});
+  const [customModName, setCustomModName] = useState<string>('');
+  const [customModPrice, setCustomModPrice] = useState<string>('0');
+  const [customModError, setCustomModError] = useState<string>('');
 
-  // Filtering & Search
+  const {
+    modifiers,
+    addCustomModifier,
+    calculateModifierTotal,
+    getModifiersArray,
+    buildSelectionFromItem,
+  } = useModifiers();
+
+  const handleOpenNewProductModifiers = (prod: SoftProduct) => {
+    if (!activePerms?.canTakeOrders && !isAdminRole) {
+      notify(`Tu rol (${activeRole.toUpperCase()}) no tiene permiso para tomar comandas.`);
+      return;
+    }
+    if (!prod.saleEnabled) {
+      notify(`El producto "${prod.name}" tiene precio pendiente.`);
+      return;
+    }
+    setSelectedModifiers({});
+    setCustomModName('');
+    setCustomModPrice('0');
+    setCustomModError('');
+    setModifierModalProduct(prod);
+  };
+
+  const handleOpenCartItemModifiers = (item: OrderItem, idx: number) => {
+    setEditingCartItemIndex(idx);
+    setCustomModName('');
+    setCustomModPrice('0');
+    setCustomModError('');
+    setEditingItemModifiers(buildSelectionFromItem(item));
+  };
+
+  // Hierarchical Filtering & Search (Categoría -> Subcategoría -> Grupo)
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [selectedCategory, setSelectedCategory] = useState<string>('TODOS');
+  const [selectedMainCategory, setSelectedMainCategory] = useState<MainCatalogCategory>('Alimentos');
+  const [selectedSubcategory, setSelectedSubcategory] = useState<string>('Todas');
+  const [selectedGroupFilter, setSelectedGroupFilter] = useState<string>('Todos');
   const [posStationFilter, setPosStationFilter] = useState<'todas' | 'cocina' | 'barra'>('todas');
   const [kitchenStation, setKitchenStation] = useState<'todas' | 'cocina' | 'barra'>('todas');
 
@@ -298,11 +457,45 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     return () => unsub();
   }, []);
 
+  // Preconfigure terminal station from QR/pairing URL query (?station=cocina|barra|comandero|caja|todos)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const rawStation = params.get('station') as DeviceStation | null;
+    if (!rawStation || !(rawStation in DEVICE_STATION_NAMES)) return;
+
+    const nextStationName = DEVICE_STATION_NAMES[rawStation];
+    setState((prev) => ({
+      ...prev,
+      deviceConfig: {
+        station: rawStation,
+        stationName: nextStationName,
+        autoLockMinutes: prev.deviceConfig?.autoLockMinutes || 0,
+      },
+    }));
+
+    if (rawStation === 'cocina') {
+      setKitchenStation('cocina');
+      setPosStationFilter('cocina');
+      setView('kitchen');
+    } else if (rawStation === 'barra') {
+      setKitchenStation('barra');
+      setPosStationFilter('barra');
+      setView('kitchen');
+    } else if (rawStation === 'comandero') {
+      setView('pos');
+    } else if (rawStation === 'caja') {
+      setView('cash');
+    }
+  }, []);
+
   // Bootstrap & subscribe to Firestore workspace when authenticated
   useEffect(() => {
     if (!authReady || !firebaseUser) return;
     let active = true;
     let unsubWorkspace: (() => void) | null = null;
+    let unsubTerminals: (() => void) | null = null;
+    let unsubSyncPulse: (() => void) | null = null;
 
     setCloudBooting(true);
     void testConnection();
@@ -357,6 +550,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           onAudit: (audit) => setState((prev) => ({ ...prev, audit })),
           onError: (err) => setSyncError(err),
         });
+
+        unsubTerminals = subscribeTerminalSessions(firebaseUser, res.isAdmin, setTerminals);
+        unsubSyncPulse = subscribeFirestoreSyncPulse(setLastSyncMs);
         setCloudBooting(false);
       })
       .catch((err) => {
@@ -368,6 +564,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     return () => {
       active = false;
       if (unsubWorkspace) unsubWorkspace();
+      if (unsubTerminals) unsubTerminals();
+      if (unsubSyncPulse) unsubSyncPulse();
     };
   }, [authReady, firebaseUser]);
 
@@ -385,6 +583,45 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     () => ensureEmailList(state.authorizedEmails, firebaseUser?.email),
     [state.authorizedEmails, firebaseUser?.email]
   );
+
+  // Live terminal presence heartbeat (every 45s while connected)
+  useEffect(() => {
+    if (!authReady || !firebaseUser || !workspaceAuthorized) return;
+
+    const pushHeartbeat = () => {
+      void upsertTerminalHeartbeat(
+        {
+          deviceId,
+          station: state.deviceConfig?.station || 'todos',
+          stationName: state.deviceConfig?.stationName || DEVICE_STATION_NAMES.todos,
+          staffName: employeeAuthenticated ? state.activeUser.name : 'En espera de PIN',
+          staffRole: employeeAuthenticated ? state.activeUser.role : 'mesero',
+          platform: platformLabel,
+          online: isOnline,
+        },
+        firebaseUser,
+        authorizedEmails
+      );
+    };
+
+    pushHeartbeat();
+    if (!isOnline) return;
+    const intervalId = window.setInterval(pushHeartbeat, 45000);
+    return () => window.clearInterval(intervalId);
+  }, [
+    authReady,
+    firebaseUser,
+    workspaceAuthorized,
+    isOnline,
+    deviceId,
+    platformLabel,
+    state.deviceConfig?.station,
+    state.deviceConfig?.stationName,
+    employeeAuthenticated,
+    state.activeUser.name,
+    state.activeUser.role,
+    authorizedEmails,
+  ]);
 
   const notify = (msg: string) => {
     setToastMessage(msg);
@@ -457,31 +694,65 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     }
   }, [state.orders, currentOrderId]);
 
-  // Categories list from live products
-  const categories = useMemo(() => {
-    const set = new Set(state.products.map((p) => p.category).filter(Boolean));
-    return ['TODOS', ...Array.from(set).sort((a, b) => a.localeCompare(b, 'es'))];
-  }, [state.products]);
-
   const catalogModifiers = useMemo(
     () => state.products.filter((p) => p.category === 'MODIFICADORES'),
     [state.products]
   );
 
-  // Filtered products for POS (category + station + search)
-  const filteredProducts = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
+  // Saleable products (excluding standalone MODIFICADORES catalog rows)
+  const saleableCatalogProducts = useMemo(() => {
     return state.products.filter((p) => {
-      const matchCat =
-        selectedCategory === 'TODOS'
-          ? p.category !== 'MODIFICADORES'
-          : p.category === selectedCategory;
+      if (!p.category || p.category === 'MODIFICADORES') return false;
       const station = p.station || classifyProductStation(p.category);
-      const matchStation = posStationFilter === 'todas' || station === posStationFilter;
-      const matchQ = !q || p.name.toLowerCase().includes(q) || p.key.toLowerCase().includes(q) || p.category.toLowerCase().includes(q);
-      return matchCat && matchStation && matchQ;
+      return posStationFilter === 'todas' || station === posStationFilter;
     });
-  }, [searchQuery, selectedCategory, posStationFilter, state.products]);
+  }, [state.products, posStationFilter]);
+
+  // Hierarchical Tree: Categoría -> Subcategoría -> Grupo
+  const catalogTree = useMemo(
+    () => buildCatalogHierarchy(saleableCatalogProducts),
+    [saleableCatalogProducts]
+  );
+
+  // Keep selectedMainCategory / selectedSubcategory / selectedGroupFilter valid on filter changes
+  useEffect(() => {
+    if (catalogTree.length === 0) return;
+    const catNode = catalogTree.find((c) => c.name === selectedMainCategory);
+    if (!catNode) {
+      setSelectedMainCategory(catalogTree[0].name);
+      setSelectedSubcategory('Todas');
+      setSelectedGroupFilter('Todos');
+      return;
+    }
+    if (selectedSubcategory !== 'Todas') {
+      const subNode = catNode.subcategories.find((s) => s.name === selectedSubcategory);
+      if (!subNode) {
+        setSelectedSubcategory('Todas');
+        setSelectedGroupFilter('Todos');
+        return;
+      }
+      if (
+        selectedGroupFilter !== 'Todos' &&
+        !subNode.groups.some((g) => g.name === selectedGroupFilter)
+      ) {
+        setSelectedGroupFilter('Todos');
+      }
+    } else if (selectedGroupFilter !== 'Todos') {
+      setSelectedGroupFilter('Todos');
+    }
+  }, [catalogTree, selectedMainCategory, selectedSubcategory, selectedGroupFilter]);
+
+  // Filtered products for POS (global search OR Categoría -> Subcategoría -> Grupo)
+  const filteredProducts = useMemo(
+    () =>
+      filterCatalogProductsByHierarchy(saleableCatalogProducts, {
+        category: selectedMainCategory,
+        subcategory: selectedSubcategory,
+        group: selectedGroupFilter,
+        searchQuery,
+      }),
+    [saleableCatalogProducts, selectedMainCategory, selectedSubcategory, selectedGroupFilter, searchQuery]
+  );
 
   // Top-selling / quick-fire products for fast 1-tap Comandero ordering
   const quickFireProducts = useMemo(() => {
@@ -573,7 +844,12 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
     setCart((prev) => {
       const idx = prev.findIndex(
-        (i) => i.key === prod.key && (i.itemStatus || 'pending') === 'pending' && !i.note
+        (i) =>
+          i.key === prod.key &&
+          (i.itemStatus || 'pending') === 'pending' &&
+          !i.note &&
+          !(i.modifiers && i.modifiers.length > 0) &&
+          !(i.modificadores && i.modificadores.length > 0)
       );
       if (idx >= 0) {
         const copy = [...prev];
@@ -1632,14 +1908,91 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     notify(`Inventario actualizado: ${inventoryModal.descripcion} ahora tiene ${updatedItem.stock} ${updatedItem.unidad}.`);
   };
 
-  // Advanced POS Features Handlers (Split Bill, Transfer, Merge, Device Station)
+  // Advanced POS Features Handlers (Split Bill, Transfer, Merge, Device Station & Sync)
   const handleUpdateDeviceStation = (station: DeviceStation, stationName: string, autoLock: number) => {
     setState((prev) => ({
       ...prev,
       deviceConfig: { station, stationName, autoLockMinutes: autoLock },
     }));
-    setIsDeviceModalOpen(false);
+    if (station === 'cocina') {
+      setKitchenStation('cocina');
+      setPosStationFilter('cocina');
+      if (canViewKitchen) setView('kitchen');
+    } else if (station === 'barra') {
+      setKitchenStation('barra');
+      setPosStationFilter('barra');
+      if (canViewKitchen) setView('kitchen');
+    } else if (station === 'comandero' && canViewPos) {
+      setPosStationFilter('todas');
+      setView('pos');
+    } else if (station === 'caja' && canViewCash) {
+      setView('cash');
+    } else {
+      setPosStationFilter('todas');
+      setKitchenStation('todas');
+    }
+    if (firebaseUser && workspaceAuthorized) {
+      void upsertTerminalHeartbeat(
+        {
+          deviceId,
+          station,
+          stationName,
+          staffName: employeeAuthenticated ? state.activeUser.name : 'En espera de PIN',
+          staffRole: employeeAuthenticated ? state.activeUser.role : 'mesero',
+          platform: platformLabel,
+          online: isOnline,
+        },
+        firebaseUser,
+        authorizedEmails
+      );
+    }
     notify(`Estación configurada: ${stationName} (${station.toUpperCase()})`);
+  };
+
+  const handleForceSyncHeartbeat = async () => {
+    if (!firebaseUser || !workspaceAuthorized) return;
+    await upsertTerminalHeartbeat(
+      {
+        deviceId,
+        station: state.deviceConfig?.station || 'todos',
+        stationName: state.deviceConfig?.stationName || DEVICE_STATION_NAMES.todos,
+        staffName: employeeAuthenticated ? state.activeUser.name : 'En espera de PIN',
+        staffRole: employeeAuthenticated ? state.activeUser.role : 'mesero',
+        platform: platformLabel,
+        online: isOnline,
+      },
+      firebaseUser,
+      authorizedEmails
+    );
+    setLastSyncMs(Date.now());
+  };
+
+  const handleRemoveTerminal = async (targetDeviceId: string) => {
+    try {
+      await deleteTerminalSession(targetDeviceId);
+      notify('Terminal desconectada del registro.');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'No se pudo quitar la terminal.');
+    }
+  };
+
+  const handleGoogleSignOut = async () => {
+    if (firebaseUser && workspaceAuthorized) {
+      await upsertTerminalHeartbeat(
+        {
+          deviceId,
+          station: state.deviceConfig?.station || 'todos',
+          stationName: state.deviceConfig?.stationName || DEVICE_STATION_NAMES.todos,
+          staffName: state.activeUser.name,
+          staffRole: state.activeUser.role,
+          platform: platformLabel,
+          online: false,
+        },
+        firebaseUser,
+        authorizedEmails
+      ).catch(() => undefined);
+    }
+    await signOutFirebase();
   };
 
   // Permissions & PIN protected navigation: strictly requires role === 'admin'
@@ -1828,7 +2181,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           <div className="space-y-2.5 pt-2">
             <button
               type="button"
-              onClick={() => void signOutFirebase()}
+              onClick={() => void handleGoogleSignOut()}
               className="w-full min-h-[44px] py-2.5 rounded-2xl bg-[#c8a84b] hover:bg-[#e8d090] active:scale-[0.98] text-[#0a0a0b] font-bold text-xs transition-all duration-150"
             >
               Cambiar cuenta de Google
@@ -2001,7 +2354,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
             </span>
             <button
               type="button"
-              onClick={() => void signOutFirebase()}
+              onClick={() => void handleGoogleSignOut()}
               className="text-[#e05252] hover:underline font-bold shrink-0 inline-flex items-center gap-1"
             >
               <LogOut className="w-3 h-3" /> Salir
@@ -2014,16 +2367,16 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       <main className="pos-main">
         {/* Top Operational Bar */}
         <header className="pos-topbar">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
             <button
               type="button"
               onClick={() => setIsNavDrawerOpen(true)}
-              className="lg:hidden p-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-white transition-colors"
+              className="lg:hidden p-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-white transition-colors shrink-0"
               aria-label="Abrir menú de navegación"
             >
               <Menu className="w-5 h-5 text-[#c8a84b]" />
             </button>
-            <h2>
+            <h2 className="truncate">
               <span key={view}>
                 {view === 'dashboard'
                   ? 'Resumen Operativo'
@@ -2045,19 +2398,23 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
             <button
               type="button"
               onClick={() => setIsDeviceModalOpen(true)}
-              className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+              className={`inline-flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-full text-xs font-bold border transition-colors cursor-pointer whitespace-nowrap shrink-0 min-h-[34px] ${
                 isOnline
                   ? 'bg-[#122822] hover:bg-[#122822]/80 text-[#25d366] border-[#25d366]/30'
                   : 'bg-[#e5a43b]/15 hover:bg-[#e5a43b]/25 text-[#eed889] border-[#e5a43b]/40'
               }`}
               title="Gestionar Conexión de Dispositivos y Estaciones"
+              aria-label="Conectividad de dispositivos y sincronización"
             >
-              {isOnline ? <Cloud className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
-              <span>{isOnline ? 'SYNC CLOUD' : 'MODO OFFLINE'}</span>
+              {isOnline ? <Cloud className="w-3.5 h-3.5 shrink-0" /> : <WifiOff className="w-3.5 h-3.5 shrink-0" />}
+              <span className="hidden sm:inline">{isOnline ? 'SYNC CLOUD' : 'MODO OFFLINE'}</span>
+              <span className="px-1.5 py-0.5 rounded-full bg-black/35 text-[10px] font-mono tabular-nums">
+                {terminals.filter((t) => t.online).length || 1}
+              </span>
             </button>
           </div>
 
-          <div className="flex items-center gap-2 sm:gap-3">
+          <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
             <span className="hidden md:inline-block text-xs font-mono tabular-nums text-[#8b92a0]">
               {new Date(nowMs).toLocaleDateString('es-MX', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
             </span>
@@ -2557,78 +2914,45 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                 </div>
               </div>
 
-              {/* Main Split Layout: Fast Catalog (Left) + Sticky Comandero Cart (Right) */}
-              <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+              {/* Main Split Layout: Fast Catalog + CategorySidebar (Left) + Sticky Comandero Cart (Right) */}
+              <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
                 {/* Product catalog column */}
-                <div className="xl:col-span-7 2xl:col-span-8 space-y-4">
-                  {/* Search, Station Filter & Category Chips */}
-                  <div className="p-4 ios-glass-card space-y-3">
-                    <div className="flex flex-col sm:flex-row gap-2.5">
-                      <div className="relative flex-1">
-                        <input
-                          type="text"
-                          value={searchQuery}
-                          onChange={(e) => setSearchQuery(e.target.value)}
-                          placeholder="Buscar platillo, bebida o clave (ej. 701, 729)..."
-                          className="w-full min-h-[44px] pl-10 pr-10 py-2.5 rounded-2xl bg-[#0a0a0b]/70 border border-white/10 text-sm text-white placeholder-[rgba(240,230,211,0.45)] focus:outline-none focus:border-[#c8a84b]"
-                        />
-                        <Search className="w-4 h-4 absolute left-3.5 top-3.5 text-[rgba(240,230,211,0.55)]" />
-                        {searchQuery && (
-                          <button
-                            type="button"
-                            onClick={() => setSearchQuery('')}
-                            aria-label="Limpiar búsqueda"
-                            className="absolute right-2 top-1.5 w-8 h-8 rounded-xl flex items-center justify-center text-[rgba(240,230,211,0.55)] hover:text-white"
-                          >
-                            <X className="w-4 h-4" />
-                          </button>
-                        )}
-                      </div>
-
-                      {/* Cocina / Barra Filter */}
-                      <div className="flex items-center gap-1 p-1 rounded-2xl bg-[#0a0a0b]/70 border border-white/10 shrink-0">
-                        {(['todas', 'cocina', 'barra'] as const).map((st) => (
-                          <button
-                            key={st}
-                            type="button"
-                            onClick={() => setPosStationFilter(st)}
-                            className={`min-h-[36px] px-3 py-1 rounded-xl text-xs font-bold uppercase transition-colors ${
-                              posStationFilter === st
-                                ? 'bg-[#c8a84b] text-[#0a0a0b]'
-                                : 'text-[rgba(240,230,211,0.68)] hover:text-white'
-                            }`}
-                          >
-                            {st}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Category chips */}
-                    <div className="pos-chips">
-                      {categories.map((cat) => (
+                <div className="xl:col-span-8 space-y-4 min-w-0">
+                  {/* Search Bar */}
+                  <div className="p-3.5 ios-glass-card">
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="Buscar platillo, bebida o clave (ej. 701, 729)..."
+                        aria-label="Buscar producto en catálogo POS"
+                        className="w-full min-h-[44px] pl-10 pr-10 py-2.5 rounded-2xl bg-[#0a0a0b]/70 border border-white/10 text-sm text-white placeholder-[rgba(240,230,211,0.45)] focus:outline-none focus:border-[#c8a84b]"
+                      />
+                      <Search className="w-4 h-4 absolute left-3.5 top-3.5 text-[rgba(240,230,211,0.55)]" />
+                      {searchQuery && (
                         <button
-                          key={cat}
                           type="button"
-                          onClick={() => setSelectedCategory(cat)}
-                          className={`pos-chip ${selectedCategory === cat ? 'active' : ''}`}
+                          onClick={() => setSearchQuery('')}
+                          aria-label="Limpiar búsqueda"
+                          className="absolute right-2 top-1.5 w-8 h-8 rounded-xl flex items-center justify-center text-[rgba(240,230,211,0.55)] hover:text-white"
                         >
-                          {cat}
+                          <X className="w-4 h-4" />
                         </button>
-                      ))}
+                      )}
                     </div>
                   </div>
 
                   {/* Quick-Fire Favorites Strip ("Más Pedidos") */}
-                  {quickFireProducts.length > 0 && !searchQuery && selectedCategory === 'TODOS' && (
+                  {quickFireProducts.length > 0 && !searchQuery && (
                     <div className="p-4 ios-glass-card space-y-2.5">
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-center justify-between gap-2">
                         <span className="text-xs uppercase tracking-[0.06em] font-bold text-[#e8d090] inline-flex items-center gap-1.5">
-                          <Sparkles className="w-3.5 h-3.5" /> Más Pedidos (1 Toque)
+                          <Sparkles className="w-3.5 h-3.5 shrink-0" /> Más Pedidos (1 Toque)
                         </span>
                         <span className="text-xs text-[rgba(240,230,211,0.52)]">Acceso instantáneo</span>
                       </div>
-                      <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
+                      <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
                         {quickFireProducts.map((qp) => {
                           const qtyInCart = cartQtyMap.get(qp.key) || 0;
                           return (
@@ -2656,99 +2980,166 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                     </div>
                   )}
 
-                  {/* Product items grid with live cart qty & quick +/- */}
-                  <div className="p-4 ios-glass-card">
-                    <div className="flex items-center justify-between mb-3 text-xs text-[rgba(240,230,211,0.62)]">
-                      <span>Mostrando {filteredProducts.length} productos ({selectedCategory})</span>
-                      {canViewAdmin && (
-                        <button
-                          type="button"
-                          onClick={handleNavigateToAdmin}
-                          className="text-[#e8d090] hover:underline font-semibold inline-flex items-center gap-1"
-                        >
-                          <Settings className="w-3.5 h-3.5" /> Administrar Catálogo
-                        </button>
-                      )}
-                    </div>
-                    {filteredProducts.length === 0 ? (
-                      <div className="py-16 text-center text-[rgba(240,230,211,0.58)] text-sm">
-                        No se encontraron productos con el filtro "{searchQuery}".
-                      </div>
-                    ) : (
-                      <div className="pos-product-grid">
-                        {filteredProducts.map((p, idx) => {
-                          const qtyInCart = cartQtyMap.get(p.key) || 0;
-                          return (
-                            <motion.div
-                              key={p.key}
-                              role="button"
-                              tabIndex={p.saleEnabled ? 0 : -1}
-                              initial={{ opacity: 0, y: 10, scale: 0.97 }}
-                              animate={{ opacity: 1, y: 0, scale: 1 }}
-                              whileTap={p.saleEnabled ? { scale: 0.96 } : undefined}
-                              transition={{
-                                type: 'spring',
-                                stiffness: 450,
-                                damping: 32,
-                                delay: Math.min(idx * 0.012, 0.15),
+                  {/* Hierarchical CategorySidebar + Auto-Layout CSS Grid */}
+                  <div className="flex flex-col md:flex-row gap-4 items-start min-w-0">
+                    <CategorySidebar
+                      hierarchy={catalogTree}
+                      selectedCategory={selectedMainCategory}
+                      selectedSubcategory={selectedSubcategory}
+                      selectedGroup={selectedGroupFilter}
+                      onSelectCategory={(cat) => {
+                        setSelectedMainCategory(cat);
+                        setSelectedSubcategory('Todas');
+                        setSelectedGroupFilter('Todos');
+                      }}
+                      onSelectSubcategory={(sub) => {
+                        setSelectedSubcategory(sub);
+                        setSelectedGroupFilter('Todos');
+                      }}
+                      onSelectGroup={(grp) => setSelectedGroupFilter(grp)}
+                      stationFilter={posStationFilter}
+                      onChangeStationFilter={setPosStationFilter}
+                      totalCatalogCount={saleableCatalogProducts.length}
+                      searchActive={Boolean(searchQuery.trim())}
+                      onClearSearch={() => setSearchQuery('')}
+                    />
+
+                    <div className="flex-1 w-full min-w-0 p-3.5 sm:p-4 ios-glass-card">
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-3 text-xs text-[rgba(240,230,211,0.68)]">
+                        <span className="font-semibold truncate min-w-0">
+                          {searchQuery.trim()
+                            ? `Búsqueda: "${searchQuery.trim()}" (${filteredProducts.length})`
+                            : `${selectedMainCategory}${
+                                selectedSubcategory !== 'Todas' ? ` › ${selectedSubcategory}` : ''
+                              }${selectedGroupFilter !== 'Todos' ? ` › ${selectedGroupFilter}` : ''} (${filteredProducts.length})`}
+                        </span>
+                        <div className="flex items-center gap-3 shrink-0">
+                          {(selectedSubcategory !== 'Todas' || selectedGroupFilter !== 'Todos' || searchQuery.trim()) && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSearchQuery('');
+                                setSelectedSubcategory('Todas');
+                                setSelectedGroupFilter('Todos');
                               }}
-                              onClick={() => handleAddProduct(p)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter' || e.key === ' ') {
-                                  e.preventDefault();
-                                  handleAddProduct(p);
-                                }
-                              }}
-                              className={`pos-prod-card ${!p.saleEnabled ? 'opacity-40 cursor-not-allowed' : ''} ${
-                                qtyInCart > 0 ? '!border-[#c8a84b] ring-1 ring-[#c8a84b]/40' : ''
-                              }`}
+                              className="text-xs font-bold text-[#25d366] hover:underline"
                             >
-                              <div>
-                                <div className="flex items-center justify-between gap-1">
-                                  <span className="prod-key">{p.key} · {p.category}</span>
-                                  {qtyInCart > 0 && (
-                                    <span className="text-xs font-mono font-bold text-[#25d366] tabular-nums">
-                                      ×{qtyInCart}
+                              Ver toda {selectedMainCategory}
+                            </button>
+                          )}
+                          {canViewAdmin && (
+                            <button
+                              type="button"
+                              onClick={handleNavigateToAdmin}
+                              className="text-[#e8d090] hover:underline font-semibold inline-flex items-center gap-1"
+                            >
+                              <Settings className="w-3.5 h-3.5" /> Administrar
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {filteredProducts.length === 0 ? (
+                        <div className="py-16 text-center text-[rgba(240,230,211,0.58)] text-sm">
+                          {searchQuery.trim()
+                            ? `No se encontraron productos con "${searchQuery}".`
+                            : 'No hay productos en este grupo con el filtro de estación actual.'}
+                        </div>
+                      ) : (
+                        <div className="pos-product-grid">
+                          {filteredProducts.map((p, idx) => {
+                            const qtyInCart = cartQtyMap.get(p.key) || 0;
+                            return (
+                              <motion.div
+                                key={p.key}
+                                role="button"
+                                tabIndex={p.saleEnabled ? 0 : -1}
+                                aria-label={`Agregar ${p.name}`}
+                                initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                whileTap={p.saleEnabled ? { scale: 0.96 } : undefined}
+                                transition={{
+                                  type: 'spring',
+                                  stiffness: 450,
+                                  damping: 32,
+                                  delay: Math.min(idx * 0.01, 0.12),
+                                }}
+                                onClick={() => handleAddProduct(p)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault();
+                                    handleAddProduct(p);
+                                  }
+                                }}
+                                className={`pos-prod-card ${!p.saleEnabled ? 'opacity-40 cursor-not-allowed' : ''} ${
+                                  qtyInCart > 0 ? '!border-[#c8a84b] ring-1 ring-[#c8a84b]/40' : ''
+                                }`}
+                              >
+                                <div className="min-w-0">
+                                  <div className="flex items-center justify-between gap-1.5 min-w-0">
+                                    <span className="prod-key flex-1 min-w-0">
+                                      {p.key} · {p.category}
                                     </span>
-                                  )}
-                                </div>
-                                <div className="prod-name">{p.name}</div>
-                              </div>
-                              <div className="flex items-center justify-between mt-2 pt-2 border-t border-white/10">
-                                <span className="prod-price">
-                                  {p.saleEnabled ? formatMoney(p.priceCents) : 'Sin precio'}
-                                </span>
-                                <div className="flex items-center gap-1">
                                     {qtyInCart > 0 && (
-                                      <button
-                                        type="button"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          handleDecrementProductByKey(p.key);
-                                        }}
-                                        aria-label={`Quitar uno de ${p.name}`}
-                                        className="w-7 h-7 rounded-lg bg-[#e05252]/20 hover:bg-[#e05252] text-[#e05252] hover:text-white font-bold flex items-center justify-center transition-colors"
-                                      >
-                                      <Minus className="w-3.5 h-3.5" />
+                                      <span className="text-xs font-mono font-bold text-[#25d366] tabular-nums shrink-0">
+                                        ×{qtyInCart}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="prod-name">{p.name}</div>
+                                </div>
+                                <div className="mt-auto pt-2 border-t border-white/10 space-y-1.5">
+                                  <div className="flex items-center justify-between gap-1.5 min-w-0">
+                                    <span className="prod-price truncate">
+                                      {p.saleEnabled ? formatMoney(p.priceCents) : 'Sin precio'}
+                                    </span>
+                                    <div className="flex items-center gap-1 shrink-0">
+                                      {qtyInCart > 0 && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleDecrementProductByKey(p.key);
+                                          }}
+                                          aria-label={`Quitar uno de ${p.name}`}
+                                          className="w-7 h-7 rounded-lg bg-[#e05252]/20 hover:bg-[#e05252] text-[#e05252] hover:text-white font-bold flex items-center justify-center transition-colors"
+                                        >
+                                          <Minus className="w-3.5 h-3.5" />
+                                        </button>
+                                      )}
+                                      <span className="w-7 h-7 rounded-lg bg-[#173c34] text-[#25d366] font-bold flex items-center justify-center text-xs">
+                                        +
+                                      </span>
+                                    </div>
+                                  </div>
+                                  {p.saleEnabled && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleOpenNewProductModifiers(p);
+                                      }}
+                                      aria-label={`Modificar ${p.name}`}
+                                      title="Agregar con modificadores"
+                                      className="w-full min-h-[30px] px-2 rounded-xl bg-[#c8a84b]/15 hover:bg-[#c8a84b] text-[#e8d090] hover:text-[#0a0a0b] border border-[#c8a84b]/35 text-[11px] font-bold flex items-center justify-center gap-1 transition-colors"
+                                    >
+                                      <Tag className="w-3 h-3 shrink-0" /> Modificar
                                     </button>
                                   )}
-                                  <span className="w-7 h-7 rounded-lg bg-[#173c34] text-[#25d366] font-bold flex items-center justify-center text-xs">
-                                    +
-                                  </span>
                                 </div>
-                              </div>
-                            </motion.div>
-                          );
-                        })}
-                      </div>
-                    )}
+                              </motion.div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
 
                 {/* Order builder / Sticky Cart sidebar */}
                 <div
                   id="pos-comanda-panel"
-                  className="xl:col-span-5 2xl:col-span-4 xl:sticky xl:top-20 p-5 ios-glass-card space-y-4"
+                  className="xl:col-span-4 xl:sticky xl:top-20 p-5 ios-glass-card space-y-4 min-w-0"
                 >
                   <div className="flex items-center justify-between pb-3 border-b border-white/10">
                     <div>
@@ -2896,7 +3287,10 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                 <div className="min-w-0">
                                   <div className="text-xs font-bold text-white leading-snug">{item.name}</div>
                                   <div className="text-xs text-[rgba(240,230,211,0.58)] tabular-nums mt-0.5">
-                                    {formatMoney(item.priceCents)} c/u · {(item.station || 'cocina').toUpperCase()}
+                                    {modifiersTotalCents(item) > 0
+                                      ? `${formatMoney(item.priceCents)} + ${formatMoney(modifiersTotalCents(item))} extras = ${formatMoney(unitTotalCents(item))} c/u`
+                                      : `${formatMoney(item.priceCents)} c/u`}{' '}
+                                    · {(item.station || 'cocina').toUpperCase()}
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-1.5 shrink-0">
@@ -2920,6 +3314,16 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                 </div>
                               </div>
 
+                              {(item.modifiers || item.modificadores || []).length > 0 && (
+                                <div className="flex flex-wrap gap-1 mt-1">
+                                  {(item.modifiers || item.modificadores || []).map((mod, mi) => (
+                                    <span key={mi} className="px-2 py-0.5 rounded-lg bg-[#c8a84b]/15 text-[#e8d090] text-[10px] font-semibold border border-[#c8a84b]/30">
+                                      {mod.name} {mod.priceCents > 0 ? `(+${formatMoney(mod.priceCents)})` : ''}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+
                               {item.note && (
                                 <div className="text-xs text-[#e8d090] bg-white/[0.04] px-2.5 py-1 rounded-xl">
                                   Nota: {item.note}
@@ -2928,6 +3332,13 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
                               <div className="flex items-center justify-between pt-1 border-t border-white/10 text-xs">
                                 <div className="flex gap-3">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenCartItemModifiers(item, idx)}
+                                    className="text-[#c8a84b] hover:underline font-semibold"
+                                  >
+                                    ⚙️ Modificar
+                                  </button>
                                   <button
                                     type="button"
                                     onClick={() => handleEditItemNote(targetId)}
@@ -3404,6 +3815,15 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                         <div className="min-w-0">
                                           <div className="font-bold text-white truncate">{i.qty} × {i.name}</div>
                                           <div className="text-xs text-[#8b92a0] uppercase">{i.station || 'cocina'} · {st}</div>
+                                          {(i.modifiers || i.modificadores || []).length > 0 && (
+                                            <div className="flex flex-wrap gap-1 mt-1">
+                                              {(i.modifiers || i.modificadores || []).map((mod, mi) => (
+                                                <span key={mi} className="px-1.5 py-0.5 rounded bg-[#c8a84b]/15 text-[#eed889] text-[10px] font-semibold">
+                                                  {mod.name}{mod.priceCents > 0 ? ` (+${formatMoney(mod.priceCents)})` : ''}
+                                                </span>
+                                              ))}
+                                            </div>
+                                          )}
                                           {i.note && <span className="text-xs text-[#eed889] block">Nota: {i.note}</span>}
                                         </div>
                                         {nxt && (
@@ -3500,6 +3920,15 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                         <div className="min-w-0">
                                           <div className="font-bold text-white truncate">{i.qty} × {i.name}</div>
                                           <div className="text-xs text-[#8b92a0] uppercase">{i.station || 'cocina'} · {st}</div>
+                                          {(i.modifiers || i.modificadores || []).length > 0 && (
+                                            <div className="flex flex-wrap gap-1 mt-1">
+                                              {(i.modifiers || i.modificadores || []).map((mod, mi) => (
+                                                <span key={mi} className="px-1.5 py-0.5 rounded bg-[#c8a84b]/15 text-[#eed889] text-[10px] font-semibold">
+                                                  {mod.name}{mod.priceCents > 0 ? ` (+${formatMoney(mod.priceCents)})` : ''}
+                                                </span>
+                                              ))}
+                                            </div>
+                                          )}
                                           {i.note && <span className="text-xs text-[#eed889] block">Nota: {i.note}</span>}
                                         </div>
                                         {nxt && (
@@ -3694,14 +4123,21 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                             <div className="text-[#8b92a0]">Mesero responsable: {ord.waiter}</div>
                             <div className="pt-2 border-t border-[#2b303c] space-y-1">
                               {ord.items.map((i, idx) => (
-                                <div key={idx} className="flex justify-between text-[#8b92a0]">
-                                  <span>
-                                    {i.qty} × {i.name}{' '}
-                                    <span className="text-xs uppercase text-[#d4af37]">
-                                      [{i.itemStatus || 'pending'}]
+                                <div key={idx} className="flex justify-between gap-2 text-[#8b92a0]">
+                                  <div className="min-w-0">
+                                    <span>
+                                      {i.qty} × {i.name}{' '}
+                                      <span className="text-xs uppercase text-[#d4af37]">
+                                        [{i.itemStatus || 'pending'}]
+                                      </span>
                                     </span>
-                                  </span>
-                                  <span className="tabular-nums">{formatMoney(lineTotalCents(i))}</span>
+                                    {(i.modifiers || i.modificadores || []).length > 0 && (
+                                      <div className="text-[11px] text-[#eed889]/85 truncate">
+                                        Extras: {(i.modifiers || i.modificadores || []).map((m) => `${m.name}${m.priceCents > 0 ? ` (+${formatMoney(m.priceCents)})` : ''}`).join(', ')}
+                                      </div>
+                                    )}
+                                  </div>
+                                  <span className="tabular-nums shrink-0">{formatMoney(lineTotalCents(i))}</span>
                                 </div>
                               ))}
                             </div>
@@ -4816,7 +5252,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               : undefined
           }
           onSwitchToMenu={!employeeAuthenticated ? onSwitchToMenu : undefined}
-          onSignOutGoogle={!employeeAuthenticated ? () => void signOutFirebase() : undefined}
+          onSignOutGoogle={!employeeAuthenticated ? () => void handleGoogleSignOut() : undefined}
           onAuthenticated={(verifiedUser) => {
             const rolePerms =
               state.permissions?.[verifiedUser.role] ||
@@ -5127,9 +5563,321 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         onClose={() => setIsDeviceModalOpen(false)}
         isOnline={isOnline}
         openOrdersCount={openOrders.length}
+        deviceId={deviceId}
         deviceConfig={state.deviceConfig}
+        terminals={terminals}
+        lastSyncMs={lastSyncMs}
+        isAdmin={isFirebaseAdmin || isAdminRole}
         onUpdateDeviceStation={handleUpdateDeviceStation}
+        onForceSyncHeartbeat={handleForceSyncHeartbeat}
+        onRemoveTerminal={handleRemoveTerminal}
       />
+
+      {/* Product Modifiers Modal (Add with modifiers via useModifiers) */}
+      {modifierModalProduct && (
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
+          <div className="ios-glass-modal w-full max-w-md rounded-[28px] p-6 space-y-4 text-left max-h-[90dvh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-white/10">
+              <div>
+                <h3 className="font-serif font-bold text-xl text-white tracking-[-0.02em]">
+                  Modificar: {modifierModalProduct.name}
+                </h3>
+                <p className="text-xs text-[rgba(240,230,211,0.68)] mt-0.5 tabular-nums">
+                  Base: {formatMoney(modifierModalProduct.priceCents)} · Extras: +{formatMoney(calculateModifierTotal(selectedModifiers))} ·{' '}
+                  <strong className="text-[#e8d090]">
+                    Total: {formatMoney(modifierModalProduct.priceCents + calculateModifierTotal(selectedModifiers))}
+                  </strong>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setModifierModalProduct(null)}
+                aria-label="Cerrar modal de modificadores"
+                className="w-10 h-10 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-[rgba(240,230,211,0.72)] hover:text-white transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <label className="block text-xs font-bold text-[#c8a84b] uppercase tracking-wider">
+                Modificadores e Ingredientes
+              </label>
+              <div className="grid grid-cols-1 gap-2 max-h-56 overflow-y-auto pr-1">
+                {modifiers.map((mod) => {
+                  const isSelected = !!selectedModifiers[mod.id];
+                  return (
+                    <button
+                      key={mod.id}
+                      type="button"
+                      onClick={() => setSelectedModifiers((prev) => ({ ...prev, [mod.id]: !prev[mod.id] }))}
+                      className={`w-full min-h-[42px] px-3.5 py-2 rounded-2xl border text-xs font-semibold flex items-center justify-between transition-all ${
+                        isSelected
+                          ? 'bg-[#c8a84b]/20 border-[#c8a84b] text-white font-bold'
+                          : 'bg-white/[0.04] border-white/10 text-[rgba(240,230,211,0.78)] hover:bg-white/[0.08]'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        <span className={`w-4 h-4 rounded-md border flex items-center justify-center text-[10px] ${isSelected ? 'bg-[#c8a84b] border-[#c8a84b] text-[#0a0a0b] font-bold' : 'border-white/30'}`}>
+                          {isSelected ? '✓' : ''}
+                        </span>
+                        {mod.name}
+                      </span>
+                      <span className="font-mono text-[#e8d090] tabular-nums">
+                        {mod.priceCents > 0 ? `+ ${formatMoney(mod.priceCents)}` : 'Incluido'}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Define custom modifier inline */}
+              <div className="p-3 rounded-2xl bg-[#0a0a0b]/55 border border-white/10 space-y-2">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-[rgba(240,230,211,0.7)]">
+                  Definir extra personalizado
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={customModName}
+                    onChange={(e) => {
+                      setCustomModName(e.target.value);
+                      setCustomModError('');
+                    }}
+                    placeholder="Ej. Extra aderezo"
+                    aria-label="Nombre del extra personalizado"
+                    className="flex-1 min-w-0 min-h-[38px] px-3 py-1.5 rounded-xl bg-[#161618] border border-white/10 text-xs text-white focus:outline-none focus:border-[#c8a84b]"
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={customModPrice}
+                    onChange={(e) => setCustomModPrice(e.target.value)}
+                    placeholder="$0"
+                    aria-label="Costo extra en pesos"
+                    className="w-20 min-h-[38px] px-2.5 py-1.5 rounded-xl bg-[#161618] border border-white/10 text-xs text-white font-mono text-right focus:outline-none focus:border-[#c8a84b]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const res = addCustomModifier(customModName, Number(customModPrice) || 0);
+                      if (res.error) {
+                        setCustomModError(res.error);
+                        return;
+                      }
+                      setSelectedModifiers((prev) => ({ ...prev, [res.id]: true }));
+                      setCustomModName('');
+                      setCustomModPrice('0');
+                      setCustomModError('');
+                    }}
+                    className="min-h-[38px] px-3 rounded-xl bg-[#173c34] hover:bg-[#28584c] text-[#25d366] font-bold text-xs shrink-0"
+                  >
+                    + Crear
+                  </button>
+                </div>
+                {customModError && (
+                  <p className="text-[11px] text-[#e05252] font-semibold">{customModError}</p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setModifierModalProduct(null);
+                  setSelectedModifiers({});
+                }}
+                className="flex-1 min-h-[44px] rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] text-white font-bold text-xs"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const modsArray = getModifiersArray(selectedModifiers);
+                  const station = modifierModalProduct.station || classifyProductStation(modifierModalProduct.category);
+
+                  setCart((prev) => [
+                    ...prev,
+                    {
+                      lineId: uid(),
+                      key: modifierModalProduct.key,
+                      name: modifierModalProduct.name,
+                      priceCents: modifierModalProduct.priceCents,
+                      qty: 1,
+                      note: '',
+                      station,
+                      itemStatus: 'pending',
+                      modifiers: modsArray,
+                    },
+                  ]);
+                  notify(`+1 ${modifierModalProduct.name} (${modsArray.length} modificadores)`);
+                  setModifierModalProduct(null);
+                  setSelectedModifiers({});
+                }}
+                className="flex-1 min-h-[44px] rounded-2xl bg-[#c8a84b] hover:bg-[#e8d090] text-[#0a0a0b] font-bold text-xs uppercase tracking-wider"
+              >
+                Añadir con Modificadores
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cart Item Modifiers Modal */}
+      {editingCartItemIndex !== null && cart[editingCartItemIndex] && (
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
+          <div className="ios-glass-modal w-full max-w-md rounded-[28px] p-6 space-y-4 text-left max-h-[90dvh] overflow-y-auto">
+            {(() => {
+              const currentItem = cart[editingCartItemIndex];
+              const baseProd = state.products.find((p) => p.key === currentItem.key);
+              const basePrice = baseProd ? baseProd.priceCents : currentItem.priceCents;
+              const extraCents = calculateModifierTotal(editingItemModifiers);
+              return (
+                <>
+                  <div className="flex items-start justify-between gap-3 pb-3 border-b border-white/10">
+                    <div>
+                      <h3 className="font-serif font-bold text-xl text-white tracking-[-0.02em]">
+                        Modificar ítem: {currentItem.name}
+                      </h3>
+                      <p className="text-xs text-[rgba(240,230,211,0.68)] mt-0.5 tabular-nums">
+                        Base: {formatMoney(basePrice)} · Extras: +{formatMoney(extraCents)} ·{' '}
+                        <strong className="text-[#e8d090]">Total unitario: {formatMoney(basePrice + extraCents)}</strong>
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setEditingCartItemIndex(null)}
+                      aria-label="Cerrar modal de modificadores de ítem"
+                      className="w-10 h-10 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-[rgba(240,230,211,0.72)] hover:text-white transition-colors"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <div className="space-y-3">
+                    <label className="block text-xs font-bold text-[#c8a84b] uppercase tracking-wider">
+                      Modificadores e Ingredientes
+                    </label>
+                    <div className="grid grid-cols-1 gap-2 max-h-56 overflow-y-auto pr-1">
+                      {modifiers.map((mod) => {
+                        const isSelected = !!editingItemModifiers[mod.id];
+                        return (
+                          <button
+                            key={mod.id}
+                            type="button"
+                            onClick={() => setEditingItemModifiers((prev) => ({ ...prev, [mod.id]: !prev[mod.id] }))}
+                            className={`w-full min-h-[42px] px-3.5 py-2 rounded-2xl border text-xs font-semibold flex items-center justify-between transition-all ${
+                              isSelected
+                                ? 'bg-[#c8a84b]/20 border-[#c8a84b] text-white font-bold'
+                                : 'bg-white/[0.04] border-white/10 text-[rgba(240,230,211,0.78)] hover:bg-white/[0.08]'
+                            }`}
+                          >
+                            <span className="flex items-center gap-2">
+                              <span className={`w-4 h-4 rounded-md border flex items-center justify-center text-[10px] ${isSelected ? 'bg-[#c8a84b] border-[#c8a84b] text-[#0a0a0b] font-bold' : 'border-white/30'}`}>
+                                {isSelected ? '✓' : ''}
+                              </span>
+                              {mod.name}
+                            </span>
+                            <span className="font-mono text-[#e8d090] tabular-nums">
+                              {mod.priceCents > 0 ? `+ ${formatMoney(mod.priceCents)}` : 'Incluido'}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Define custom modifier inline */}
+                    <div className="p-3 rounded-2xl bg-[#0a0a0b]/55 border border-white/10 space-y-2">
+                      <div className="text-[11px] font-bold uppercase tracking-wider text-[rgba(240,230,211,0.7)]">
+                        Definir extra personalizado
+                      </div>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={customModName}
+                          onChange={(e) => {
+                            setCustomModName(e.target.value);
+                            setCustomModError('');
+                          }}
+                          placeholder="Ej. Extra aderezo"
+                          aria-label="Nombre del extra personalizado"
+                          className="flex-1 min-w-0 min-h-[38px] px-3 py-1.5 rounded-xl bg-[#161618] border border-white/10 text-xs text-white focus:outline-none focus:border-[#c8a84b]"
+                        />
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={customModPrice}
+                          onChange={(e) => setCustomModPrice(e.target.value)}
+                          placeholder="$0"
+                          aria-label="Costo extra en pesos"
+                          className="w-20 min-h-[38px] px-2.5 py-1.5 rounded-xl bg-[#161618] border border-white/10 text-xs text-white font-mono text-right focus:outline-none focus:border-[#c8a84b]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const res = addCustomModifier(customModName, Number(customModPrice) || 0);
+                            if (res.error) {
+                              setCustomModError(res.error);
+                              return;
+                            }
+                            setEditingItemModifiers((prev) => ({ ...prev, [res.id]: true }));
+                            setCustomModName('');
+                            setCustomModPrice('0');
+                            setCustomModError('');
+                          }}
+                          className="min-h-[38px] px-3 rounded-xl bg-[#173c34] hover:bg-[#28584c] text-[#25d366] font-bold text-xs shrink-0"
+                        >
+                          + Crear
+                        </button>
+                      </div>
+                      {customModError && (
+                        <p className="text-[11px] text-[#e05252] font-semibold">{customModError}</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex gap-3 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setEditingCartItemIndex(null)}
+                      className="flex-1 min-h-[44px] rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] text-white font-bold text-xs"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const modsArray = getModifiersArray(editingItemModifiers);
+                        setCart((prev) => {
+                          const copy = [...prev];
+                          const updatedItem: OrderItem = {
+                            ...currentItem,
+                            priceCents: basePrice,
+                            modifiers: modsArray,
+                          };
+                          delete updatedItem.modificadores;
+                          copy[editingCartItemIndex] = updatedItem;
+                          return copy;
+                        });
+
+                        notify(`Modificadores actualizados para ${currentItem.name}`);
+                        setEditingCartItemIndex(null);
+                      }}
+                      className="flex-1 min-h-[44px] rounded-2xl bg-[#c8a84b] hover:bg-[#e8d090] text-[#0a0a0b] font-bold text-xs uppercase tracking-wider"
+                    >
+                      Guardar Modificadores
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
 
       {/* Floating Toast */}
       {toastMessage && (

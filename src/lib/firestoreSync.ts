@@ -8,6 +8,7 @@ import {
   increment,
   limit,
   onSnapshot,
+  onSnapshotsInSync,
   orderBy,
   query,
   runTransaction,
@@ -30,6 +31,7 @@ import {
 import type {
   AuditLogEntry,
   CashShift,
+  DeviceStation,
   InventoryItem,
   InventoryMovement,
   Order,
@@ -39,6 +41,7 @@ import type {
   RolePermissions,
   Sale,
   SoftProduct,
+  TerminalSession,
   TimeClockRecord,
   UserRole,
 } from '../types';
@@ -101,6 +104,13 @@ export function sanitizeOrderItemsForFirestore(items: OrderItem[]) {
       clean.lineId = sanitizeFirestoreId(it.lineId, 'ln').slice(0, 64);
     }
     if (it.note && it.note.trim()) clean.note = boundStr(it.note, 200);
+    const mods = it.modifiers || it.modificadores;
+    if (mods && Array.isArray(mods) && mods.length > 0) {
+      clean.modifiers = mods.slice(0, 15).map((m) => ({
+        name: boundStr(m.name, 60, 'Modifier'),
+        priceCents: Math.max(0, Math.round(Number(m.priceCents) || 0)),
+      }));
+    }
     clean.station = it.station === 'barra' ? 'barra' : 'cocina';
     clean.itemStatus =
       it.itemStatus && ['pending', 'preparing', 'ready', 'served'].includes(it.itemStatus)
@@ -504,6 +514,11 @@ export function subscribePosWorkspace(
                   ...it,
                   lineId: it.lineId || `${it.key}-${idx}`,
                   note: it.note || '',
+                  modifiers: Array.isArray(it.modifiers)
+                    ? it.modifiers
+                    : Array.isArray(it.modificadores)
+                    ? it.modificadores
+                    : undefined,
                   station: it.station || 'cocina',
                   itemStatus: it.itemStatus || 'pending',
                 }))
@@ -542,6 +557,11 @@ export function subscribePosWorkspace(
               ? x.items.map((it: OrderItem, idx: number) => ({
                   ...it,
                   lineId: it.lineId || `${it.key}-${idx}`,
+                  modifiers: Array.isArray(it.modifiers)
+                    ? it.modifiers
+                    : Array.isArray(it.modificadores)
+                    ? it.modificadores
+                    : undefined,
                 }))
               : [],
             subtotalCents: Number(x.subtotalCents) || 0,
@@ -1224,18 +1244,24 @@ export async function fsCloseShift(
   auditEntry: AuditLogEntry
 ): Promise<void> {
   const shiftId = sanitizeFirestoreId(shift.id, 'TURNO');
+  const shiftRef = doc(db, 'shifts', shiftId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+  const audRef = doc(db, 'audit_logs', audId);
   try {
-    const batch = writeBatch(db);
-    batch.update(doc(db, 'shifts', shiftId), {
-      isOpen: false,
-      closedAt: serverTimestamp(),
-      actualCashCents: Math.round(shift.actualCashCents || 0),
-      differenceCents: Math.round(shift.differenceCents || 0),
-      closedByUser: boundStr(shift.closedByUser, 80, 'Caja'),
+    await runTransaction(db, async (tx) => {
+      const shiftSnap = await tx.get(shiftRef);
+      if (!shiftSnap.exists()) {
+        throw new Error('SHIFT_NOT_FOUND:El turno no existe en Firestore.');
+      }
+      tx.update(shiftRef, {
+        isOpen: false,
+        closedAt: serverTimestamp(),
+        actualCashCents: Math.round(shift.actualCashCents || 0),
+        differenceCents: Math.round(shift.differenceCents || 0),
+        closedByUser: boundStr(shift.closedByUser, 80, 'Caja'),
+      });
+      tx.set(audRef, buildAuditPayload(auditEntry, user.uid, authorizedEmails));
     });
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `shifts/${shiftId}`);
   }
@@ -1248,26 +1274,28 @@ export async function fsOpenNewShift(
   auditEntry: AuditLogEntry
 ): Promise<void> {
   const shiftId = sanitizeFirestoreId(shift.id, 'TURNO');
+  const shiftRef = doc(db, 'shifts', shiftId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+  const audRef = doc(db, 'audit_logs', audId);
   try {
-    const batch = writeBatch(db);
-    batch.set(doc(db, 'shifts', shiftId), {
-      id: shiftId,
-      initialCashCents: Math.max(0, Math.round(shift.initialCashCents)),
-      isOpen: true,
-      openedAt: serverTimestamp(),
-      cashSalesCents: 0,
-      cardSalesCents: 0,
-      transferSalesCents: 0,
-      totalSalesCents: 0,
-      expectedCashCents: Math.max(0, Math.round(shift.initialCashCents)),
-      retirosCents: 0,
-      depositosCents: 0,
-      ownerUid: sanitizeFirestoreId(user.uid, 'usr'),
-      authorizedEmails: ensureEmailList(authorizedEmails),
+    await runTransaction(db, async (tx) => {
+      tx.set(shiftRef, {
+        id: shiftId,
+        initialCashCents: Math.max(0, Math.round(shift.initialCashCents)),
+        isOpen: true,
+        openedAt: serverTimestamp(),
+        cashSalesCents: 0,
+        cardSalesCents: 0,
+        transferSalesCents: 0,
+        totalSalesCents: 0,
+        expectedCashCents: Math.max(0, Math.round(shift.initialCashCents)),
+        retirosCents: 0,
+        depositosCents: 0,
+        ownerUid: sanitizeFirestoreId(user.uid, 'usr'),
+        authorizedEmails: ensureEmailList(authorizedEmails),
+      });
+      tx.set(audRef, buildAuditPayload(auditEntry, user.uid, authorizedEmails));
     });
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `shifts/${shiftId}`);
   }
@@ -1874,4 +1902,101 @@ export async function fsVerifyAnyAdminPinFromFirestore(
     handleFirestoreError(error, OperationType.LIST, 'staff_users?role=admin');
     return { ok: false, error: 'No se pudo validar el PIN de administrador.' };
   }
+}
+
+export async function upsertTerminalHeartbeat(
+  params: {
+    deviceId: string;
+    station: DeviceStation;
+    stationName: string;
+    staffName: string;
+    staffRole: UserRole;
+    platform: string;
+    online: boolean;
+  },
+  user: User,
+  authorizedEmails: string[]
+): Promise<void> {
+  const cleanId = sanitizeFirestoreId(params.deviceId, 'term').slice(0, 64);
+  const terminalRef = doc(db, 'pos_terminals', cleanId);
+  try {
+    const existingSnap = await getDoc(terminalRef);
+    const ownerUid = existingSnap.exists()
+      ? String(existingSnap.data().ownerUid || user.uid)
+      : sanitizeFirestoreId(user.uid, 'usr');
+
+    await setDoc(terminalRef, {
+      deviceId: cleanId,
+      station: params.station,
+      stationName: boundStr(params.stationName, 80, 'Terminal POS'),
+      staffName: boundStr(params.staffName, 80, 'En espera de PIN'),
+      staffRole: ['admin', 'caja', 'mesero', 'cocina'].includes(params.staffRole)
+        ? params.staffRole
+        : 'mesero',
+      operatorEmail: boundStr((user.email || '').toLowerCase(), 180, ''),
+      online: Boolean(params.online),
+      platform: boundStr(params.platform, 60, 'Web Terminal'),
+      ownerUid,
+      authorizedEmails: ensureEmailList(authorizedEmails, user.email),
+      lastSeenAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // Heartbeats should degrade gracefully offline without crashing UI
+  }
+}
+
+export function subscribeTerminalSessions(
+  user: User,
+  _isAdmin: boolean,
+  onTerminals: (terminals: TerminalSession[]) => void
+): () => void {
+  const email = (user.email || '').toLowerCase();
+  const isBootstrapAdmin = Boolean(user.emailVerified && email === BOOTSTRAPPED_ADMIN_EMAIL);
+  const colRef = collection(db, 'pos_terminals');
+  const q = isBootstrapAdmin
+    ? query(colRef, orderBy('lastSeenAt', 'desc'), limit(30))
+    : query(colRef, where('authorizedEmails', 'array-contains', email), limit(30));
+
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list: TerminalSession[] = snap.docs
+        .map((d) => {
+          const x = d.data();
+          return {
+            deviceId: String(x.deviceId || d.id),
+            station: (x.station as DeviceStation) || 'todos',
+            stationName: String(x.stationName || 'Terminal POS'),
+            staffName: String(x.staffName || 'Operador'),
+            staffRole: (x.staffRole as UserRole) || 'mesero',
+            operatorEmail: String(x.operatorEmail || ''),
+            online: Boolean(x.online),
+            platform: String(x.platform || 'Web'),
+            lastSeenAt: tsToIso(x.lastSeenAt),
+            updatedAt: tsToIso(x.updatedAt),
+          };
+        })
+        .sort((a, b) => Date.parse(b.lastSeenAt || '') - Date.parse(a.lastSeenAt || ''));
+      onTerminals(list);
+    },
+    () => {
+      // Non-fatal fallback if index or rules still warming
+    }
+  );
+}
+
+export async function deleteTerminalSession(deviceId: string): Promise<void> {
+  const cleanId = sanitizeFirestoreId(deviceId, 'term').slice(0, 64);
+  try {
+    await deleteDoc(doc(db, 'pos_terminals', cleanId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `pos_terminals/${cleanId}`);
+  }
+}
+
+export function subscribeFirestoreSyncPulse(onSynced: (syncedAtMs: number) => void): () => void {
+  return onSnapshotsInSync(db, () => {
+    onSynced(Date.now());
+  });
 }

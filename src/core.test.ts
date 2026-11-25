@@ -95,3 +95,96 @@ test('createOrUpdateOrder and closeAndPayOrder update totals, shift, and receipt
   assert.match(receipt, /245\.00/);
   assert.match(preCheck, /PRE-CUENTA/);
 });
+
+import { lineTotalCents, modifiersTotalCents, unitTotalCents } from './core';
+import {
+  buildCatalogHierarchy,
+  filterCatalogProductsByHierarchy,
+  getMainCatalogCategory,
+  getProductSubgroup,
+} from './utils/catalogHierarchy';
+
+test('modifiers array prices sum accurately into item unit and line totals', () => {
+  const item = {
+    key: '801',
+    name: 'HAMBURGUESA RES',
+    priceCents: 9500,
+    qty: 2,
+    note: 'Extra queso, Sin cebolla',
+    modifiers: [
+      { name: 'Sin cebolla', priceCents: 0 },
+      { name: 'Extra queso', priceCents: 1500 },
+      { name: 'Tocino extra', priceCents: 2000 },
+    ],
+  };
+
+  assert.equal(modifiersTotalCents(item), 3500);
+  assert.equal(unitTotalCents(item), 13000);
+  assert.equal(lineTotalCents(item), 26000);
+  assert.equal(subtotalCents([item]), 26000);
+  assert.equal(totalCents([item], 1000), 25000);
+
+  const preCheck = printPreCheckText({
+    id: 'ord-mod',
+    number: 99,
+    service: 'mesa',
+    location: '1',
+    table: '1',
+    waiter: 'Luis',
+    note: '',
+    items: [item],
+    totalCents: 26000,
+    discountCents: 0,
+    priority: 'normal',
+    status: 'sent',
+    paid: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+  assert.match(preCheck, /Extra queso/);
+  assert.match(preCheck, /260\.00/);
+});
+
+test('catalog hierarchy builds 3-level category tree and filters products cleanly', () => {
+  assert.equal(getMainCatalogCategory('ALAS'), 'Alimentos');
+  assert.equal(getMainCatalogCategory('BEBIDAS S/ALCOHOL'), 'Bebidas');
+  assert.equal(getMainCatalogCategory('CERVEZA'), 'Alcohol & Barra');
+  assert.equal(getMainCatalogCategory('EXTRAS'), 'Extras');
+
+  assert.equal(getProductSubgroup({ category: 'CAMARONES', name: 'AGUACHILE VERDE' }), 'Aguachiles');
+  assert.equal(getProductSubgroup({ category: 'DESTILADOS', name: 'SHOT HERRADURA' }), 'Shots y Preparados');
+  assert.equal(getProductSubgroup({ category: 'BOTANAS', name: 'PAPA DORADA' }), 'Papas y Elotes');
+
+  const sampleProducts = [
+    { key: '701', name: 'ALAS BBQ', group: '01', category: 'ALAS', sourcePrice: 105, priceCents: 10500, saleEnabled: true },
+    { key: '710', name: 'AGUACHILE VERDE', group: '01', category: 'CAMARONES', sourcePrice: 190, priceCents: 19000, saleEnabled: true },
+    { key: '711', name: 'CAMARONES CAJUN', group: '01', category: 'CAMARONES', sourcePrice: 210, priceCents: 21000, saleEnabled: true },
+    { key: '201', name: 'CORONA EXTRA', group: '02', category: 'CERVEZA', sourcePrice: 30, priceCents: 3000, saleEnabled: true },
+  ];
+
+  const tree = buildCatalogHierarchy(sampleProducts);
+  assert.equal(tree.length, 2);
+  assert.equal(tree[0].name, 'Alimentos');
+  assert.equal(tree[0].count, 3);
+  const camaronesSub = tree[0].subcategories.find((s) => s.name === 'CAMARONES');
+  assert.ok(camaronesSub);
+  assert.equal(camaronesSub.groups.length, 2);
+
+  const aguachilesOnly = filterCatalogProductsByHierarchy(sampleProducts, {
+    category: 'Alimentos',
+    subcategory: 'CAMARONES',
+    group: 'Aguachiles',
+  });
+  assert.equal(aguachilesOnly.length, 1);
+  assert.equal(aguachilesOnly[0].key, '710');
+
+  const searchResult = filterCatalogProductsByHierarchy(sampleProducts, {
+    category: 'Alimentos',
+    subcategory: 'CAMARONES',
+    group: 'Aguachiles',
+    searchQuery: 'corona',
+  });
+  assert.equal(searchResult.length, 1);
+  assert.equal(searchResult[0].key, '201');
+});
+

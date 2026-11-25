@@ -63,11 +63,53 @@ export const DEFAULT_PERMISSIONS: Record<UserRole, RolePermissions> = {
   },
 };
 
+export const DEVICE_STATION_NAMES: Record<DeviceConfig['station'], string> = {
+  todos: 'Terminal Central / Multi-Área',
+  comandero: 'Comandero Portátil / Salón',
+  caja: 'Caja Principal / Cobros',
+  cocina: 'Monitor KDS Cocina',
+  barra: 'Monitor KDS Barra',
+};
+
 export const DEFAULT_DEVICE_CONFIG: DeviceConfig = {
   station: 'todos',
-  stationName: 'Estación Central / Multi-Área',
+  stationName: DEVICE_STATION_NAMES.todos,
   autoLockMinutes: 0,
 };
+
+const DEVICE_ID_KEY = 'barbachu.pos.device_id.v1';
+
+export function getOrCreateDeviceId(): string {
+  if (typeof window === 'undefined') return 'term-ssr';
+  try {
+    const existing = window.localStorage.getItem(DEVICE_ID_KEY);
+    if (existing && /^[a-zA-Z0-9_\-]{6,64}$/.test(existing)) {
+      return existing;
+    }
+    const rand =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID().replace(/-/g, '').slice(0, 14)
+        : Math.random().toString(36).slice(2, 12);
+    const created = `term-${rand}`;
+    window.localStorage.setItem(DEVICE_ID_KEY, created);
+    return created;
+  } catch {
+    return `term-${Date.now().toString(36)}`;
+  }
+}
+
+export function detectDevicePlatformLabel(): string {
+  if (typeof navigator === 'undefined') return 'Web Terminal';
+  const ua = navigator.userAgent || '';
+  if (/iPad/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
+    return 'iPad / Tablet iOS';
+  }
+  if (/iPhone/i.test(ua)) return 'iPhone / Móvil iOS';
+  if (/Android/i.test(ua)) return /Mobile/i.test(ua) ? 'Android Móvil' : 'Tablet Android';
+  if (/Mac/i.test(ua)) return 'Mac / Navegador';
+  if (/Windows/i.test(ua)) return 'Windows / Navegador';
+  return 'Terminal Web';
+}
 
 export const DEFAULT_CONFIG: RestaurantConfig = {
   name: 'Barbachu',

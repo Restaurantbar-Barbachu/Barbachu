@@ -1,6 +1,5 @@
 import {
   collection,
-  deleteDoc,
   doc,
   getDoc,
   getDocFromServer,
@@ -13,13 +12,14 @@ import {
   query,
   runTransaction,
   serverTimestamp,
-  setDoc,
+  startAfter,
   Timestamp,
-  updateDoc,
   where,
   writeBatch,
-  type Query,
   type DocumentData,
+  type Query,
+  type QueryConstraint,
+  type QueryDocumentSnapshot,
 } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
 import {
@@ -55,6 +55,23 @@ import {
 import { SOFT_PRODUCTS } from '../data/softRestaurantCatalog';
 import { classifyProductStation } from '../core';
 import { hashPin, isValidFourDigitPin, isWeakDefaultPin, verifyPinSecret } from '../utils/pinSecurity';
+import {
+  WORKSPACE_PAGE_LIMITS,
+  buildActiveOrdersQuerySpec,
+  buildOpenShiftQuerySpec,
+  buildPaginatedCollectionQuerySpec,
+  filterActiveOrders,
+  isMissingIndexError,
+  normalizePageSize,
+  selectActiveOrLatestShift,
+  type ScopedQuerySpec,
+} from '../utils/firestoreQueries';
+
+export interface PaginatedResult<T> {
+  items: T[];
+  nextCursor: QueryDocumentSnapshot<DocumentData> | null;
+  hasMore: boolean;
+}
 
 export function sanitizeFirestoreId(raw: string, fallbackPrefix = 'doc'): string {
   const cleaned = String(raw || '')
@@ -85,7 +102,12 @@ export function ensureEmailList(emails: string[] | undefined, extraEmail?: strin
 export function tsToIso(val: unknown): string {
   if (!val) return new Date().toISOString();
   if (val instanceof Timestamp) return val.toDate().toISOString();
-  if (typeof val === 'object' && val !== null && 'toDate' in val && typeof (val as { toDate: () => Date }).toDate === 'function') {
+  if (
+    typeof val === 'object' &&
+    val !== null &&
+    'toDate' in val &&
+    typeof (val as { toDate: () => Date }).toDate === 'function'
+  ) {
     return (val as { toDate: () => Date }).toDate().toISOString();
   }
   if (typeof val === 'string') return val;
@@ -180,6 +202,154 @@ function buildAuditPayload(
   return payload;
 }
 
+function buildFirestoreQueryFromSpec(
+  spec: ScopedQuerySpec,
+  cursor?: QueryDocumentSnapshot<DocumentData> | null
+): Query<DocumentData> {
+  const colRef = collection(db, spec.collectionName);
+  const constraints: QueryConstraint[] = [];
+  for (const f of spec.filters) {
+    constraints.push(where(f.field, f.op, f.value));
+  }
+  if (spec.orderByField) {
+    constraints.push(orderBy(spec.orderByField, spec.orderDirection));
+  }
+  if (cursor) {
+    constraints.push(startAfter(cursor));
+  }
+  constraints.push(limit(spec.limitCount));
+  return query(colRef, ...constraints);
+}
+
+function mapProductDoc(d: QueryDocumentSnapshot<DocumentData>): SoftProduct {
+  const x = d.data();
+  return {
+    key: String(x.key || d.id),
+    name: String(x.name || ''),
+    group: String(x.group || '1'),
+    category: String(x.category || 'GENERAL'),
+    station: x.station === 'barra' ? 'barra' : classifyProductStation(String(x.category || '')),
+    sourcePrice: Number(x.sourcePrice) || 0,
+    priceCents: Number(x.priceCents) || 0,
+    saleEnabled: Boolean(x.saleEnabled),
+  };
+}
+
+function mapOrderDoc(d: QueryDocumentSnapshot<DocumentData>): Order {
+  const x = d.data();
+  return {
+    id: String(x.id || d.id),
+    number: Number(x.number) || 1,
+    service: x.service || 'mesa',
+    location: String(x.location || '1'),
+    table: String(x.table || x.location || '1'),
+    waiter: String(x.waiter || 'Staff'),
+    note: String(x.note || ''),
+    customer: x.customer || undefined,
+    items: Array.isArray(x.items)
+      ? x.items.map((it: OrderItem, idx: number) => ({
+          ...it,
+          lineId: it.lineId || `${it.key}-${idx}`,
+          note: it.note || '',
+          modifiers: Array.isArray(it.modifiers)
+            ? it.modifiers
+            : Array.isArray(it.modificadores)
+            ? it.modificadores
+            : undefined,
+          station: it.station || 'cocina',
+          itemStatus: it.itemStatus || 'pending',
+        }))
+      : [],
+    totalCents: Number(x.totalCents) || 0,
+    discountCents: Number(x.discountCents) || 0,
+    priority: x.priority === 'alta' ? 'alta' : 'normal',
+    status: x.status || 'sent',
+    paid: Boolean(x.paid),
+    createdAt: tsToIso(x.createdAt),
+    updatedAt: tsToIso(x.updatedAt),
+  };
+}
+
+function mapSaleDoc(d: QueryDocumentSnapshot<DocumentData>): Sale {
+  const x = d.data();
+  return {
+    id: String(x.id || d.id),
+    receipt: String(x.receipt || ''),
+    orderId: x.orderId ? String(x.orderId) : undefined,
+    service: x.service || 'mesa',
+    location: String(x.location || '1'),
+    table: String(x.table || x.location || '1'),
+    waiter: String(x.waiter || 'Staff'),
+    items: Array.isArray(x.items)
+      ? x.items.map((it: OrderItem, idx: number) => ({
+          ...it,
+          lineId: it.lineId || `${it.key}-${idx}`,
+          modifiers: Array.isArray(it.modifiers)
+            ? it.modifiers
+            : Array.isArray(it.modificadores)
+            ? it.modificadores
+            : undefined,
+        }))
+      : [],
+    subtotalCents: Number(x.subtotalCents) || 0,
+    discountCents: Number(x.discountCents) || 0,
+    totalCents: Number(x.totalCents) || 0,
+    paymentMethod: x.paymentMethod || 'efectivo',
+    paidAt: tsToIso(x.paidAt),
+    amountCash: typeof x.amountCash === 'number' ? x.amountCash : undefined,
+    amountCard: typeof x.amountCard === 'number' ? x.amountCard : undefined,
+    changeGiven: typeof x.changeGiven === 'number' ? x.changeGiven : undefined,
+  };
+}
+
+function mapShiftDoc(d: QueryDocumentSnapshot<DocumentData>): CashShift {
+  const x = d.data();
+  return {
+    id: String(x.id || d.id),
+    initialCashCents: Number(x.initialCashCents) || 0,
+    isOpen: Boolean(x.isOpen),
+    openedAt: tsToIso(x.openedAt),
+    closedAt: x.closedAt ? tsToIso(x.closedAt) : undefined,
+    cashSalesCents: Number(x.cashSalesCents) || 0,
+    cardSalesCents: Number(x.cardSalesCents) || 0,
+    transferSalesCents: Number(x.transferSalesCents) || 0,
+    totalSalesCents: Number(x.totalSalesCents) || 0,
+    expectedCashCents: Number(x.expectedCashCents) || 0,
+    retirosCents: Number(x.retirosCents) || 0,
+    depositosCents: Number(x.depositosCents) || 0,
+    actualCashCents: typeof x.actualCashCents === 'number' ? x.actualCashCents : undefined,
+    differenceCents: typeof x.differenceCents === 'number' ? x.differenceCents : undefined,
+    closedByUser: x.closedByUser ? String(x.closedByUser) : undefined,
+  };
+}
+
+function mapMovementDoc(d: QueryDocumentSnapshot<DocumentData>): InventoryMovement {
+  const x = d.data();
+  return {
+    id: String(x.id || d.id),
+    at: tsToIso(x.at),
+    clave: Number(x.clave) || 0,
+    descripcion: String(x.descripcion || ''),
+    type: x.type || 'entrada',
+    qty: Number(x.qty) || 0,
+    costUnit: Number(x.costUnit) || 0,
+    reason: String(x.reason || ''),
+    user: String(x.user || 'Staff'),
+  };
+}
+
+function mapAuditDoc(d: QueryDocumentSnapshot<DocumentData>): AuditLogEntry {
+  const x = d.data();
+  return {
+    id: String(x.id || d.id),
+    at: tsToIso(x.at),
+    user: String(x.user || 'Sistema'),
+    action: String(x.action || ''),
+    detail: String(x.detail || ''),
+    reason: x.reason ? String(x.reason) : undefined,
+  };
+}
+
 const bootstrapInFlightByUid = new Map<
   string,
   Promise<{
@@ -215,22 +385,24 @@ async function runBootstrapWorkspace(user: User): Promise<{
   const email = (user.email || '').toLowerCase();
   const isBootstrapAdmin = Boolean(user.emailVerified && email === BOOTSTRAPPED_ADMIN_EMAIL);
 
-  // 1. Ensure /users/{uid} profile exists
+  // 1. Ensure /users/{uid} profile exists atomically
   const userPath = `users/${user.uid}`;
   try {
     const userRef = doc(db, 'users', user.uid);
-    const userSnap = await getDoc(userRef);
-    if (!userSnap.exists()) {
-      await setDoc(userRef, {
-        uid: sanitizeFirestoreId(user.uid, 'usr'),
-        email: boundStr(email, 180),
-        displayName: boundStr(user.displayName || email.split('@')[0] || 'Operador', 120),
-        role: isBootstrapAdmin ? 'admin' : 'mesero',
-        area: isBootstrapAdmin ? 'Gerencia General' : 'Operación POS',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    }
+    await runTransaction(db, async (tx) => {
+      const userSnap = await tx.get(userRef);
+      if (!userSnap.exists()) {
+        tx.set(userRef, {
+          uid: sanitizeFirestoreId(user.uid, 'usr'),
+          email: boundStr(email, 180),
+          displayName: boundStr(user.displayName || email.split('@')[0] || 'Operador', 120),
+          role: isBootstrapAdmin ? 'admin' : 'mesero',
+          area: isBootstrapAdmin ? 'Gerencia General' : 'Operación POS',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, userPath);
   }
@@ -240,14 +412,16 @@ async function runBootstrapWorkspace(user: User): Promise<{
     const adminPath = `admins/${user.uid}`;
     try {
       const adminRef = doc(db, 'admins', user.uid);
-      const adminSnap = await getDoc(adminRef);
-      if (!adminSnap.exists()) {
-        await setDoc(adminRef, {
-          uid: sanitizeFirestoreId(user.uid, 'adm'),
-          email: boundStr(email, 180),
-          grantedAt: serverTimestamp(),
-        });
-      }
+      await runTransaction(db, async (tx) => {
+        const adminSnap = await tx.get(adminRef);
+        if (!adminSnap.exists()) {
+          tx.set(adminRef, {
+            uid: sanitizeFirestoreId(user.uid, 'adm'),
+            email: boundStr(email, 180),
+            grantedAt: serverTimestamp(),
+          });
+        }
+      });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, adminPath);
     }
@@ -270,24 +444,22 @@ async function runBootstrapWorkspace(user: User): Promise<{
 
   try {
     const configRef = doc(db, 'pos_config', 'main');
-    const configSnap = await getDoc(configRef);
+    const emails = ensureEmailList([email]);
 
-    if (configSnap.exists()) {
-      const cfgData = configSnap.data();
-      if (typeof cfgData.ownerUid === 'string' && cfgData.ownerUid) {
-        workspaceOwnerUid = cfgData.ownerUid;
+    const configResult = await runTransaction(db, async (tx) => {
+      const configSnap = await tx.get(configRef);
+      if (configSnap.exists()) {
+        const cfgData = configSnap.data();
+        return {
+          alreadyExists: true,
+          ownerUid: typeof cfgData.ownerUid === 'string' && cfgData.ownerUid ? cfgData.ownerUid : user.uid,
+        };
       }
-      return { isAdmin, authorized: true, seeded: false, workspaceOwnerUid };
-    }
+      if (!isAdmin) {
+        return { alreadyExists: false, ownerUid: user.uid, denied: true };
+      }
 
-    if (!isAdmin) {
-      return { isAdmin: false, authorized: false, seeded: false, workspaceOwnerUid };
-    }
-
-    if (isAdmin) {
-      const emails = ensureEmailList([email]);
-      // Seed pos_config/main
-      await setDoc(configRef, {
+      tx.set(configRef, {
         name: boundStr(DEFAULT_CONFIG.name, 80),
         tagline: boundStr(DEFAULT_CONFIG.tagline, 120),
         address: boundStr(DEFAULT_CONFIG.address, 200),
@@ -304,99 +476,108 @@ async function runBootstrapWorkspace(user: User): Promise<{
         ownerUid: sanitizeFirestoreId(user.uid, 'adm'),
         updatedAt: serverTimestamp(),
       });
+      return { alreadyExists: false, ownerUid: user.uid, denied: false };
+    });
 
-      // Seed 199 products in batches (max 400 per batch)
-      const existingProducts = await getDocs(collection(db, 'products'));
-      if (existingProducts.empty) {
-        const batch = writeBatch(db);
-        for (const p of SOFT_PRODUCTS) {
-          const prodId = sanitizeFirestoreId(p.key, 'prod');
-          batch.set(doc(db, 'products', prodId), {
-            key: prodId.slice(0, 64),
-            name: boundStr(p.name, 120, 'Producto'),
-            group: boundStr(p.group, 40, '1'),
-            category: boundStr(p.category, 80, 'GENERAL'),
-            station: classifyProductStation(p.category),
-            sourcePrice: Math.max(0, Number(p.sourcePrice) || 0),
-            priceCents: Math.max(0, Math.round(Number(p.priceCents) || 0)),
-            saleEnabled: Boolean(p.saleEnabled),
-            ownerUid: sanitizeFirestoreId(user.uid, 'adm'),
-            updatedAt: serverTimestamp(),
-          });
-        }
-        await batch.commit();
-      }
+    workspaceOwnerUid = configResult.ownerUid;
+    if (configResult.alreadyExists) {
+      return { isAdmin, authorized: true, seeded: false, workspaceOwnerUid };
+    }
+    if (configResult.denied || !isAdmin) {
+      return { isAdmin: false, authorized: false, seeded: false, workspaceOwnerUid };
+    }
 
-      // Seed 121 inventory ingredients + initial staff + initial shift + initial clock + init audit
-      const invBatch = writeBatch(db);
-      const initialInv = createInitialInventory();
-      for (const item of Object.values(initialInv)) {
-        const docId = sanitizeFirestoreId(String(item.clave), 'inv');
-        invBatch.set(doc(db, 'inventory', docId), {
-          clave: Math.round(Number(item.clave) || 0),
-          descripcion: boundStr(item.descripcion, 140, 'Insumo'),
-          unidad: boundStr(item.unidad, 20, 'PZA'),
-          categoria: boundStr(item.categoria, 80, 'GENERAL'),
-          costo: Math.max(0, Number(item.costo) || 0),
-          stock: Math.max(0, Number(item.stock) || 0),
-          minStock: Math.max(0, Number(item.minStock) || 0),
+    // Seed 199 products in bounded batch if empty
+    const existingProducts = await getDocs(query(collection(db, 'products'), limit(1)));
+    if (existingProducts.empty) {
+      const batch = writeBatch(db);
+      for (const p of SOFT_PRODUCTS) {
+        const prodId = sanitizeFirestoreId(p.key, 'prod');
+        batch.set(doc(db, 'products', prodId), {
+          key: prodId.slice(0, 64),
+          name: boundStr(p.name, 120, 'Producto'),
+          group: boundStr(p.group, 40, '1'),
+          category: boundStr(p.category, 80, 'GENERAL'),
+          station: classifyProductStation(p.category),
+          sourcePrice: Math.max(0, Number(p.sourcePrice) || 0),
+          priceCents: Math.max(0, Math.round(Number(p.priceCents) || 0)),
+          saleEnabled: Boolean(p.saleEnabled),
           ownerUid: sanitizeFirestoreId(user.uid, 'adm'),
-          authorizedEmails: emails,
           updatedAt: serverTimestamp(),
         });
       }
-
-      for (const u of DEFAULT_USERS) {
-        const uId = sanitizeFirestoreId(u.id, 'usr');
-        const initialPinHash = await hashPin('0000');
-        const staffDoc: Record<string, unknown> = {
-          id: uId,
-          name: boundStr(user.displayName || u.name, 80, 'Administrador'),
-          role: u.role,
-          avatar: boundStr((user.displayName || u.avatar).slice(0, 2).toUpperCase(), 4, 'AD'),
-          pin: '****',
-          pinHash: initialPinHash,
-          mustChangePin: true,
-          area: boundStr(u.area, 80, 'Gerencia'),
-          ownerUid: sanitizeFirestoreId(user.uid, 'adm'),
-          authorizedEmails: emails,
-        };
-        if (u.role === 'admin') staffDoc.email = email || BOOTSTRAPPED_ADMIN_EMAIL;
-        invBatch.set(doc(db, 'staff_users', uId), staffDoc);
-      }
-
-      const initShift = createInitialShift(0);
-      const shiftId = sanitizeFirestoreId(initShift.id, 'TURNO');
-      invBatch.set(doc(db, 'shifts', shiftId), {
-        id: shiftId,
-        initialCashCents: 0,
-        isOpen: true,
-        openedAt: serverTimestamp(),
-        cashSalesCents: 0,
-        cardSalesCents: 0,
-        transferSalesCents: 0,
-        totalSalesCents: 0,
-        expectedCashCents: 0,
-        retirosCents: 0,
-        depositosCents: 0,
-        ownerUid: sanitizeFirestoreId(user.uid, 'adm'),
-        authorizedEmails: emails,
-      });
-
-      const initAuditId = sanitizeFirestoreId(`aud-init-${Date.now().toString(36)}`, 'aud');
-      invBatch.set(doc(db, 'audit_logs', initAuditId), {
-        id: initAuditId,
-        at: serverTimestamp(),
-        user: boundStr(user.displayName || DEFAULT_USERS[0].name, 80),
-        action: 'Base Firebase inicializada',
-        detail: 'Catálogo de 199 productos, 121 insumos en ceros y turno inicial sincronizados en Cloud Firestore.',
-        ownerUid: sanitizeFirestoreId(user.uid, 'adm'),
-        authorizedEmails: emails,
-      });
-
-      await invBatch.commit();
-      seeded = true;
+      await batch.commit();
     }
+
+    // Seed 121 inventory ingredients + initial staff + initial shift + init audit
+    const invBatch = writeBatch(db);
+    const initialInv = createInitialInventory();
+    for (const item of Object.values(initialInv)) {
+      const docId = sanitizeFirestoreId(String(item.clave), 'inv');
+      invBatch.set(doc(db, 'inventory', docId), {
+        clave: Math.round(Number(item.clave) || 0),
+        descripcion: boundStr(item.descripcion, 140, 'Insumo'),
+        unidad: boundStr(item.unidad, 20, 'PZA'),
+        categoria: boundStr(item.categoria, 80, 'GENERAL'),
+        costo: Math.max(0, Number(item.costo) || 0),
+        stock: Math.max(0, Number(item.stock) || 0),
+        minStock: Math.max(0, Number(item.minStock) || 0),
+        ownerUid: sanitizeFirestoreId(user.uid, 'adm'),
+        authorizedEmails: emails,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    for (const u of DEFAULT_USERS) {
+      const uId = sanitizeFirestoreId(u.id, 'usr');
+      const initialPinHash = await hashPin('0000');
+      const staffDoc: Record<string, unknown> = {
+        id: uId,
+        name: boundStr(user.displayName || u.name, 80, 'Administrador'),
+        role: u.role,
+        avatar: boundStr((user.displayName || u.avatar).slice(0, 2).toUpperCase(), 4, 'AD'),
+        pin: '****',
+        pinHash: initialPinHash,
+        mustChangePin: true,
+        area: boundStr(u.area, 80, 'Gerencia'),
+        ownerUid: sanitizeFirestoreId(user.uid, 'adm'),
+        authorizedEmails: emails,
+      };
+      if (u.role === 'admin') staffDoc.email = email || BOOTSTRAPPED_ADMIN_EMAIL;
+      invBatch.set(doc(db, 'staff_users', uId), staffDoc);
+    }
+
+    const initShift = createInitialShift(0);
+    const shiftId = sanitizeFirestoreId(initShift.id, 'TURNO');
+    invBatch.set(doc(db, 'shifts', shiftId), {
+      id: shiftId,
+      initialCashCents: 0,
+      isOpen: true,
+      openedAt: serverTimestamp(),
+      cashSalesCents: 0,
+      cardSalesCents: 0,
+      transferSalesCents: 0,
+      totalSalesCents: 0,
+      expectedCashCents: 0,
+      retirosCents: 0,
+      depositosCents: 0,
+      ownerUid: sanitizeFirestoreId(user.uid, 'adm'),
+      authorizedEmails: emails,
+    });
+
+    const initAuditId = sanitizeFirestoreId(`aud-init-${Date.now().toString(36)}`, 'aud');
+    invBatch.set(doc(db, 'audit_logs', initAuditId), {
+      id: initAuditId,
+      at: serverTimestamp(),
+      user: boundStr(user.displayName || DEFAULT_USERS[0].name, 80),
+      action: 'Base Firebase inicializada',
+      detail: 'Catálogo de 199 productos, 121 insumos en ceros y turno inicial sincronizados en Cloud Firestore.',
+      ownerUid: sanitizeFirestoreId(user.uid, 'adm'),
+      authorizedEmails: emails,
+    });
+
+    await invBatch.commit();
+    seeded = true;
   } catch (error) {
     const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
     if (!isAdmin && (msg.includes('permission') || msg.includes('insufficient'))) {
@@ -419,7 +600,7 @@ export interface WorkspaceCallbacks {
   }) => void;
   onProducts: (products: SoftProduct[]) => void;
   onOrders: (orders: Order[]) => void;
-  onSales: (sales: Sale[]) => void;
+  onSales: (sales: Sale[], pagination?: { nextCursor: QueryDocumentSnapshot<DocumentData> | null; hasMore: boolean }) => void;
   onShift: (shift: CashShift) => void;
   onInventory: (inventory: Record<number, InventoryItem>) => void;
   onMovements: (movements: InventoryMovement[]) => void;
@@ -436,24 +617,24 @@ export function subscribePosWorkspace(
 ): () => void {
   const email = (user.email || '').toLowerCase();
   const isBootstrapAdmin = Boolean(user.emailVerified && email === BOOTSTRAPPED_ADMIN_EMAIL);
+  let disposed = false;
 
   const scopedQuery = (
     colName: string,
     orderField?: string,
-    maxDocs?: number
+    maxDocs: number = 100,
+    direction: 'asc' | 'desc' = 'desc'
   ): Query<DocumentData> => {
     const colRef = collection(db, colName);
-    const constraints = [];
+    const constraints: QueryConstraint[] = [];
     if (!isBootstrapAdmin) {
       constraints.push(where('authorizedEmails', 'array-contains', email));
     }
     if (orderField) {
-      constraints.push(orderBy(orderField, 'desc'));
+      constraints.push(orderBy(orderField, direction));
     }
-    if (maxDocs && maxDocs > 0) {
-      constraints.push(limit(maxDocs));
-    }
-    return constraints.length > 0 ? query(colRef, ...constraints) : colRef;
+    constraints.push(limit(normalizePageSize(maxDocs, 100)));
+    return query(colRef, ...constraints);
   };
 
   const reportErr = (op: OperationType, path: string) => (err: unknown) => {
@@ -466,6 +647,7 @@ export function subscribePosWorkspace(
 
   const unsubs: (() => void)[] = [];
 
+  // 1. Config document
   unsubs.push(
     onSnapshot(
       doc(db, 'pos_config', 'main'),
@@ -495,24 +677,13 @@ export function subscribePosWorkspace(
     )
   );
 
+  // 2. Products (bounded limit)
   unsubs.push(
     onSnapshot(
-      collection(db, 'products'),
+      query(collection(db, 'products'), orderBy('name', 'asc'), limit(WORKSPACE_PAGE_LIMITS.products)),
       (snap) => {
         if (snap.empty) return;
-        const items: SoftProduct[] = snap.docs.map((d) => {
-          const x = d.data();
-          return {
-            key: String(x.key || d.id),
-            name: String(x.name || ''),
-            group: String(x.group || '1'),
-            category: String(x.category || 'GENERAL'),
-            station: x.station === 'barra' ? 'barra' : classifyProductStation(String(x.category || '')),
-            sourcePrice: Number(x.sourcePrice) || 0,
-            priceCents: Number(x.priceCents) || 0,
-            saleEnabled: Boolean(x.saleEnabled),
-          };
-        });
+        const items: SoftProduct[] = snap.docs.map(mapProductDoc);
         items.sort((a, b) => a.category.localeCompare(b.category, 'es') || a.name.localeCompare(b.name, 'es'));
         callbacks.onProducts(items);
       },
@@ -520,129 +691,105 @@ export function subscribePosWorkspace(
     )
   );
 
-  unsubs.push(
-    onSnapshot(
-      scopedQuery('orders', 'updatedAt', 200),
+  // 3. Active Orders ONLY (where paid == false + bounded limit, excluding closed/canceled locally)
+  let fallbackOrdersUnsub: (() => void) | null = null;
+  const activeOrdersSpec = buildActiveOrdersQuerySpec(email, isBootstrapAdmin, WORKSPACE_PAGE_LIMITS.orders);
+  const attachOrdersFallback = () => {
+    if (disposed || fallbackOrdersUnsub) return;
+    fallbackOrdersUnsub = onSnapshot(
+      scopedQuery('orders', 'updatedAt', WORKSPACE_PAGE_LIMITS.orders),
       (snap) => {
-        const orders: Order[] = snap.docs.map((d) => {
-          const x = d.data();
-          return {
-            id: String(x.id || d.id),
-            number: Number(x.number) || 1,
-            service: x.service || 'mesa',
-            location: String(x.location || '1'),
-            table: String(x.table || x.location || '1'),
-            waiter: String(x.waiter || 'Staff'),
-            note: String(x.note || ''),
-            customer: x.customer || undefined,
-            items: Array.isArray(x.items)
-              ? x.items.map((it: OrderItem, idx: number) => ({
-                  ...it,
-                  lineId: it.lineId || `${it.key}-${idx}`,
-                  note: it.note || '',
-                  modifiers: Array.isArray(it.modifiers)
-                    ? it.modifiers
-                    : Array.isArray(it.modificadores)
-                    ? it.modificadores
-                    : undefined,
-                  station: it.station || 'cocina',
-                  itemStatus: it.itemStatus || 'pending',
-                }))
-              : [],
-            totalCents: Number(x.totalCents) || 0,
-            discountCents: Number(x.discountCents) || 0,
-            priority: x.priority === 'alta' ? 'alta' : 'normal',
-            status: x.status || 'sent',
-            paid: Boolean(x.paid),
-            createdAt: tsToIso(x.createdAt),
-            updatedAt: tsToIso(x.updatedAt),
-          };
-        });
-        orders.sort((a, b) => a.number - b.number);
-        callbacks.onOrders(orders);
+        callbacks.onOrders(filterActiveOrders(snap.docs.map(mapOrderDoc)));
       },
       reportErr(OperationType.LIST, 'orders')
-    )
-  );
+    );
+    unsubs.push(fallbackOrdersUnsub);
+  };
 
   unsubs.push(
     onSnapshot(
-      scopedQuery('sales', 'paidAt', 300),
+      buildFirestoreQueryFromSpec(activeOrdersSpec),
       (snap) => {
-        const sales: Sale[] = snap.docs.map((d) => {
-          const x = d.data();
-          return {
-            id: String(x.id || d.id),
-            receipt: String(x.receipt || ''),
-            orderId: x.orderId ? String(x.orderId) : undefined,
-            service: x.service || 'mesa',
-            location: String(x.location || '1'),
-            table: String(x.table || x.location || '1'),
-            waiter: String(x.waiter || 'Staff'),
-            items: Array.isArray(x.items)
-              ? x.items.map((it: OrderItem, idx: number) => ({
-                  ...it,
-                  lineId: it.lineId || `${it.key}-${idx}`,
-                  modifiers: Array.isArray(it.modifiers)
-                    ? it.modifiers
-                    : Array.isArray(it.modificadores)
-                    ? it.modificadores
-                    : undefined,
-                }))
-              : [],
-            subtotalCents: Number(x.subtotalCents) || 0,
-            discountCents: Number(x.discountCents) || 0,
-            totalCents: Number(x.totalCents) || 0,
-            paymentMethod: x.paymentMethod || 'efectivo',
-            paidAt: tsToIso(x.paidAt),
-            amountCash: typeof x.amountCash === 'number' ? x.amountCash : undefined,
-            amountCard: typeof x.amountCard === 'number' ? x.amountCard : undefined,
-            changeGiven: typeof x.changeGiven === 'number' ? x.changeGiven : undefined,
-          };
-        });
+        callbacks.onOrders(filterActiveOrders(snap.docs.map(mapOrderDoc)));
+      },
+      (err) => {
+        if (isMissingIndexError(err)) {
+          console.warn('Orders active index pending deployment; falling back to bounded query:', err.message);
+          attachOrdersFallback();
+          return;
+        }
+        reportErr(OperationType.LIST, 'orders')(err);
+      }
+    )
+  );
+
+  // 4. Sales (paginated recent page with limit + cursor metadata)
+  unsubs.push(
+    onSnapshot(
+      scopedQuery('sales', 'paidAt', WORKSPACE_PAGE_LIMITS.sales),
+      (snap) => {
+        const sales = snap.docs.map(mapSaleDoc);
+        const lastDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+        const hasMore = snap.docs.length >= WORKSPACE_PAGE_LIMITS.sales;
         sales.sort((a, b) => a.paidAt.localeCompare(b.paidAt));
-        callbacks.onSales(sales);
+        callbacks.onSales(sales, { nextCursor: lastDoc, hasMore });
       },
       reportErr(OperationType.LIST, 'sales')
     )
   );
 
-  unsubs.push(
-    onSnapshot(
-      scopedQuery('shifts', 'openedAt', 20),
+  // 5. Current Open Shift ONLY (where isOpen == true, limit(1)), falling back to latest closed shift one-shot when empty
+  let fallbackShiftUnsub: (() => void) | null = null;
+  const openShiftSpec = buildOpenShiftQuerySpec(email, isBootstrapAdmin);
+  const attachShiftFallback = () => {
+    if (disposed || fallbackShiftUnsub) return;
+    fallbackShiftUnsub = onSnapshot(
+      scopedQuery('shifts', 'openedAt', 5),
       (snap) => {
         if (snap.empty) return;
-        const shifts: CashShift[] = snap.docs.map((d) => {
-          const x = d.data();
-          return {
-            id: String(x.id || d.id),
-            initialCashCents: Number(x.initialCashCents) || 0,
-            isOpen: Boolean(x.isOpen),
-            openedAt: tsToIso(x.openedAt),
-            closedAt: x.closedAt ? tsToIso(x.closedAt) : undefined,
-            cashSalesCents: Number(x.cashSalesCents) || 0,
-            cardSalesCents: Number(x.cardSalesCents) || 0,
-            transferSalesCents: Number(x.transferSalesCents) || 0,
-            totalSalesCents: Number(x.totalSalesCents) || 0,
-            expectedCashCents: Number(x.expectedCashCents) || 0,
-            retirosCents: Number(x.retirosCents) || 0,
-            depositosCents: Number(x.depositosCents) || 0,
-            actualCashCents: typeof x.actualCashCents === 'number' ? x.actualCashCents : undefined,
-            differenceCents: typeof x.differenceCents === 'number' ? x.differenceCents : undefined,
-            closedByUser: x.closedByUser ? String(x.closedByUser) : undefined,
-          };
-        });
-        shifts.sort((a, b) => b.openedAt.localeCompare(a.openedAt));
-        const active = shifts.find((s) => s.isOpen) || shifts[0];
-        if (active) callbacks.onShift(active);
+        const latest = selectActiveOrLatestShift(snap.docs.map(mapShiftDoc));
+        if (latest) callbacks.onShift(latest);
       },
       reportErr(OperationType.LIST, 'shifts')
-    )
-  );
+    );
+    unsubs.push(fallbackShiftUnsub);
+  };
 
   unsubs.push(
     onSnapshot(
-      scopedQuery('inventory'),
+      buildFirestoreQueryFromSpec(openShiftSpec),
+      (snap) => {
+        if (!snap.empty) {
+          const active = selectActiveOrLatestShift(snap.docs.map(mapShiftDoc));
+          if (active) callbacks.onShift(active);
+          return;
+        }
+        // No open shift currently: read latest shift one-shot so closed Corte Z state stays synchronized
+        void getDocs(scopedQuery('shifts', 'openedAt', 1))
+          .then((latestSnap) => {
+            if (disposed || latestSnap.empty) return;
+            const latestClosed = mapShiftDoc(latestSnap.docs[0]);
+            callbacks.onShift(latestClosed);
+          })
+          .catch(() => undefined);
+      },
+      (err) => {
+        if (isMissingIndexError(err)) {
+          console.warn('Shifts active index pending deployment; falling back to bounded query:', err.message);
+          attachShiftFallback();
+          return;
+        }
+        reportErr(OperationType.LIST, 'shifts')(err);
+      }
+    )
+  );
+
+  // 6. Inventory (bounded limit + deterministic order)
+  let fallbackInvUnsub: (() => void) | null = null;
+  const attachInvFallback = () => {
+    if (disposed || fallbackInvUnsub) return;
+    fallbackInvUnsub = onSnapshot(
+      scopedQuery('inventory', undefined, WORKSPACE_PAGE_LIMITS.inventory),
       (snap) => {
         if (snap.empty) return;
         const map: Record<number, InventoryItem> = {};
@@ -663,27 +810,49 @@ export function subscribePosWorkspace(
         callbacks.onInventory(map);
       },
       reportErr(OperationType.LIST, 'inventory')
-    )
-  );
+    );
+    unsubs.push(fallbackInvUnsub);
+  };
 
   unsubs.push(
     onSnapshot(
-      scopedQuery('inventory_movements', 'at', 250),
+      scopedQuery('inventory', 'clave', WORKSPACE_PAGE_LIMITS.inventory, 'asc'),
       (snap) => {
-        const list: InventoryMovement[] = snap.docs.map((d) => {
+        if (snap.empty) return;
+        const map: Record<number, InventoryItem> = {};
+        for (const d of snap.docs) {
           const x = d.data();
-          return {
-            id: String(x.id || d.id),
-            at: tsToIso(x.at),
-            clave: Number(x.clave) || 0,
+          const clave = Number(x.clave) || Number(d.id);
+          if (!Number.isFinite(clave)) continue;
+          map[clave] = {
+            clave,
             descripcion: String(x.descripcion || ''),
-            type: x.type || 'entrada',
-            qty: Number(x.qty) || 0,
-            costUnit: Number(x.costUnit) || 0,
-            reason: String(x.reason || ''),
-            user: String(x.user || 'Staff'),
+            unidad: String(x.unidad || 'PZA'),
+            categoria: String(x.categoria || 'GENERAL'),
+            costo: Number(x.costo) || 0,
+            stock: Number(x.stock) || 0,
+            minStock: Number(x.minStock) || 0,
           };
-        });
+        }
+        callbacks.onInventory(map);
+      },
+      (err) => {
+        if (isMissingIndexError(err)) {
+          console.warn('Inventory clave index pending deployment; falling back to bounded query:', err.message);
+          attachInvFallback();
+          return;
+        }
+        reportErr(OperationType.LIST, 'inventory')(err);
+      }
+    )
+  );
+
+  // 7. Inventory Movements (bounded limit)
+  unsubs.push(
+    onSnapshot(
+      scopedQuery('inventory_movements', 'at', WORKSPACE_PAGE_LIMITS.inventoryMovements),
+      (snap) => {
+        const list = snap.docs.map(mapMovementDoc);
         list.sort((a, b) => a.at.localeCompare(b.at));
         callbacks.onMovements(list);
       },
@@ -691,9 +860,10 @@ export function subscribePosWorkspace(
     )
   );
 
+  // 8. Staff Users (bounded limit)
   unsubs.push(
     onSnapshot(
-      scopedQuery('staff_users'),
+      scopedQuery('staff_users', undefined, WORKSPACE_PAGE_LIMITS.staffUsers),
       (snap) => {
         if (snap.empty) return;
         const users: PosUser[] = snap.docs.map((d) => {
@@ -718,9 +888,10 @@ export function subscribePosWorkspace(
     )
   );
 
+  // 9. Staff Clock (bounded limit)
   unsubs.push(
     onSnapshot(
-      scopedQuery('staff_clock', 'clockIn', 200),
+      scopedQuery('staff_clock', 'clockIn', WORKSPACE_PAGE_LIMITS.staffClock),
       (snap) => {
         const list: TimeClockRecord[] = snap.docs.map((d) => {
           const x = d.data();
@@ -741,21 +912,12 @@ export function subscribePosWorkspace(
     )
   );
 
+  // 10. Audit Logs (bounded limit)
   unsubs.push(
     onSnapshot(
-      scopedQuery('audit_logs', 'at', 250),
+      scopedQuery('audit_logs', 'at', WORKSPACE_PAGE_LIMITS.auditLogs),
       (snap) => {
-        const list: AuditLogEntry[] = snap.docs.map((d) => {
-          const x = d.data();
-          return {
-            id: String(x.id || d.id),
-            at: tsToIso(x.at),
-            user: String(x.user || 'Sistema'),
-            action: String(x.action || ''),
-            detail: String(x.detail || ''),
-            reason: x.reason ? String(x.reason) : undefined,
-          };
-        });
+        const list = snap.docs.map(mapAuditDoc);
         list.sort((a, b) => a.at.localeCompare(b.at));
         callbacks.onAudit(list);
       },
@@ -764,6 +926,7 @@ export function subscribePosWorkspace(
   );
 
   return () => {
+    disposed = true;
     for (const unsub of unsubs) unsub();
   };
 }
@@ -771,25 +934,16 @@ export function subscribePosWorkspace(
 export function subscribePublicMenuProducts(
   onProducts: (products: SoftProduct[]) => void
 ): () => void {
-  const q = query(collection(db, 'products'), where('saleEnabled', '==', true));
+  const q = query(
+    collection(db, 'products'),
+    where('saleEnabled', '==', true),
+    limit(WORKSPACE_PAGE_LIMITS.publicProducts)
+  );
   return onSnapshot(
     q,
     (snap) => {
       if (snap.empty) return;
-      const items: SoftProduct[] = snap.docs.map((d) => {
-        const x = d.data();
-        return {
-          key: String(x.key || d.id),
-          name: String(x.name || ''),
-          group: String(x.group || '1'),
-          category: String(x.category || 'GENERAL'),
-          station: x.station === 'barra' ? 'barra' : classifyProductStation(String(x.category || '')),
-          sourcePrice: Number(x.sourcePrice) || 0,
-          priceCents: Number(x.priceCents) || 0,
-          saleEnabled: Boolean(x.saleEnabled),
-        };
-      });
-      onProducts(items);
+      onProducts(snap.docs.map(mapProductDoc));
     },
     (error) => {
       // Fallback gracefully to static restaurantMenu data if offline or not yet seeded
@@ -799,7 +953,143 @@ export function subscribePublicMenuProducts(
 }
 
 // -----------------------------------------------------------------------------
-// Atomic Write Helpers (every call wrapped in try/catch + handleFirestoreError)
+// Cursor-Based Pagination Helpers (On-Demand History & Large Collection Fetching)
+// -----------------------------------------------------------------------------
+
+export async function fsFetchSalesPage(
+  user: User,
+  options?: { cursor?: QueryDocumentSnapshot<DocumentData> | null; pageSize?: number }
+): Promise<PaginatedResult<Sale>> {
+  const email = (user.email || '').toLowerCase();
+  const isBootstrapAdmin = Boolean(user.emailVerified && email === BOOTSTRAPPED_ADMIN_EMAIL);
+  const pageSize = normalizePageSize(options?.pageSize, 50);
+  const spec = buildPaginatedCollectionQuerySpec('sales', email, isBootstrapAdmin, 'paidAt', 'desc', pageSize);
+  try {
+    const snap = await getDocs(buildFirestoreQueryFromSpec(spec, options?.cursor || null));
+    const items = snap.docs.map(mapSaleDoc);
+    const nextCursor = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+    return { items, nextCursor, hasMore: snap.docs.length >= pageSize };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'sales');
+    return { items: [], nextCursor: null, hasMore: false };
+  }
+}
+
+export async function fsFetchClosedOrdersPage(
+  user: User,
+  options?: { cursor?: QueryDocumentSnapshot<DocumentData> | null; pageSize?: number }
+): Promise<PaginatedResult<Order>> {
+  const email = (user.email || '').toLowerCase();
+  const isBootstrapAdmin = Boolean(user.emailVerified && email === BOOTSTRAPPED_ADMIN_EMAIL);
+  const pageSize = normalizePageSize(options?.pageSize, 50);
+  const spec = buildPaginatedCollectionQuerySpec(
+    'orders',
+    email,
+    isBootstrapAdmin,
+    'updatedAt',
+    'desc',
+    pageSize,
+    [{ field: 'paid', op: '==', value: true }]
+  );
+  try {
+    const snap = await getDocs(buildFirestoreQueryFromSpec(spec, options?.cursor || null));
+    const items = snap.docs.map(mapOrderDoc);
+    const nextCursor = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+    return { items, nextCursor, hasMore: snap.docs.length >= pageSize };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'orders');
+    return { items: [], nextCursor: null, hasMore: false };
+  }
+}
+
+export async function fsFetchInventoryMovementsPage(
+  user: User,
+  options?: { cursor?: QueryDocumentSnapshot<DocumentData> | null; pageSize?: number }
+): Promise<PaginatedResult<InventoryMovement>> {
+  const email = (user.email || '').toLowerCase();
+  const isBootstrapAdmin = Boolean(user.emailVerified && email === BOOTSTRAPPED_ADMIN_EMAIL);
+  const pageSize = normalizePageSize(options?.pageSize, 50);
+  const spec = buildPaginatedCollectionQuerySpec('inventory_movements', email, isBootstrapAdmin, 'at', 'desc', pageSize);
+  try {
+    const snap = await getDocs(buildFirestoreQueryFromSpec(spec, options?.cursor || null));
+    const items = snap.docs.map(mapMovementDoc);
+    const nextCursor = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+    return { items, nextCursor, hasMore: snap.docs.length >= pageSize };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'inventory_movements');
+    return { items: [], nextCursor: null, hasMore: false };
+  }
+}
+
+export async function fsFetchAuditLogsPage(
+  user: User,
+  options?: { cursor?: QueryDocumentSnapshot<DocumentData> | null; pageSize?: number }
+): Promise<PaginatedResult<AuditLogEntry>> {
+  const email = (user.email || '').toLowerCase();
+  const isBootstrapAdmin = Boolean(user.emailVerified && email === BOOTSTRAPPED_ADMIN_EMAIL);
+  const pageSize = normalizePageSize(options?.pageSize, 50);
+  const spec = buildPaginatedCollectionQuerySpec('audit_logs', email, isBootstrapAdmin, 'at', 'desc', pageSize);
+  try {
+    const snap = await getDocs(buildFirestoreQueryFromSpec(spec, options?.cursor || null));
+    const items = snap.docs.map(mapAuditDoc);
+    const nextCursor = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+    return { items, nextCursor, hasMore: snap.docs.length >= pageSize };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'audit_logs');
+    return { items: [], nextCursor: null, hasMore: false };
+  }
+}
+
+export async function fsFetchProductsPage(
+  options?: { cursor?: QueryDocumentSnapshot<DocumentData> | null; pageSize?: number }
+): Promise<PaginatedResult<SoftProduct>> {
+  const pageSize = normalizePageSize(options?.pageSize, 100);
+  const constraints: QueryConstraint[] = [orderBy('name', 'asc')];
+  if (options?.cursor) constraints.push(startAfter(options.cursor));
+  constraints.push(limit(pageSize));
+  try {
+    const snap = await getDocs(query(collection(db, 'products'), ...constraints));
+    const items = snap.docs.map(mapProductDoc);
+    const nextCursor = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+    return { items, nextCursor, hasMore: snap.docs.length >= pageSize };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'products');
+    return { items: [], nextCursor: null, hasMore: false };
+  }
+}
+
+export async function fsFetchInventoryPage(
+  user: User,
+  options?: { cursor?: QueryDocumentSnapshot<DocumentData> | null; pageSize?: number }
+): Promise<PaginatedResult<InventoryItem>> {
+  const email = (user.email || '').toLowerCase();
+  const isBootstrapAdmin = Boolean(user.emailVerified && email === BOOTSTRAPPED_ADMIN_EMAIL);
+  const pageSize = normalizePageSize(options?.pageSize, 100);
+  const spec = buildPaginatedCollectionQuerySpec('inventory', email, isBootstrapAdmin, 'clave', 'asc', pageSize);
+  try {
+    const snap = await getDocs(buildFirestoreQueryFromSpec(spec, options?.cursor || null));
+    const items: InventoryItem[] = snap.docs.map((d) => {
+      const x = d.data();
+      return {
+        clave: Number(x.clave) || Number(d.id) || 0,
+        descripcion: String(x.descripcion || ''),
+        unidad: String(x.unidad || 'PZA'),
+        categoria: String(x.categoria || 'GENERAL'),
+        costo: Number(x.costo) || 0,
+        stock: Number(x.stock) || 0,
+        minStock: Number(x.minStock) || 0,
+      };
+    });
+    const nextCursor = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+    return { items, nextCursor, hasMore: snap.docs.length >= pageSize };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'inventory');
+    return { items: [], nextCursor: null, hasMore: false };
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Atomic Write Helpers (every critical mutation wrapped in runTransaction)
 // -----------------------------------------------------------------------------
 
 export async function fsSaveProduct(
@@ -811,23 +1101,30 @@ export async function fsSaveProduct(
 ): Promise<void> {
   const prodId = sanitizeFirestoreId(prod.key, 'prod').slice(0, 64);
   const path = `products/${prodId}`;
+  const prodRef = doc(db, 'products', prodId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+
   try {
-    const batch = writeBatch(db);
-    batch.set(doc(db, 'products', prodId), {
-      key: prodId,
-      name: boundStr(prod.name, 120, 'Producto'),
-      group: boundStr(prod.group, 40, '1'),
-      category: boundStr(prod.category, 80, 'PLATILLOS'),
-      station: prod.station || classifyProductStation(prod.category),
-      sourcePrice: Math.max(0, Number(prod.sourcePrice) || 0),
-      priceCents: Math.max(0, Math.round(Number(prod.priceCents) || 0)),
-      saleEnabled: Boolean(prod.saleEnabled),
-      ownerUid: sanitizeFirestoreId(workspaceOwnerUid || user.uid, 'usr'),
-      updatedAt: serverTimestamp(),
+    await runTransaction(db, async (tx) => {
+      const existingSnap = await tx.get(prodRef);
+      const preservedOwnerUid = existingSnap.exists()
+        ? String(existingSnap.data().ownerUid || workspaceOwnerUid || user.uid)
+        : sanitizeFirestoreId(workspaceOwnerUid || user.uid, 'usr');
+
+      tx.set(prodRef, {
+        key: prodId,
+        name: boundStr(prod.name, 120, 'Producto'),
+        group: boundStr(prod.group, 40, '1'),
+        category: boundStr(prod.category, 80, 'PLATILLOS'),
+        station: prod.station || classifyProductStation(prod.category),
+        sourcePrice: Math.max(0, Number(prod.sourcePrice) || 0),
+        priceCents: Math.max(0, Math.round(Number(prod.priceCents) || 0)),
+        saleEnabled: Boolean(prod.saleEnabled),
+        ownerUid: preservedOwnerUid,
+        updatedAt: serverTimestamp(),
+      });
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
     });
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -841,7 +1138,30 @@ export async function fsBatchUpdateProducts(
   workspaceOwnerUid: string
 ): Promise<void> {
   const path = 'products';
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
   try {
+    if (products.length <= 200) {
+      await runTransaction(db, async (tx) => {
+        for (const prod of products) {
+          const prodId = sanitizeFirestoreId(prod.key, 'prod').slice(0, 64);
+          tx.set(doc(db, 'products', prodId), {
+            key: prodId,
+            name: boundStr(prod.name, 120, 'Producto'),
+            group: boundStr(prod.group, 40, '1'),
+            category: boundStr(prod.category, 80, 'PLATILLOS'),
+            station: prod.station || classifyProductStation(prod.category),
+            sourcePrice: Math.max(0, Number(prod.sourcePrice) || 0),
+            priceCents: Math.max(0, Math.round(Number(prod.priceCents) || 0)),
+            saleEnabled: Boolean(prod.saleEnabled),
+            ownerUid: sanitizeFirestoreId(workspaceOwnerUid || user.uid, 'usr'),
+            updatedAt: serverTimestamp(),
+          });
+        }
+        tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+      });
+      return;
+    }
+
     const chunkSize = 400;
     for (let i = 0; i < products.length; i += chunkSize) {
       const slice = products.slice(i, i + chunkSize);
@@ -862,7 +1182,6 @@ export async function fsBatchUpdateProducts(
         });
       }
       if (i + chunkSize >= products.length) {
-        const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
         batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
       }
       await batch.commit();
@@ -880,19 +1199,24 @@ export async function fsDeleteProduct(
 ): Promise<void> {
   const prodId = sanitizeFirestoreId(prodKey, 'prod');
   const path = `products/${prodId}`;
+  const prodRef = doc(db, 'products', prodId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+
   try {
-    await deleteDoc(doc(db, 'products', prodId));
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    await setDoc(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(prodRef);
+      if (snap.exists()) {
+        tx.delete(prodRef);
+      }
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
 
-function isOfflineTransactionError(error: unknown): boolean {
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
-  const code = (error as { code?: string })?.code;
-  return code === 'unavailable' || code === 'failed-precondition';
+function isOfflineTransactionError(_error: unknown): boolean {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
 }
 
 export async function fsSaveOrder(
@@ -908,21 +1232,27 @@ export async function fsSaveOrder(
   }
   const ordId = sanitizeFirestoreId(order.id, 'ord');
   const path = `orders/${ordId}`;
+  const ordRef = doc(db, 'orders', ordId);
   const cfgRef = doc(db, 'pos_config', 'main');
   const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
 
   try {
     const assignedNumber = await runTransaction(db, async (tx) => {
-      const cfgSnap = await tx.get(cfgRef);
+      const [ordSnap, cfgSnap] = await Promise.all([tx.get(ordRef), tx.get(cfgRef)]);
+      if (ordSnap.exists()) {
+        const cur = ordSnap.data();
+        if (cur.paid === true || cur.status === 'closed') {
+          throw new Error('ORDER_CLOSED:La cuenta ya fue cerrada o cobrada en otra terminal.');
+        }
+        return Number(cur.number) || order.number;
+      }
+
       const nextNum = cfgSnap.exists()
         ? Math.max(1, Math.round(Number(cfgSnap.data().nextOrderNumber) || order.number || 1))
         : Math.max(1, Math.round(Number(order.number) || 1));
 
       const orderWithNum: Order = { ...order, number: nextNum };
-      tx.set(
-        doc(db, 'orders', ordId),
-        buildOrderPayload(orderWithNum, user.uid, authorizedEmails, true)
-      );
+      tx.set(ordRef, buildOrderPayload(orderWithNum, user.uid, authorizedEmails, true));
       if (cfgSnap.exists()) {
         tx.update(cfgRef, {
           nextOrderNumber: nextNum + 1,
@@ -938,13 +1268,13 @@ export async function fsSaveOrder(
     });
     return assignedNumber;
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith('ORDER_CLOSED:')) {
+      throw error;
+    }
     if (isOfflineTransactionError(error)) {
       try {
         const batch = writeBatch(db);
-        batch.set(
-          doc(db, 'orders', ordId),
-          buildOrderPayload(order, user.uid, authorizedEmails, true)
-        );
+        batch.set(ordRef, buildOrderPayload(order, user.uid, authorizedEmails, true));
         batch.update(cfgRef, {
           nextOrderNumber: increment(1),
           updatedAt: serverTimestamp(),
@@ -997,11 +1327,12 @@ export async function fsUpdateOrder(
   try {
     await runTransaction(db, async (tx) => {
       const ordSnap = await tx.get(ordRef);
-      if (ordSnap.exists()) {
-        const cur = ordSnap.data();
-        if (cur.paid === true || cur.status === 'closed') {
-          throw new Error('ORDER_CLOSED:La cuenta ya fue cerrada o cobrada en otra terminal.');
-        }
+      if (!ordSnap.exists()) {
+        throw new Error('ORDER_CLOSED:La cuenta ya no existe en Firestore.');
+      }
+      const cur = ordSnap.data();
+      if (cur.paid === true || cur.status === 'closed') {
+        throw new Error('ORDER_CLOSED:La cuenta ya fue cerrada o cobrada en otra terminal.');
       }
       tx.update(ordRef, updatePayload);
       if (auditEntry) {
@@ -1119,23 +1450,53 @@ export async function fsCancelOrder(
 ): Promise<void> {
   const ordId = sanitizeFirestoreId(order.id, 'ord');
   const path = `orders/${ordId}`;
+  const ordRef = doc(db, 'orders', ordId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+
   try {
-    if (isAdmin) {
-      await deleteDoc(doc(db, 'orders', ordId));
-      const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-      await setDoc(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    } else {
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'orders', ordId), {
-        status: 'closed',
-        note: boundStr(`[CANCELADA: ${auditEntry.reason || 'Sin motivo'}] ${order.note || ''}`, 300),
-        updatedAt: serverTimestamp(),
-      });
-      const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-      batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-      await batch.commit();
-    }
+    await runTransaction(db, async (tx) => {
+      const ordSnap = await tx.get(ordRef);
+      if (ordSnap.exists()) {
+        const live = ordSnap.data();
+        if (live.paid === true || live.status === 'closed') {
+          throw new Error('ORDER_CLOSED:La cuenta ya fue cobrada o cerrada en otra terminal.');
+        }
+        if (isAdmin) {
+          tx.delete(ordRef);
+        } else {
+          tx.update(ordRef, {
+            status: 'closed',
+            note: boundStr(`[CANCELADA: ${auditEntry.reason || 'Sin motivo'}] ${live.note || order.note || ''}`, 300),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    });
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith('ORDER_CLOSED:')) {
+      throw error;
+    }
+    if (isOfflineTransactionError(error)) {
+      try {
+        const batch = writeBatch(db);
+        if (isAdmin) {
+          batch.delete(ordRef);
+        } else {
+          batch.update(ordRef, {
+            status: 'closed',
+            note: boundStr(`[CANCELADA: ${auditEntry.reason || 'Sin motivo'}] ${order.note || ''}`, 300),
+            updatedAt: serverTimestamp(),
+          });
+        }
+        batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+        await batch.commit();
+        return;
+      } catch (offlineErr) {
+        handleFirestoreError(offlineErr, OperationType.UPDATE, path);
+        return;
+      }
+    }
     handleFirestoreError(error, OperationType.UPDATE, path);
   }
 }
@@ -1196,18 +1557,28 @@ export async function fsCloseAndPayOrder(
   }
 
   try {
+    const saleRef = doc(db, 'sales', saleId);
     const assignedReceipt = await runTransaction(db, async (tx) => {
-      const [ordSnap, shiftSnap, cfgSnap] = await Promise.all([
+      const [ordSnap, saleSnap, shiftSnap, cfgSnap] = await Promise.all([
         tx.get(ordRef),
+        tx.get(saleRef),
         tx.get(shiftRef),
         tx.get(cfgRef),
       ]);
+
+      if (saleSnap.exists()) {
+        throw new Error('ALREADY_PAID:Esta venta ya fue registrada en otro dispositivo.');
+      }
 
       if (ordSnap.exists()) {
         const ordData = ordSnap.data();
         if (ordData.paid === true || ordData.status === 'closed') {
           throw new Error('ALREADY_PAID:Esta cuenta ya fue cobrada en otro dispositivo.');
         }
+      }
+
+      if (shiftSnap.exists() && shiftSnap.data().isOpen === false) {
+        throw new Error('SHIFT_CLOSED:El turno de caja fue cerrado en otra terminal.');
       }
 
       const nextReceiptNum = cfgSnap.exists()
@@ -1217,13 +1588,20 @@ export async function fsCloseAndPayOrder(
         ? `BC-${String(nextReceiptNum).padStart(5, '0')}`
         : sale.receipt;
 
-      tx.update(ordRef, {
-        items: sanitizeOrderItemsForFirestore(updatedOrder.items),
-        status: 'closed',
-        paid: true,
-        updatedAt: serverTimestamp(),
-      });
-      tx.set(doc(db, 'sales', saleId), buildSalePayload(receiptCode));
+      if (ordSnap.exists()) {
+        tx.update(ordRef, {
+          items: sanitizeOrderItemsForFirestore(updatedOrder.items),
+          status: 'closed',
+          paid: true,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        tx.set(
+          ordRef,
+          buildOrderPayload({ ...updatedOrder, status: 'closed', paid: true }, user.uid, authorizedEmails, true)
+        );
+      }
+      tx.set(saleRef, buildSalePayload(receiptCode));
 
       if (shiftSnap.exists()) {
         const s = shiftSnap.data();
@@ -1253,7 +1631,10 @@ export async function fsCloseAndPayOrder(
 
     return { assignedReceipt };
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith('ALREADY_PAID:')) {
+    if (
+      error instanceof Error &&
+      (error.message.startsWith('ALREADY_PAID:') || error.message.startsWith('SHIFT_CLOSED:'))
+    ) {
       throw error;
     }
     if (isOfflineTransactionError(error)) {
@@ -1267,11 +1648,11 @@ export async function fsCloseAndPayOrder(
         });
         batch.set(doc(db, 'sales', saleId), buildSalePayload(sale.receipt));
         batch.update(shiftRef, {
-          cashSalesCents: Math.max(0, Math.round(updatedShift.cashSalesCents)),
-          cardSalesCents: Math.max(0, Math.round(updatedShift.cardSalesCents)),
-          transferSalesCents: Math.max(0, Math.round(updatedShift.transferSalesCents)),
-          totalSalesCents: Math.max(0, Math.round(updatedShift.totalSalesCents)),
-          expectedCashCents: Math.max(0, Math.round(updatedShift.expectedCashCents)),
+          cashSalesCents: increment(cashDelta),
+          cardSalesCents: increment(cardDelta),
+          transferSalesCents: increment(transferDelta),
+          totalSalesCents: increment(totalDelta),
+          expectedCashCents: increment(cashDelta),
         });
         batch.update(cfgRef, {
           nextReceiptNumber: increment(1),
@@ -1344,8 +1725,32 @@ export async function fsOpenNewShift(
   const shiftRef = doc(db, 'shifts', shiftId);
   const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
   const audRef = doc(db, 'audit_logs', audId);
+  const email = (user.email || '').toLowerCase();
+  const isBootstrapAdmin = Boolean(user.emailVerified && email === BOOTSTRAPPED_ADMIN_EMAIL);
+
   try {
+    const openShiftSpec = buildOpenShiftQuerySpec(email, isBootstrapAdmin);
+    let candidateOpenShiftRef: ReturnType<typeof doc> | null = null;
+    try {
+      const openSnap = await getDocs(buildFirestoreQueryFromSpec(openShiftSpec));
+      if (!openSnap.empty) {
+        candidateOpenShiftRef = openSnap.docs[0].ref;
+      }
+    } catch {
+      // Index may still be warming; transaction still guards shiftRef directly
+    }
+
     await runTransaction(db, async (tx) => {
+      const existingSnap = await tx.get(shiftRef);
+      if (existingSnap.exists()) {
+        throw new Error('SHIFT_ALREADY_OPEN:Este turno ya fue registrado en otra terminal.');
+      }
+      if (candidateOpenShiftRef && candidateOpenShiftRef.id !== shiftRef.id) {
+        const activeSnap = await tx.get(candidateOpenShiftRef);
+        if (activeSnap.exists() && activeSnap.data().isOpen === true) {
+          throw new Error('SHIFT_ALREADY_OPEN:Ya existe un turno abierto en otra terminal.');
+        }
+      }
       tx.set(shiftRef, {
         id: shiftId,
         initialCashCents: Math.max(0, Math.round(shift.initialCashCents)),
@@ -1364,6 +1769,9 @@ export async function fsOpenNewShift(
       tx.set(audRef, buildAuditPayload(auditEntry, user.uid, authorizedEmails));
     });
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith('SHIFT_ALREADY_OPEN:')) {
+      throw error;
+    }
     handleFirestoreError(error, OperationType.CREATE, `shifts/${shiftId}`);
   }
 }
@@ -1375,24 +1783,32 @@ export async function fsCreateInventoryItem(
   auditEntry: AuditLogEntry
 ): Promise<void> {
   const itemId = sanitizeFirestoreId(String(item.clave), 'inv');
+  const itemRef = doc(db, 'inventory', itemId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
   try {
-    const batch = writeBatch(db);
-    batch.set(doc(db, 'inventory', itemId), {
-      clave: Math.round(Number(item.clave) || 0),
-      descripcion: boundStr(item.descripcion, 140, 'Insumo'),
-      unidad: boundStr(item.unidad, 20, 'PZA'),
-      categoria: boundStr(item.categoria, 80, 'GENERAL'),
-      costo: Math.max(0, Number(item.costo) || 0),
-      stock: Math.max(0, Number(item.stock) || 0),
-      minStock: Math.max(0, Number(item.minStock) || 0),
-      ownerUid: sanitizeFirestoreId(user.uid, 'usr'),
-      authorizedEmails: ensureEmailList(authorizedEmails),
-      updatedAt: serverTimestamp(),
+    await runTransaction(db, async (tx) => {
+      const existingSnap = await tx.get(itemRef);
+      if (existingSnap.exists()) {
+        throw new Error(`ITEM_EXISTS:Ya existe un insumo registrado con la clave ${item.clave}.`);
+      }
+      tx.set(itemRef, {
+        clave: Math.round(Number(item.clave) || 0),
+        descripcion: boundStr(item.descripcion, 140, 'Insumo'),
+        unidad: boundStr(item.unidad, 20, 'PZA'),
+        categoria: boundStr(item.categoria, 80, 'GENERAL'),
+        costo: Math.max(0, Number(item.costo) || 0),
+        stock: Math.max(0, Number(item.stock) || 0),
+        minStock: Math.max(0, Number(item.minStock) || 0),
+        ownerUid: sanitizeFirestoreId(user.uid, 'usr'),
+        authorizedEmails: ensureEmailList(authorizedEmails),
+        updatedAt: serverTimestamp(),
+      });
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
     });
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith('ITEM_EXISTS:')) {
+      throw error;
+    }
     handleFirestoreError(error, OperationType.CREATE, `inventory/${itemId}`);
   }
 }
@@ -1404,12 +1820,16 @@ export async function fsDeleteInventoryItem(
   auditEntry: AuditLogEntry
 ): Promise<void> {
   const itemId = sanitizeFirestoreId(String(clave), 'inv');
+  const itemRef = doc(db, 'inventory', itemId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
   try {
-    const batch = writeBatch(db);
-    batch.delete(doc(db, 'inventory', itemId));
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(itemRef);
+      if (snap.exists()) {
+        tx.delete(itemRef);
+      }
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `inventory/${itemId}`);
   }
@@ -1438,7 +1858,10 @@ export async function fsSaveInventoryMovement(
   try {
     const finalStock = await runTransaction(db, async (tx) => {
       const snap = await tx.get(itemRef);
-      const liveStock = snap.exists() ? Math.max(0, Number(snap.data().stock) || 0) : Math.max(0, Number(item.stock) || 0);
+      if (!snap.exists()) {
+        throw new Error(`ITEM_NOT_FOUND:El insumo #${item.clave} ya no existe en inventario.`);
+      }
+      const liveStock = Math.max(0, Number(snap.data().stock) || 0);
       const nextStock = movement ? computeNextStock(liveStock) : Math.max(0, Number(item.stock) || liveStock);
 
       const updatePayload: Record<string, unknown> = {
@@ -1473,6 +1896,9 @@ export async function fsSaveInventoryMovement(
     });
     return finalStock;
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith('ITEM_NOT_FOUND:')) {
+      throw error;
+    }
     if (isOfflineTransactionError(error)) {
       try {
         const batch = writeBatch(db);
@@ -1522,6 +1948,9 @@ export async function fsSaveStaffUser(
   auditEntry: AuditLogEntry
 ): Promise<void> {
   const staffId = sanitizeFirestoreId(staffUser.id, 'usr');
+  const staffRef = doc(db, 'staff_users', staffId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+
   try {
     let resolvedPinHash = typeof staffUser.pinHash === 'string' ? staffUser.pinHash.trim() : '';
     let resolvedMustChangePin = Boolean(staffUser.mustChangePin);
@@ -1533,26 +1962,30 @@ export async function fsSaveStaffUser(
       throw new Error('El operador requiere un PIN numérico válido de 4 dígitos.');
     }
 
-    const batch = writeBatch(db);
-    const docData: Record<string, unknown> = {
-      id: staffId,
-      name: boundStr(staffUser.name, 80, 'Personal'),
-      role: staffUser.role,
-      avatar: boundStr(staffUser.avatar, 4, 'OP'),
-      pin: '****',
-      pinHash: boundStr(resolvedPinHash, 180),
-      mustChangePin: resolvedMustChangePin,
-      area: boundStr(staffUser.area, 80, 'Salón'),
-      ownerUid: sanitizeFirestoreId(workspaceOwnerUid || user.uid, 'usr'),
-      authorizedEmails: ensureEmailList(authorizedEmails, staffUser.email),
-    };
-    if (staffUser.email && staffUser.email.trim()) {
-      docData.email = boundStr(staffUser.email.toLowerCase(), 180);
-    }
-    batch.set(doc(db, 'staff_users', staffId), docData);
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
+    await runTransaction(db, async (tx) => {
+      const existingSnap = await tx.get(staffRef);
+      const preservedOwner = existingSnap.exists()
+        ? String(existingSnap.data().ownerUid || workspaceOwnerUid || user.uid)
+        : sanitizeFirestoreId(workspaceOwnerUid || user.uid, 'usr');
+
+      const docData: Record<string, unknown> = {
+        id: staffId,
+        name: boundStr(staffUser.name, 80, 'Personal'),
+        role: staffUser.role,
+        avatar: boundStr(staffUser.avatar, 4, 'OP'),
+        pin: '****',
+        pinHash: boundStr(resolvedPinHash, 180),
+        mustChangePin: resolvedMustChangePin,
+        area: boundStr(staffUser.area, 80, 'Salón'),
+        ownerUid: preservedOwner,
+        authorizedEmails: ensureEmailList(authorizedEmails, staffUser.email),
+      };
+      if (staffUser.email && staffUser.email.trim()) {
+        docData.email = boundStr(staffUser.email.toLowerCase(), 180);
+      }
+      tx.set(staffRef, docData);
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `staff_users/${staffId}`);
   }
@@ -1569,17 +2002,23 @@ export async function fsUpdateStaffPin(
   if (!isValidFourDigitPin(newPin) || isWeakDefaultPin(newPin)) {
     throw new Error('Ingresa un nuevo PIN de 4 dígitos distinto a 0000.');
   }
+  const staffRef = doc(db, 'staff_users', cleanId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+
   try {
     const newHash = await hashPin(newPin);
-    const batch = writeBatch(db);
-    batch.update(doc(db, 'staff_users', cleanId), {
-      pin: '****',
-      pinHash: boundStr(newHash, 180),
-      mustChangePin: false,
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(staffRef);
+      if (!snap.exists()) {
+        throw new Error('Empleado no encontrado en Firestore.');
+      }
+      tx.update(staffRef, {
+        pin: '****',
+        pinHash: boundStr(newHash, 180),
+        mustChangePin: false,
+      });
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
     });
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
     return newHash;
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `staff_users/${cleanId}`);
@@ -1594,12 +2033,17 @@ export async function fsDeleteStaffUser(
   auditEntry: AuditLogEntry
 ): Promise<void> {
   const cleanId = sanitizeFirestoreId(staffId, 'usr');
+  const staffRef = doc(db, 'staff_users', cleanId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+
   try {
-    const batch = writeBatch(db);
-    batch.delete(doc(db, 'staff_users', cleanId));
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(staffRef);
+      if (snap.exists()) {
+        tx.delete(staffRef);
+      }
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `staff_users/${cleanId}`);
   }
@@ -1612,14 +2056,22 @@ export async function fsUpdatePosPermissionsAndEmails(
   auditEntry: AuditLogEntry
 ): Promise<void> {
   const emails = ensureEmailList(nextEmails);
+  const cfgRef = doc(db, 'pos_config', 'main');
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+
   try {
-    await updateDoc(doc(db, 'pos_config', 'main'), {
-      permissions: nextPermissions,
-      authorizedEmails: emails,
-      updatedAt: serverTimestamp(),
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(cfgRef);
+      if (!snap.exists()) {
+        throw new Error('Configuración POS no inicializada en Firestore.');
+      }
+      tx.update(cfgRef, {
+        permissions: nextPermissions,
+        authorizedEmails: emails,
+        updatedAt: serverTimestamp(),
+      });
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, emails));
     });
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    await setDoc(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, emails));
 
     // Propagate authorizedEmails to workspace collections so newly authorized operators can list them
     const callerEmail = (user.email || '').toLowerCase();
@@ -1627,8 +2079,8 @@ export async function fsUpdatePosPermissionsAndEmails(
     const colsToSync = ['orders', 'sales', 'shifts', 'inventory', 'staff_users', 'staff_clock', 'pos_terminals'] as const;
     for (const colName of colsToSync) {
       const colQ = isBootstrap
-        ? collection(db, colName)
-        : query(collection(db, colName), where('authorizedEmails', 'array-contains', callerEmail));
+        ? query(collection(db, colName), limit(500))
+        : query(collection(db, colName), where('authorizedEmails', 'array-contains', callerEmail), limit(500));
       const snap = await getDocs(colQ);
       if (snap.empty) continue;
       for (let i = 0; i < snap.docs.length; i += 400) {
@@ -1655,8 +2107,13 @@ export async function fsRecordAudit(
   authorizedEmails: string[]
 ): Promise<void> {
   const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+  const audRef = doc(db, 'audit_logs', audId);
   try {
-    await setDoc(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    await runTransaction(db, async (tx) => {
+      const existing = await tx.get(audRef);
+      if (existing.exists()) return;
+      tx.set(audRef, buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `audit_logs/${audId}`);
   }
@@ -1670,28 +2127,35 @@ export async function fsSaveTimeClock(
   auditEntry: AuditLogEntry
 ): Promise<void> {
   const clkId = sanitizeFirestoreId(record.id, 'clk');
+  const clkRef = doc(db, 'staff_clock', clkId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+
   try {
-    const batch = writeBatch(db);
-    if (isNew) {
-      batch.set(doc(db, 'staff_clock', clkId), {
-        id: clkId,
-        userId: sanitizeFirestoreId(record.userId, 'usr'),
-        userName: boundStr(record.userName, 80, 'Empleado'),
-        role: boundStr(record.role, 30, 'mesero'),
-        clockIn: serverTimestamp(),
-        status: 'activo',
-        ownerUid: sanitizeFirestoreId(user.uid, 'usr'),
-        authorizedEmails: ensureEmailList(authorizedEmails),
-      });
-    } else {
-      batch.update(doc(db, 'staff_clock', clkId), {
-        clockOut: serverTimestamp(),
-        status: 'finalizado',
-      });
-    }
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(clkRef);
+      if (isNew) {
+        if (snap.exists()) return;
+        tx.set(clkRef, {
+          id: clkId,
+          userId: sanitizeFirestoreId(record.userId, 'usr'),
+          userName: boundStr(record.userName, 80, 'Empleado'),
+          role: boundStr(record.role, 30, 'mesero'),
+          clockIn: serverTimestamp(),
+          status: 'activo',
+          ownerUid: sanitizeFirestoreId(user.uid, 'usr'),
+          authorizedEmails: ensureEmailList(authorizedEmails),
+        });
+      } else {
+        if (!snap.exists() || snap.data().status === 'finalizado') {
+          return;
+        }
+        tx.update(clkRef, {
+          clockOut: serverTimestamp(),
+          status: 'finalizado',
+        });
+      }
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    });
   } catch (error) {
     handleFirestoreError(error, isNew ? OperationType.CREATE : OperationType.UPDATE, `staff_clock/${clkId}`);
   }
@@ -1703,21 +2167,27 @@ export async function fsUpdateRestaurantConfig(
   authorizedEmails: string[],
   auditEntry: AuditLogEntry
 ): Promise<void> {
+  const cfgRef = doc(db, 'pos_config', 'main');
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+
   try {
-    const batch = writeBatch(db);
-    batch.update(doc(db, 'pos_config', 'main'), {
-      name: boundStr(config.name, 80, 'Barbachu'),
-      tagline: boundStr(config.tagline, 120, 'Restaurante Bar'),
-      address: boundStr(config.address, 200),
-      phone: boundStr(config.phone, 40),
-      receiptFooter: boundStr(config.receiptFooter, 160, '¡Gracias por su preferencia!'),
-      suggestedTipPct: Math.min(30, Math.max(0, Math.round(Number(config.suggestedTipPct) || 0))),
-      autoLockMinutes: Math.min(120, Math.max(0, Math.round(Number(config.autoLockMinutes) || 0))),
-      updatedAt: serverTimestamp(),
+    await runTransaction(db, async (tx) => {
+      const cfgSnap = await tx.get(cfgRef);
+      if (!cfgSnap.exists()) {
+        throw new Error('Configuración del restaurante no encontrada en Firestore.');
+      }
+      tx.update(cfgRef, {
+        name: boundStr(config.name, 80, 'Barbachu'),
+        tagline: boundStr(config.tagline, 120, 'Restaurante Bar'),
+        address: boundStr(config.address, 200),
+        phone: boundStr(config.phone, 40),
+        receiptFooter: boundStr(config.receiptFooter, 160, '¡Gracias por su preferencia!'),
+        suggestedTipPct: Math.min(30, Math.max(0, Math.round(Number(config.suggestedTipPct) || 0))),
+        autoLockMinutes: Math.min(120, Math.max(0, Math.round(Number(config.autoLockMinutes) || 0))),
+        updatedAt: serverTimestamp(),
+      });
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
     });
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, 'pos_config/main');
   }
@@ -1889,8 +2359,8 @@ export async function fsCleanupDemoData(
 
   try {
     if (options.removeLegacyUsers) {
-      const staffSnap = await getDocs(collection(db, 'staff_users'));
-      const clockSnap = await getDocs(collection(db, 'staff_clock'));
+      const staffSnap = await getDocs(query(collection(db, 'staff_users'), limit(500)));
+      const clockSnap = await getDocs(query(collection(db, 'staff_clock'), limit(500)));
       const deleteRefs = [];
       for (const d of staffSnap.docs) {
         if (legacyStaffIds.has(d.id)) {
@@ -1914,7 +2384,7 @@ export async function fsCleanupDemoData(
     }
 
     if (options.resetInventoryStock) {
-      const invSnap = await getDocs(collection(db, 'inventory'));
+      const invSnap = await getDocs(query(collection(db, 'inventory'), limit(500)));
       const docs = invSnap.docs;
       for (let i = 0; i < docs.length; i += 400) {
         const batch = writeBatch(db);
@@ -1929,7 +2399,7 @@ export async function fsCleanupDemoData(
     if (options.resetShiftAndTestOrders) {
       const cols = ['orders', 'sales', 'shifts'] as const;
       for (const colName of cols) {
-        const snap = await getDocs(collection(db, colName));
+        const snap = await getDocs(query(collection(db, colName), limit(500)));
         for (let i = 0; i < snap.docs.length; i += 400) {
           const batch = writeBatch(db);
           for (const d of snap.docs.slice(i, i + 400)) {
@@ -1942,34 +2412,40 @@ export async function fsCleanupDemoData(
 
       const freshShift = createInitialShift(0);
       const shiftId = sanitizeFirestoreId(freshShift.id, 'TURNO');
-      const batch = writeBatch(db);
-      batch.set(doc(db, 'shifts', shiftId), {
-        id: shiftId,
-        initialCashCents: 0,
-        isOpen: true,
-        openedAt: serverTimestamp(),
-        cashSalesCents: 0,
-        cardSalesCents: 0,
-        transferSalesCents: 0,
-        totalSalesCents: 0,
-        expectedCashCents: 0,
-        retirosCents: 0,
-        depositosCents: 0,
-        ownerUid: sanitizeFirestoreId(user.uid, 'adm'),
-        authorizedEmails: ensureEmailList(authorizedEmails),
+      await runTransaction(db, async (tx) => {
+        tx.set(doc(db, 'shifts', shiftId), {
+          id: shiftId,
+          initialCashCents: 0,
+          isOpen: true,
+          openedAt: serverTimestamp(),
+          cashSalesCents: 0,
+          cardSalesCents: 0,
+          transferSalesCents: 0,
+          totalSalesCents: 0,
+          expectedCashCents: 0,
+          retirosCents: 0,
+          depositosCents: 0,
+          ownerUid: sanitizeFirestoreId(user.uid, 'adm'),
+          authorizedEmails: ensureEmailList(authorizedEmails),
+        });
+        tx.update(doc(db, 'pos_config', 'main'), {
+          nextOrderNumber: 1,
+          nextReceiptNumber: 1,
+          phone: '',
+          whatsappNumber: '',
+          updatedAt: serverTimestamp(),
+        });
       });
-      batch.update(doc(db, 'pos_config', 'main'), {
-        nextOrderNumber: 1,
-        nextReceiptNumber: 1,
-        phone: '',
-        whatsappNumber: '',
-        updatedAt: serverTimestamp(),
-      });
-      await batch.commit();
     }
 
     const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    await setDoc(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    const audRef = doc(db, 'audit_logs', audId);
+    await runTransaction(db, async (tx) => {
+      const existing = await tx.get(audRef);
+      if (!existing.exists()) {
+        tx.set(audRef, buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+      }
+    });
     return { removedStaff, resetInventory, resetOrdersAndSales };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'workspace/cleanup');
@@ -1997,8 +2473,12 @@ export async function fsFetchStaffUsersSnapshot(user: User, _isAdmin: boolean): 
     const callerEmail = (user.email || '').toLowerCase();
     const isBootstrap = Boolean(user.emailVerified && callerEmail === BOOTSTRAPPED_ADMIN_EMAIL);
     const staffQ = isBootstrap
-      ? collection(db, 'staff_users')
-      : query(collection(db, 'staff_users'), where('authorizedEmails', 'array-contains', callerEmail));
+      ? query(collection(db, 'staff_users'), limit(WORKSPACE_PAGE_LIMITS.staffUsers))
+      : query(
+          collection(db, 'staff_users'),
+          where('authorizedEmails', 'array-contains', callerEmail),
+          limit(WORKSPACE_PAGE_LIMITS.staffUsers)
+        );
     const snap = await getDocs(staffQ);
     return snap.docs.map((d) => mapStaffDocToPosUser(d.id, d.data()));
   } catch (error) {
@@ -2057,7 +2537,13 @@ export async function fsVerifyEmployeePinFromFirestore(
     };
 
     const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    await setDoc(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    const audRef = doc(db, 'audit_logs', audId);
+    await runTransaction(db, async (tx) => {
+      const audSnap = await tx.get(audRef);
+      if (!audSnap.exists()) {
+        tx.set(audRef, buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+      }
+    });
 
     return { ok: true, user: verifiedUser };
   } catch (error) {
@@ -2080,11 +2566,12 @@ export async function fsVerifyAnyAdminPinFromFirestore(
     const callerEmail = (user.email || '').toLowerCase();
     const isBootstrap = Boolean(user.emailVerified && callerEmail === BOOTSTRAPPED_ADMIN_EMAIL);
     const q = isBootstrap
-      ? query(collection(db, 'staff_users'), where('role', '==', 'admin'))
+      ? query(collection(db, 'staff_users'), where('role', '==', 'admin'), limit(25))
       : query(
           collection(db, 'staff_users'),
           where('role', '==', 'admin'),
-          where('authorizedEmails', 'array-contains', callerEmail)
+          where('authorizedEmails', 'array-contains', callerEmail),
+          limit(25)
         );
     const snap = await getDocs(q);
     for (const d of snap.docs) {
@@ -2108,7 +2595,13 @@ export async function fsVerifyAnyAdminPinFromFirestore(
           detail: `${verifiedAdmin.name} desbloqueó módulo administrativo`,
         };
         const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-        await setDoc(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+        const audRef = doc(db, 'audit_logs', audId);
+        await runTransaction(db, async (tx) => {
+          const audSnap = await tx.get(audRef);
+          if (!audSnap.exists()) {
+            tx.set(audRef, buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+          }
+        });
         return { ok: true, user: verifiedAdmin };
       }
     }
@@ -2157,26 +2650,28 @@ export async function upsertTerminalHeartbeat(
     }
     const terminalRef = doc(db, 'pos_terminals', cleanId);
     try {
-      const existingSnap = await getDoc(terminalRef);
-      const ownerUid = existingSnap.exists()
-        ? String(existingSnap.data().ownerUid || user.uid)
-        : sanitizeFirestoreId(user.uid, 'usr');
+      await runTransaction(db, async (tx) => {
+        const existingSnap = await tx.get(terminalRef);
+        const ownerUid = existingSnap.exists()
+          ? String(existingSnap.data().ownerUid || user.uid)
+          : sanitizeFirestoreId(user.uid, 'usr');
 
-      await setDoc(terminalRef, {
-        deviceId: cleanId,
-        station: params.station,
-        stationName: boundStr(params.stationName, 80, 'Terminal POS'),
-        staffName: boundStr(params.staffName, 80, 'En espera de PIN'),
-        staffRole: ['admin', 'caja', 'mesero', 'cocina'].includes(params.staffRole)
-          ? params.staffRole
-          : 'mesero',
-        operatorEmail: boundStr((user.email || '').toLowerCase(), 180, ''),
-        online: Boolean(params.online),
-        platform: boundStr(params.platform, 60, 'Web Terminal'),
-        ownerUid,
-        authorizedEmails: emails,
-        lastSeenAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        tx.set(terminalRef, {
+          deviceId: cleanId,
+          station: params.station,
+          stationName: boundStr(params.stationName, 80, 'Terminal POS'),
+          staffName: boundStr(params.staffName, 80, 'En espera de PIN'),
+          staffRole: ['admin', 'caja', 'mesero', 'cocina'].includes(params.staffRole)
+            ? params.staffRole
+            : 'mesero',
+          operatorEmail: boundStr((user.email || '').toLowerCase(), 180, ''),
+          online: Boolean(params.online),
+          platform: boundStr(params.platform, 60, 'Web Terminal'),
+          ownerUid,
+          authorizedEmails: emails,
+          lastSeenAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
       });
       lastHeartbeatByDevice.set(cleanId, { fingerprint, sentAt: Date.now() });
     } catch {
@@ -2200,42 +2695,72 @@ export function subscribeTerminalSessions(
   const email = (user.email || '').toLowerCase();
   const isBootstrapAdmin = Boolean(user.emailVerified && email === BOOTSTRAPPED_ADMIN_EMAIL);
   const colRef = collection(db, 'pos_terminals');
-  const q = isBootstrapAdmin
-    ? query(colRef, orderBy('lastSeenAt', 'desc'), limit(30))
-    : query(colRef, where('authorizedEmails', 'array-contains', email), limit(30));
+  let disposed = false;
+  let fallbackUnsub: (() => void) | null = null;
 
-  return onSnapshot(
-    q,
+  const mapTerminals = (docs: QueryDocumentSnapshot<DocumentData>[]): TerminalSession[] =>
+    docs
+      .map((d) => {
+        const x = d.data();
+        return {
+          deviceId: String(x.deviceId || d.id),
+          station: (x.station as DeviceStation) || 'todos',
+          stationName: String(x.stationName || 'Terminal POS'),
+          staffName: String(x.staffName || 'Operador'),
+          staffRole: (x.staffRole as UserRole) || 'mesero',
+          operatorEmail: String(x.operatorEmail || ''),
+          online: Boolean(x.online),
+          platform: String(x.platform || 'Web'),
+          lastSeenAt: tsToIso(x.lastSeenAt),
+          updatedAt: tsToIso(x.updatedAt),
+        };
+      })
+      .sort((a, b) => Date.parse(b.lastSeenAt || '') - Date.parse(a.lastSeenAt || ''));
+
+  const primaryQuery = isBootstrapAdmin
+    ? query(colRef, orderBy('lastSeenAt', 'desc'), limit(WORKSPACE_PAGE_LIMITS.terminals))
+    : query(
+        colRef,
+        where('authorizedEmails', 'array-contains', email),
+        orderBy('lastSeenAt', 'desc'),
+        limit(WORKSPACE_PAGE_LIMITS.terminals)
+      );
+
+  const primaryUnsub = onSnapshot(
+    primaryQuery,
     (snap) => {
-      const list: TerminalSession[] = snap.docs
-        .map((d) => {
-          const x = d.data();
-          return {
-            deviceId: String(x.deviceId || d.id),
-            station: (x.station as DeviceStation) || 'todos',
-            stationName: String(x.stationName || 'Terminal POS'),
-            staffName: String(x.staffName || 'Operador'),
-            staffRole: (x.staffRole as UserRole) || 'mesero',
-            operatorEmail: String(x.operatorEmail || ''),
-            online: Boolean(x.online),
-            platform: String(x.platform || 'Web'),
-            lastSeenAt: tsToIso(x.lastSeenAt),
-            updatedAt: tsToIso(x.updatedAt),
-          };
-        })
-        .sort((a, b) => Date.parse(b.lastSeenAt || '') - Date.parse(a.lastSeenAt || ''));
-      onTerminals(list);
+      onTerminals(mapTerminals(snap.docs));
     },
-    () => {
-      // Non-fatal fallback if index or rules still warming
+    (err) => {
+      if (isMissingIndexError(err) && !disposed && !fallbackUnsub && !isBootstrapAdmin) {
+        fallbackUnsub = onSnapshot(
+          query(colRef, where('authorizedEmails', 'array-contains', email), limit(WORKSPACE_PAGE_LIMITS.terminals)),
+          (snap) => {
+            onTerminals(mapTerminals(snap.docs));
+          },
+          () => undefined
+        );
+      }
     }
   );
+
+  return () => {
+    disposed = true;
+    primaryUnsub();
+    if (fallbackUnsub) fallbackUnsub();
+  };
 }
 
 export async function deleteTerminalSession(deviceId: string): Promise<void> {
   const cleanId = sanitizeFirestoreId(deviceId, 'term').slice(0, 64);
+  const termRef = doc(db, 'pos_terminals', cleanId);
   try {
-    await deleteDoc(doc(db, 'pos_terminals', cleanId));
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(termRef);
+      if (snap.exists()) {
+        tx.delete(termRef);
+      }
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `pos_terminals/${cleanId}`);
   }

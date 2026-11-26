@@ -1,11 +1,10 @@
-import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef, lazy, Suspense } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { onAuthStateChanged, type User } from 'firebase/auth';
+import type { DocumentData, QueryDocumentSnapshot } from 'firebase/firestore';
 import {
   AlertTriangle,
-  ArrowDownCircle,
   ArrowRightLeft,
-  ArrowUpCircle,
   Ban,
   BarChart3,
   BookOpen,
@@ -41,16 +40,10 @@ import {
   FullPosState,
   Order,
   OrderItem,
-  OrderItemModifier,
-  OrderStatus,
-  PaymentMethod,
-  Priority,
   Sale,
   ServiceType,
   SoftProduct,
-  InventoryItem,
   AuditLogEntry,
-  ItemStatus,
   DeviceStation,
   TerminalSession,
 } from '../types';
@@ -68,6 +61,16 @@ import { IosPinPadModal } from './IosPinPadModal';
 import { DeviceSyncModal } from './DeviceSyncModal';
 import { PWAInstallButton } from './PwaControls';
 import { useOnlineStatus } from '../hooks/usePwaStatus';
+import {
+  useModifiers,
+  ModifierOption,
+  QUICK_ITEM_MODIFIERS,
+} from '../hooks/useModifiers';
+import { useOrderManager } from '../hooks/useOrderManager';
+import { useInventory } from '../hooks/useInventory';
+import { TableMap } from './TableMap';
+import { KitchenView } from './KitchenView';
+import { CashierView } from './CashierView';
 const PosAnalyticsDashboard = lazy(() => import('./PosAnalyticsDashboard').then(m => ({ default: m.PosAnalyticsDashboard })));
 const PosDashboardPanel = lazy(() => import('./PosDashboardPanel').then(m => ({ default: m.PosDashboardPanel })));
 const InventoryManagementView = lazy(() => import('./InventoryManagementView').then(m => ({ default: m.InventoryManagementView })));
@@ -80,21 +83,12 @@ import {
   testConnection,
 } from '../lib/firebase';
 import { isFirestoreInternalAssertionError } from '../utils/firestoreRecovery';
+import { mergePaginatedRecords } from '../utils/firestoreQueries';
 import {
   bootstrapWorkspace,
   deleteTerminalSession,
   ensureEmailList,
-  fsCancelOrder,
-  fsCloseAndPayOrder,
-  fsCloseShift,
-  fsMergeOrders,
-  fsOpenNewShift,
-  fsRecordAudit,
-  fsRecordCashDrawerMovement,
-  fsSaveInventoryMovement,
-  fsSaveOrder,
-  fsSplitOrder,
-  fsUpdateOrder,
+  fsFetchSalesPage,
   fsUpdateStaffPin,
   fsVerifyAnyAdminPinFromFirestore,
   subscribeFirestoreSyncPulse,
@@ -103,30 +97,20 @@ import {
   upsertTerminalHeartbeat,
 } from '../lib/firestoreSync';
 import {
-  canActOnItem,
-  canTransitionItemStatus,
   classifyProductStation,
-  closeAndPayOrder,
-  computeOrderStatusFromItems,
-  createOrUpdateOrder,
-  hasUnservedItems,
   lineTotalCents,
   locationLabel,
   locationOptions,
-  mergeOrdersIntoTarget,
   modifiersTotalCents,
-  nextItemStatus,
   printPreCheckText,
   printReceiptText,
   serviceName,
-  splitOrderItemByTarget,
   subtotalCents,
   totalCents,
   uid,
   unitTotalCents,
 } from '../core';
 import {
-  createInitialShift,
   DEFAULT_PERMISSIONS,
   DEVICE_STATION_NAMES,
   detectDevicePlatformLabel,
@@ -144,16 +128,8 @@ import {
   MainCatalogCategory,
 } from '../utils/catalogHierarchy';
 
-const QUICK_ITEM_MODIFIERS = [
-  'Sin cebolla',
-  'Sin picante',
-  'Salsa aparte',
-  'Bien cocido',
-  'Con hielo',
-  'Sin hielo',
-  'Extra limón',
-  'Para llevar',
-];
+export { useModifiers };
+export type { ModifierOption };
 
 function formatElapsedTime(createdAt: string, nowMs: number): string {
   const start = new Date(createdAt).getTime();
@@ -163,111 +139,6 @@ function formatElapsedTime(createdAt: string, nowMs: number): string {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   return `${h}h ${m}m`;
-}
-
-function formatActionErr(err: unknown, fallback = 'Sin permisos'): string {
-  const raw = err instanceof Error ? err.message : fallback;
-  return raw.replace(
-    /^(ORDER_CLOSED|ALREADY_PAID|SHIFT_CLOSED|SHIFT_ALREADY_CLOSED|SHIFT_NOT_FOUND|INSUFFICIENT_CASH):/,
-    ''
-  );
-}
-
-export interface ModifierOption {
-  id: string;
-  name: string;
-  priceCents: number;
-}
-
-const DEFAULT_MODIFIER_OPTIONS: ModifierOption[] = [
-  { id: 'sin_cebolla', name: 'Sin cebolla', priceCents: 0 },
-  { id: 'sin_tomate', name: 'Sin tomate', priceCents: 0 },
-  { id: 'sin_chile', name: 'Sin chile', priceCents: 0 },
-  { id: 'sin_mayonesa', name: 'Sin mayonesa', priceCents: 0 },
-  { id: 'salsa_aparte', name: 'Salsa aparte', priceCents: 0 },
-  { id: 'para_llevar', name: 'Para llevar', priceCents: 0 },
-  { id: 'extra_queso', name: 'Extra queso', priceCents: 1500 },
-  { id: 'tocino_extra', name: 'Tocino extra', priceCents: 2000 },
-  { id: 'aguacate_extra', name: 'Aguacate extra', priceCents: 2500 },
-  { id: 'carne_extra', name: 'Carne extra', priceCents: 3500 },
-  { id: 'termino_medio', name: 'Término: Medio', priceCents: 0 },
-  { id: 'termino_3_4', name: 'Término: Tres cuartos', priceCents: 0 },
-  { id: 'termino_bien', name: 'Término: Bien cocido', priceCents: 0 },
-];
-
-export function useModifiers(initialModifiers: ModifierOption[] = DEFAULT_MODIFIER_OPTIONS) {
-  const [modifiers, setModifiers] = useState<ModifierOption[]>(initialModifiers);
-
-  const addCustomModifier = (rawName: string, pricePesos: number): { id: string; error?: string } => {
-    const cleanName = rawName.trim().slice(0, 50);
-    if (!cleanName) {
-      return { id: '', error: 'Escribe el nombre del modificador o extra.' };
-    }
-    const safePesos = Number.isFinite(pricePesos) ? Math.max(0, pricePesos) : 0;
-    const priceCents = Math.round(safePesos * 100);
-
-    const existing = modifiers.find((m) => m.name.toLowerCase() === cleanName.toLowerCase());
-    if (existing) {
-      if (existing.priceCents !== priceCents) {
-        setModifiers((prev) =>
-          prev.map((m) => (m.id === existing.id ? { ...m, priceCents } : m))
-        );
-      }
-      return { id: existing.id };
-    }
-
-    const slug = cleanName
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9]+/g, '_')
-      .replace(/^_|_$/g, '');
-    const id = `custom_${slug || 'extra'}_${Date.now().toString(36)}`;
-    setModifiers((prev) => [...prev, { id, name: cleanName, priceCents }]);
-    return { id };
-  };
-
-  const calculateModifierTotal = (selected: Record<string, boolean>): number => {
-    return modifiers
-      .filter((m) => selected[m.id])
-      .reduce((sum, m) => sum + m.priceCents, 0);
-  };
-
-  const getModifiersArray = (selected: Record<string, boolean>): OrderItemModifier[] => {
-    return modifiers
-      .filter((m) => selected[m.id])
-      .map((m) => ({ name: m.name, priceCents: m.priceCents }));
-  };
-
-  const buildSelectionFromItem = (item: OrderItem): Record<string, boolean> => {
-    const itemMods = item.modifiers || item.modificadores || [];
-    const selectedMap: Record<string, boolean> = {};
-    const missingMods: ModifierOption[] = [];
-
-    for (const mod of itemMods) {
-      const existing = modifiers.find((m) => m.name.toLowerCase() === mod.name.toLowerCase());
-      if (existing) {
-        selectedMap[existing.id] = true;
-      } else {
-        const customId = `custom_loaded_${mod.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${missingMods.length}`;
-        missingMods.push({ id: customId, name: mod.name, priceCents: mod.priceCents || 0 });
-        selectedMap[customId] = true;
-      }
-    }
-
-    if (missingMods.length > 0) {
-      setModifiers((prev) => [...prev, ...missingMods]);
-    }
-    return selectedMap;
-  };
-
-  return {
-    modifiers,
-    addCustomModifier,
-    calculateModifierTotal,
-    getModifiersArray,
-    buildSelectionFromItem,
-  };
 }
 
 interface PosViewProps {
@@ -293,15 +164,14 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [state, setState] = useState<FullPosState>(() => loadPosState());
   const [view, setView] = useState<PosViewRoute>('dashboard');
 
-  // POS Order Draft state
-  const [currentService, setCurrentService] = useState<ServiceType>('mesa');
-  const [currentTable, setCurrentTable] = useState<string>('1');
-  const [currentOrderId, setCurrentOrderId] = useState<string | null>(null);
-  const [cart, setCart] = useState<OrderItem[]>([]);
-  const [waiter, setWaiter] = useState<string>(() => state.activeUser?.name || 'Operador');
-  const [generalNote, setGeneralNote] = useState<string>('');
-  const [priority, setPriority] = useState<Priority>('normal');
-  const [deliveryData, setDeliveryData] = useState({ name: '', phone: '', address: '', reference: '' });
+  // Sales pagination refs/state
+  const salesNextCursorRef = useRef<QueryDocumentSnapshot<DocumentData> | null>(null);
+  const olderSalesRef = useRef<Sale[]>([]);
+  const hasLoadedExtraSalesRef = useRef<boolean>(false);
+  const [hasMoreSales, setHasMoreSales] = useState<boolean>(false);
+  const [loadingMoreSales, setLoadingMoreSales] = useState<boolean>(false);
+
+  // Modifiers Modal UI State
   const [modifierModalProduct, setModifierModalProduct] = useState<SoftProduct | null>(null);
   const [selectedModifiers, setSelectedModifiers] = useState<Record<string, boolean>>({});
   const [editingCartItemIndex, setEditingCartItemIndex] = useState<number | null>(null);
@@ -318,30 +188,6 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     buildSelectionFromItem,
   } = useModifiers();
 
-  const handleOpenNewProductModifiers = (prod: SoftProduct) => {
-    if (!activePerms?.canTakeOrders && !isAdminRole) {
-      notify(`Tu rol (${activeRole.toUpperCase()}) no tiene permiso para tomar comandas.`);
-      return;
-    }
-    if (!prod.saleEnabled) {
-      notify(`El producto "${prod.name}" tiene precio pendiente.`);
-      return;
-    }
-    setSelectedModifiers({});
-    setCustomModName('');
-    setCustomModPrice('0');
-    setCustomModError('');
-    setModifierModalProduct(prod);
-  };
-
-  const handleOpenCartItemModifiers = (item: OrderItem, idx: number) => {
-    setEditingCartItemIndex(idx);
-    setCustomModName('');
-    setCustomModPrice('0');
-    setCustomModError('');
-    setEditingItemModifiers(buildSelectionFromItem(item));
-  };
-
   // Hierarchical Filtering & Search (Categoría -> Subcategoría -> Grupo)
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedMainCategory, setSelectedMainCategory] = useState<MainCatalogCategory>('Alimentos');
@@ -350,33 +196,11 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [posStationFilter, setPosStationFilter] = useState<'todas' | 'cocina' | 'barra'>('todas');
   const [kitchenStation, setKitchenStation] = useState<'todas' | 'cocina' | 'barra'>('todas');
 
-  // Mapa de Mesas iOS Filters & Quick-Action Sheet
-  const [tableZoneFilter, setTableZoneFilter] = useState<'todas' | ServiceType>('todas');
-  const [tableStatusFilter, setTableStatusFilter] = useState<'todas' | 'free' | 'busy' | 'ready'>('todas');
-  const [tableSearch, setTableSearch] = useState<string>('');
-  const [tableSheetLoc, setTableSheetLoc] = useState<{
-    service: ServiceType;
-    loc: string;
-    label: string;
-    section: string;
-  } | null>(null);
-
   // Live Clock for Table Stay Timers
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
-  // Cashier State
+  // Selected order in Cashier View
   const [payOrderId, setPayOrderId] = useState<string>('');
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('efectivo');
-  const [cashTendered, setCashTendered] = useState<string>('');
-  const [mixedCashInput, setMixedCashInput] = useState<string>('');
-  const [physicalCashCount, setPhysicalCashCount] = useState<string>('');
-  const [openingCashInput, setOpeningCashInput] = useState<string>('0');
-  const [confirmUnservedPay, setConfirmUnservedPay] = useState<boolean>(false);
-
-  // Cash Drawer Movement Modal
-  const [drawerModalType, setDrawerModalType] = useState<'deposito' | 'retiro' | null>(null);
-  const [drawerAmount, setDrawerAmount] = useState<string>('');
-  const [drawerReason, setDrawerReason] = useState<string>('');
 
   // Modals & Receipts
   const [activeReceiptSale, setActiveReceiptSale] = useState<Sale | null>(null);
@@ -388,25 +212,6 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [itemNoteModal, setItemNoteModal] = useState<{ targetId: string; name: string } | null>(null);
   const [itemNoteValue, setItemNoteValue] = useState<string>('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-
-  // Transfer / Merge Table Modal
-  const [moveTableModalOpen, setMoveTableModalOpen] = useState<boolean>(false);
-  const [moveTargetService, setMoveTargetService] = useState<ServiceType>('mesa');
-  const [moveTargetLocation, setMoveTargetLocation] = useState<string>('1');
-
-  // Inventory Modal
-  const [inventoryModal, setInventoryModal] = useState<{ clave: number; descripcion: string; type: 'entrada' | 'ajuste' | 'merma' | 'minStock' } | null>(null);
-  const [invQty, setInvQty] = useState<string>('');
-  const [invCost, setInvCost] = useState<string>('');
-  const [invReason, setInvReason] = useState<string>('');
-  const [pendingInvMermaAuth, setPendingInvMermaAuth] = useState<{
-    clave: number;
-    descripcion: string;
-    type: 'merma' | 'ajuste';
-    qtyNum: number;
-    costNum: number;
-    reasonText: string;
-  } | null>(null);
 
   // Employee PIN Auth & Session Lock State (verified against Firestore staff_users)
   const [employeeAuthenticated, setEmployeeAuthenticated] = useState<boolean>(false);
@@ -422,13 +227,6 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   // New Feature & Navigation States
   const [isDeviceModalOpen, setIsDeviceModalOpen] = useState<boolean>(false);
   const [isNavDrawerOpen, setIsNavDrawerOpen] = useState<boolean>(false);
-
-  // Keep waiter synced when active user switches (unless editing an open loaded order)
-  useEffect(() => {
-    if (!currentOrderId && state.activeUser?.name) {
-      setWaiter(state.activeUser.name);
-    }
-  }, [state.activeUser?.id, state.activeUser?.name, currentOrderId]);
 
   // 60-second clock tick for table stay timers and topbar time
   useEffect(() => {
@@ -554,7 +352,17 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           },
           onProducts: (products) => setState((prev) => ({ ...prev, products })),
           onOrders: (orders) => setState((prev) => ({ ...prev, orders })),
-          onSales: (sales) => setState((prev) => ({ ...prev, sales })),
+          onSales: (sales, pagination) => {
+            if (pagination && !hasLoadedExtraSalesRef.current) {
+              salesNextCursorRef.current = pagination.nextCursor;
+              setHasMoreSales(pagination.hasMore);
+            }
+            setState((prev) => {
+              const merged = mergePaginatedRecords(sales, olderSalesRef.current, (s) => s.id);
+              merged.sort((a, b) => a.paidAt.localeCompare(b.paidAt));
+              return { ...prev, sales: merged };
+            });
+          },
           onShift: (shift) => setState((prev) => ({ ...prev, shift })),
           onInventory: (inventory) => setState((prev) => ({ ...prev, inventory })),
           onMovements: (inventoryMovements) => setState((prev) => ({ ...prev, inventoryMovements })),
@@ -598,6 +406,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
     return () => {
       active = false;
+      olderSalesRef.current = [];
+      hasLoadedExtraSalesRef.current = false;
+      salesNextCursorRef.current = null;
       if (unsubWorkspace) unsubWorkspace();
       if (unsubTerminals) unsubTerminals();
       if (unsubSyncPulse) unsubSyncPulse();
@@ -668,9 +479,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     authorizedEmailsKey,
   ]);
 
-  const notify = (msg: string) => {
+  const notify = useCallback((msg: string) => {
     setToastMessage(msg);
-  };
+  }, []);
 
   useEffect(() => {
     if (!toastMessage) return;
@@ -697,6 +508,174 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const canCancelOrders = isAdminRole || activePerms.canCancelOrders;
   const canCollectPayment = isAdminRole || activePerms.canCollectPayment;
   const canCashCut = isAdminRole || activePerms.canCashShiftCut;
+
+  // Domain Hooks: Order Lifecycle & Inventory Management
+  const {
+    currentService,
+    setCurrentService,
+    currentTable,
+    setCurrentTable,
+    currentOrderId,
+    setCurrentOrderId,
+    cart,
+    setCart,
+    waiter,
+    setWaiter,
+    generalNote,
+    setGeneralNote,
+    priority,
+    setPriority,
+    deliveryData,
+    setDeliveryData,
+    moveTableModalOpen,
+    setMoveTableModalOpen,
+    moveTargetService,
+    setMoveTargetService,
+    moveTargetLocation,
+    setMoveTargetLocation,
+    openOrders,
+    openOrdersByLocation,
+    currentLocOrders,
+    selectedOrder,
+    cartQtyMap,
+    totalOccupiedTables,
+    loadOrderIntoDraft,
+    startNewAccount,
+    openLocationDraft,
+    handleAddProduct,
+    handleAddProductWithModifiers,
+    handleUpdateQty,
+    handleDecrementProductByKey,
+    handleEditItemNote,
+    handleToggleQuickModifier,
+    handleCancelItem,
+    handleSendOrder,
+    handleAdvanceItemStatus,
+    handleAdvanceOrderStatus,
+    handleSplitOrder,
+    handleMoveTable,
+    handleConfirmMoveTable,
+    handleConfirmMergeOrders,
+    handleCancelAccount,
+    handleApplyDiscount,
+    handleReopenLastSale,
+    handleOpenDraftPreCheck,
+  } = useOrderManager({
+    state,
+    setState,
+    activeRole,
+    activePerms,
+    isAdminRole,
+    canApplyDiscount,
+    canCancelOrders,
+    kitchenStation,
+    firebaseUser,
+    isFirebaseAdmin,
+    authorizedEmails,
+    notify,
+    setView,
+    setModalReason,
+    setPromptModal,
+    setPromptValue,
+    setItemNoteModal,
+    setItemNoteValue,
+    setActivePreCheckOrder,
+  });
+
+  const {
+    lowStockItems,
+    inventoryModal,
+    setInventoryModal,
+    invQty,
+    setInvQty,
+    invCost,
+    setInvCost,
+    invReason,
+    setInvReason,
+    pendingInvMermaAuth,
+    setPendingInvMermaAuth,
+    commitInlineInventoryMovement,
+    handleSaveInventoryMovement,
+  } = useInventory({
+    state,
+    setState,
+    firebaseUser,
+    isFirebaseAdmin,
+    authorizedEmails,
+    notify,
+  });
+
+  const handleOpenNewProductModifiers = useCallback(
+    (prod: SoftProduct) => {
+      if (!activePerms?.canTakeOrders && !isAdminRole) {
+        notify(`Tu rol (${activeRole.toUpperCase()}) no tiene permiso para tomar comandas.`);
+        return;
+      }
+      if (!prod.saleEnabled) {
+        notify(`El producto "${prod.name}" tiene precio pendiente.`);
+        return;
+      }
+      setSelectedModifiers({});
+      setCustomModName('');
+      setCustomModPrice('0');
+      setCustomModError('');
+      setModifierModalProduct(prod);
+    },
+    [activePerms?.canTakeOrders, activeRole, isAdminRole, notify]
+  );
+
+  const handleOpenCartItemModifiers = useCallback(
+    (item: OrderItem, idx: number) => {
+      setEditingCartItemIndex(idx);
+      setCustomModName('');
+      setCustomModPrice('0');
+      setCustomModError('');
+      setEditingItemModifiers(buildSelectionFromItem(item));
+    },
+    [buildSelectionFromItem]
+  );
+
+  const handleClearActiveDraft = useCallback(() => {
+    setCurrentOrderId(null);
+    setCart([]);
+    setGeneralNote('');
+  }, [setCart, setCurrentOrderId, setGeneralNote]);
+
+  const handleGoToCash = useCallback((orderId: string) => {
+    setPayOrderId(orderId);
+    setView('cash');
+  }, []);
+
+  const handleLoadMoreSales = useCallback(async () => {
+    const activeUser = firebaseUserRef.current;
+    if (!activeUser || loadingMoreSales || !hasMoreSales) return;
+    setLoadingMoreSales(true);
+    try {
+      hasLoadedExtraSalesRef.current = true;
+      const page = await fsFetchSalesPage(activeUser, {
+        cursor: salesNextCursorRef.current,
+        pageSize: 50,
+      });
+      salesNextCursorRef.current = page.nextCursor;
+      setHasMoreSales(page.hasMore);
+      if (page.items.length > 0) {
+        olderSalesRef.current = mergePaginatedRecords(
+          olderSalesRef.current,
+          page.items,
+          (s) => s.id
+        );
+        setState((prev) => {
+          const merged = mergePaginatedRecords(prev.sales, page.items, (s) => s.id);
+          merged.sort((a, b) => a.paidAt.localeCompare(b.paidAt));
+          return { ...prev, sales: merged };
+        });
+      }
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'No se pudieron cargar ventas anteriores.');
+    } finally {
+      setLoadingMoreSales(false);
+    }
+  }, [hasMoreSales, loadingMoreSales, notify]);
 
   // Redirect if current active employee role does not allow active view
   useEffect(() => {
@@ -726,18 +705,6 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     canViewReports,
     canViewAdmin,
   ]);
-
-  // Detect external closure/payment of currently loaded order on another terminal
-  useEffect(() => {
-    if (!currentOrderId) return;
-    const found = state.orders.find((o) => o.id === currentOrderId);
-    if (!found || found.status === 'closed') {
-      setCurrentOrderId(null);
-      setCart([]);
-      setGeneralNote('');
-      notify('La cuenta cargada fue cobrada o cerrada en otra terminal.');
-    }
-  }, [state.orders, currentOrderId]);
 
   const catalogModifiers = useMemo(
     () => state.products.filter((p) => p.category === 'MODIFICADORES'),
@@ -819,989 +786,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       .slice(0, 8);
   }, [state.products, state.sales, state.orders]);
 
-  // Fast lookup for quantities already inside current cart
-  const cartQtyMap = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const item of cart) {
-      map.set(item.key, (map.get(item.key) || 0) + item.qty);
-    }
-    return map;
-  }, [cart]);
-
-  // Low stock inventory items (only items with an explicitly configured minStock > 0)
-  const lowStockItems = useMemo(() => {
-    return Object.values(state.inventory).filter((item) => item.minStock > 0 && item.stock <= item.minStock);
-  }, [state.inventory]);
-
-  // Current active orders (not closed)
-  const openOrders = useMemo(() => {
-    return state.orders.filter((o) => o.status !== 'closed');
-  }, [state.orders]);
-
-  // O(1) lookup map for active orders grouped by service::location
-  const openOrdersByLocation = useMemo(() => {
-    const map = new Map<string, Order[]>();
-    for (const o of openOrders) {
-      const key = `${o.service}::${String(o.location)}`;
-      const bucket = map.get(key);
-      if (bucket) {
-        bucket.push(o);
-      } else {
-        map.set(key, [o]);
-      }
-    }
-    return map;
-  }, [openOrders]);
-
-  // Active accounts for current service & location
-  const currentLocOrders = useMemo(() => {
-    return openOrdersByLocation.get(`${currentService}::${String(currentTable)}`) || [];
-  }, [openOrdersByLocation, currentService, currentTable]);
-
-  // Current selected order
-  const selectedOrder = useMemo(() => {
-    return state.orders.find((o) => o.id === currentOrderId && o.status !== 'closed') || null;
-  }, [state.orders, currentOrderId]);
-
-  // Load account into draft
-  const loadOrderIntoDraft = (order: Order) => {
-    setCurrentOrderId(order.id);
-    setCurrentService(order.service);
-    setCurrentTable(order.location);
-    setCart(order.items.map((i) => ({ ...i })));
-    setWaiter(order.waiter);
-    setGeneralNote(order.note || '');
-    setPriority(order.priority || 'normal');
-    if (order.customer) setDeliveryData(order.customer);
-    setView('pos');
-    notify(`Cuenta #${order.number} cargada en ${locationLabel(order.service, order.location)}.`);
-  };
-
-  // Reset cart for a new account
-  const startNewAccount = () => {
-    setCurrentOrderId(null);
-    setCart([]);
-    setWaiter(state.activeUser?.name || 'Operador');
-    setGeneralNote('');
-    setPriority('normal');
-    setDeliveryData({ name: '', phone: '', address: '', reference: '' });
-    notify(`Nueva cuenta preparada en ${locationLabel(currentService, currentTable)}.`);
-  };
-
-  // Add product to cart (respects role permission and creates independent rounds when items already sent/noted)
-  const handleAddProduct = (prod: SoftProduct) => {
-    if (!activePerms?.canTakeOrders && !isAdminRole) {
-      notify(`Tu rol (${activeRole.toUpperCase()}) no tiene permiso para tomar comandas.`);
-      return;
-    }
-    if (!prod.saleEnabled) {
-      notify(`El producto "${prod.name}" tiene precio pendiente.`);
-      return;
-    }
-    const station = prod.station || classifyProductStation(prod.category);
-
-    setCart((prev) => {
-      const idx = prev.findIndex(
-        (i) =>
-          i.key === prod.key &&
-          (i.itemStatus || 'pending') === 'pending' &&
-          !i.note &&
-          !(i.modifiers && i.modifiers.length > 0) &&
-          !(i.modificadores && i.modificadores.length > 0)
-      );
-      if (idx >= 0) {
-        const copy = [...prev];
-        copy[idx] = { ...copy[idx], qty: copy[idx].qty + 1 };
-        return copy;
-      }
-      return [
-        ...prev,
-        {
-          lineId: uid(),
-          key: prod.key,
-          name: prod.name,
-          priceCents: prod.priceCents,
-          qty: 1,
-          note: '',
-          station,
-          itemStatus: 'pending',
-        },
-      ];
-    });
-    notify(`+1 ${prod.name}`);
-  };
-
-  const handleUpdateQty = (targetId: string, delta: number) => {
-    const targetItem = cart.find((i) => (i.lineId || i.key) === targetId);
-    if (!targetItem) return;
-    if (
-      delta < 0 &&
-      targetItem.qty <= 1 &&
-      selectedOrder &&
-      (targetItem.itemStatus || 'pending') !== 'pending'
-    ) {
-      handleCancelItem(targetId);
-      return;
-    }
-    setCart((prev) =>
-      prev
-        .map((i) => ((i.lineId || i.key) === targetId ? { ...i, qty: i.qty + delta } : i))
-        .filter((i) => i.qty > 0)
-    );
-  };
-
-  const handleDecrementProductByKey = (prodKey: string) => {
-    setCart((prev) => {
-      const revIdx = [...prev].reverse().findIndex((i) => i.key === prodKey);
-      if (revIdx < 0) return prev;
-      const realIdx = prev.length - 1 - revIdx;
-      const next = [...prev];
-      const nextQty = next[realIdx].qty - 1;
-      if (nextQty <= 0) {
-        next.splice(realIdx, 1);
-      } else {
-        next[realIdx] = { ...next[realIdx], qty: nextQty };
-      }
-      return next;
-    });
-  };
-
-  const handleEditItemNote = (targetId: string) => {
-    const item = cart.find((i) => (i.lineId || i.key) === targetId);
-    if (!item) return;
-    setItemNoteModal({ targetId: item.lineId || item.key, name: item.name });
-    setItemNoteValue(item.note || '');
-  };
-
-  const handleToggleQuickModifier = (chip: string) => {
-    setItemNoteValue((prev) => {
-      const parts = prev
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const exists = parts.some((p) => p.toLowerCase() === chip.toLowerCase());
-      if (exists) {
-        return parts.filter((p) => p.toLowerCase() !== chip.toLowerCase()).join(', ');
-      }
-      return [...parts, chip].join(', ');
-    });
-  };
-
-  // Cancel item line with reason and immediate Firestore sync
-  const handleCancelItem = (targetId: string) => {
-    const item = cart.find((i) => (i.lineId || i.key) === targetId);
-    if (!item) return;
-    if (!canCancelOrders) {
-      notify('Tu rol no tiene permiso para cancelar productos.');
-      return;
-    }
-    if (selectedOrder && cart.length <= 1) {
-      notify('Es el último producto de una cuenta abierta. Usa "Cancelar Cuenta" para cerrarla con bitácora.');
-      return;
-    }
-
-    setModalReason({
-      title: `Cancelar producto: ${item.name}`,
-      onConfirm: (reason) => {
-        let nextCartSnapshot: OrderItem[] = [];
-        setCart((prev) => {
-          nextCartSnapshot = prev.filter((i) => (i.lineId || i.key) !== targetId);
-          return nextCartSnapshot;
-        });
-        const auditEntry: AuditLogEntry = {
-          id: uid(),
-          at: new Date().toISOString(),
-          user: state.activeUser.name,
-          action: 'Producto cancelado',
-          detail: `${item.qty} × ${item.name} de ${locationLabel(currentService, currentTable)}`,
-          reason,
-        };
-        setState((prev) => ({
-          ...prev,
-          audit: [...prev.audit, auditEntry],
-        }));
-        if (firebaseUser && selectedOrder && nextCartSnapshot.length > 0) {
-          const nextDiscount = Math.min(selectedOrder.discountCents || 0, subtotalCents(nextCartSnapshot));
-          const nextTotal = Math.max(0, subtotalCents(nextCartSnapshot) - nextDiscount);
-          const updatedOrder: Order = {
-            ...selectedOrder,
-            items: nextCartSnapshot,
-            discountCents: nextDiscount,
-            totalCents: nextTotal,
-            updatedAt: new Date().toISOString(),
-          };
-          void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-            notify(`Error actualizando orden en Firestore: ${formatActionErr(err)}`);
-          });
-        } else if (firebaseUser) {
-          void fsRecordAudit(auditEntry, firebaseUser, authorizedEmails).catch((err) => {
-            notify(`Error registrando bitácora en Firestore: ${formatActionErr(err)}`);
-          });
-        }
-        notify('Producto cancelado y registrado en bitácora.');
-      },
-    });
-  };
-
-  // Send Order (syncs atomically to Cloud Firestore)
-  const handleSendOrder = () => {
-    if (cart.length === 0) {
-      notify('Agrega al menos un producto a la cuenta antes de enviar.');
-      return;
-    }
-    if (currentService === 'domicilio' && (!deliveryData.name || !deliveryData.phone || !deliveryData.address)) {
-      notify('Para servicio a domicilio se requiere Nombre, Teléfono y Dirección.');
-      return;
-    }
-
-    const isNew = !currentOrderId;
-    const { nextState, orderId } = createOrUpdateOrder(state, {
-      orderId: currentOrderId,
-      service: currentService,
-      location: currentTable,
-      waiter,
-      note: generalNote,
-      items: cart,
-      customer: currentService === 'domicilio' ? deliveryData : undefined,
-      priority,
-    });
-
-    setState(nextState);
-    setCurrentOrderId(orderId);
-
-    const savedOrder = nextState.orders.find((o) => o.id === orderId);
-    const latestAudit = nextState.audit[nextState.audit.length - 1];
-    if (firebaseUser && savedOrder && latestAudit) {
-      void fsSaveOrder(savedOrder, isNew, firebaseUser, authorizedEmails, latestAudit)
-        .then((assignedNum) => {
-          if (isNew && assignedNum !== savedOrder.number) {
-            setState((prev) => ({
-              ...prev,
-              orders: prev.orders.map((o) => (o.id === orderId ? { ...o, number: assignedNum } : o)),
-              nextOrderNumber: Math.max(prev.nextOrderNumber, assignedNum + 1),
-            }));
-          }
-        })
-        .catch((err) => {
-          notify(`Error guardando comanda en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
-        });
-    }
-    notify(`Comanda guardada y enviada a cocina/barra exitosamente.`);
-  };
-
-  // Advance individual item status in KDS (Fase 2: pending -> preparing -> ready -> served)
-  const handleAdvanceItemStatus = (orderId: string, itemTargetId: string, targetStatus: ItemStatus) => {
-    const order = state.orders.find((o) => o.id === orderId);
-    if (!order) return;
-    const targetItem = order.items.find((i) => (i.lineId || i.key) === itemTargetId);
-    if (!targetItem) return;
-
-    const currentItemStatus: ItemStatus = targetItem.itemStatus || 'pending';
-    const itemStation = targetItem.station || 'cocina';
-
-    if (!canTransitionItemStatus(currentItemStatus, targetStatus)) {
-      notify(`Transición inválida: ${currentItemStatus} → ${targetStatus}.`);
-      return;
-    }
-    if (!canActOnItem(state.activeUser.role, itemStation, targetStatus, state.deviceConfig?.station || 'todos')) {
-      notify(`El rol ${state.activeUser.role.toUpperCase()} / estación ${state.deviceConfig?.station} no puede marcar "${targetStatus}" en ${itemStation.toUpperCase()}.`);
-      return;
-    }
-
-    const now = new Date().toISOString();
-    const updatedItems: OrderItem[] = order.items.map((it) =>
-      (it.lineId || it.key) === itemTargetId ? { ...it, itemStatus: targetStatus } : it
-    );
-    const nextOrderStatus = computeOrderStatusFromItems(updatedItems, order.status);
-    const updatedOrder: Order = {
-      ...order,
-      items: updatedItems,
-      status: nextOrderStatus,
-      updatedAt: now,
-    };
-    const auditEntry: AuditLogEntry = {
-      id: uid(),
-      at: now,
-      user: state.activeUser.name,
-      action: 'Partida KDS actualizada',
-      detail: `Cuenta #${order.number} · ${targetItem.qty}× ${targetItem.name} (${itemStation}) → ${targetStatus.toUpperCase()}`,
-    };
-
-    setState((prev) => ({
-      ...prev,
-      orders: prev.orders.map((o) => (o.id === orderId ? updatedOrder : o)),
-      audit: [...prev.audit, auditEntry],
-    }));
-
-    if (firebaseUser) {
-      void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-        notify(`Error actualizando KDS en Firestore: ${formatActionErr(err)}`);
-      });
-    }
-    notify(`${targetItem.name} → ${targetStatus.toUpperCase()}`);
-  };
-
-  // Advance Kitchen Order Status (advances matching station items cleanly)
-  const handleAdvanceOrderStatus = (orderId: string, currentStatus: OrderStatus) => {
-    const order = state.orders.find((o) => o.id === orderId);
-    if (!order) return;
-    const now = new Date().toISOString();
-    const targetStatus: OrderStatus =
-      currentStatus === 'sent' ? 'preparing' : currentStatus === 'preparing' ? 'ready' : 'served';
-    const itemTarget: ItemStatus =
-      targetStatus === 'preparing' ? 'preparing' : targetStatus === 'ready' ? 'ready' : 'served';
-
-    const updatedItems: OrderItem[] = order.items.map((it) => {
-      const matchesStation = kitchenStation === 'todas' || (it.station || 'cocina') === kitchenStation;
-      const curSt = it.itemStatus || 'pending';
-      if (matchesStation && canTransitionItemStatus(curSt, itemTarget)) {
-        return { ...it, itemStatus: itemTarget };
-      }
-      return it;
-    });
-
-    const computedStatus = computeOrderStatusFromItems(updatedItems, targetStatus);
-    const updatedOrder: Order = {
-      ...order,
-      items: updatedItems,
-      status: computedStatus === order.status ? targetStatus : computedStatus,
-      updatedAt: now,
-    };
-
-    const auditEntry: AuditLogEntry = {
-      id: uid(),
-      at: now,
-      user: state.activeUser.name,
-      action: 'Estado KDS avanzado',
-      detail: `Cuenta #${order.number} (${locationLabel(order.service, order.location)}) pasó a ${updatedOrder.status.toUpperCase()}`,
-    };
-
-    setState((prev) => ({
-      ...prev,
-      orders: prev.orders.map((o) => (o.id === orderId ? updatedOrder : o)),
-      audit: [...prev.audit, auditEntry],
-    }));
-
-    if (firebaseUser) {
-      void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-        notify(`Error KDS Firestore: ${formatActionErr(err)}`);
-      });
-    }
-    notify(`Comanda avanzada a ${updatedOrder.status.toUpperCase()}.`);
-  };
-
-  // Split Order (preserves duplicate keys with different modifiers by matching first/lineId only)
-  const handleSplitOrder = () => {
-    if (!selectedOrder || selectedOrder.items.length < 2) {
-      notify('Se requieren al menos 2 platillos en una cuenta abierta para dividirla.');
-      return;
-    }
-    const itemsSummary = selectedOrder.items
-      .slice(0, 6)
-      .map((i) => `${i.key} (${i.name})`)
-      .join(', ');
-    setPromptModal({
-      title: 'Dividir comanda',
-      label: `Ingresa la CLAVE del platillo a separar (${itemsSummary}):`,
-      defaultValue: selectedOrder.items[0]?.key,
-      onConfirm: (keyVal) => {
-        const now = new Date().toISOString();
-        const splitOrderNum = state.nextOrderNumber;
-        const newSplitId = uid();
-        const splitResult = splitOrderItemByTarget(
-          selectedOrder,
-          keyVal,
-          splitOrderNum,
-          newSplitId,
-          now
-        );
-        if (!splitResult) {
-          notify('Clave no encontrada en esta comanda.');
-          return;
-        }
-        const { updatedOriginal, splitOrder, movedItem } = splitResult;
-
-        const auditEntry: AuditLogEntry = {
-          id: uid(),
-          at: now,
-          user: state.activeUser.name,
-          action: 'Cuenta dividida',
-          detail: `Producto ${movedItem.name} movido de Cuenta #${selectedOrder.number} a nueva Cuenta #${splitOrderNum}`,
-        };
-
-        setState((prev) => ({
-          ...prev,
-          orders: [...prev.orders.filter((o) => o.id !== selectedOrder.id), updatedOriginal, splitOrder],
-          nextOrderNumber: splitOrderNum + 1,
-          audit: [...prev.audit, auditEntry],
-        }));
-
-        if (firebaseUser) {
-          void fsSplitOrder(updatedOriginal, splitOrder, firebaseUser, authorizedEmails, auditEntry)
-            .then((assignedNum) => {
-              if (assignedNum !== splitOrder.number) {
-                setState((prev) => ({
-                  ...prev,
-                  orders: prev.orders.map((o) => (o.id === newSplitId ? { ...o, number: assignedNum } : o)),
-                  nextOrderNumber: Math.max(prev.nextOrderNumber, assignedNum + 1),
-                }));
-              }
-            })
-            .catch((err) => {
-              notify(`Error dividiendo cuenta en Firestore: ${formatActionErr(err)}`);
-            });
-        }
-
-        loadOrderIntoDraft(splitOrder);
-        notify(`Nueva Cuenta #${splitOrderNum} creada con ${movedItem.name}.`);
-      },
-    });
-    setPromptValue(selectedOrder.items[0]?.key || '');
-  };
-
-  // Move or Merge table
-  const handleMoveTable = () => {
-    if (!selectedOrder) {
-      notify('Selecciona o guarda una cuenta antes de cambiar o unir mesa.');
-      return;
-    }
-    setMoveTargetService(selectedOrder.service);
-    const opts = locationOptions(selectedOrder.service);
-    const nextDefault = opts.find((o) => o.value !== String(selectedOrder.location))?.value || opts[0].value;
-    setMoveTargetLocation(nextDefault);
-    setMoveTableModalOpen(true);
-  };
-
-  const handleConfirmMoveTable = () => {
-    if (!selectedOrder) return;
-    const currentLoc = locationLabel(selectedOrder.service, selectedOrder.location);
-    const targetLocLabel = locationLabel(moveTargetService, moveTargetLocation);
-    if (selectedOrder.service === moveTargetService && String(selectedOrder.location) === String(moveTargetLocation)) {
-      notify('Elige una ubicación diferente a la actual.');
-      return;
-    }
-
-    const now = new Date().toISOString();
-    const updatedOrder: Order = {
-      ...selectedOrder,
-      service: moveTargetService,
-      location: moveTargetLocation,
-      table: moveTargetLocation,
-      updatedAt: now,
-    };
-    const auditEntry: AuditLogEntry = {
-      id: uid(),
-      at: now,
-      user: state.activeUser.name,
-      action: 'Mesa cambiada',
-      detail: `Cuenta #${selectedOrder.number}: ${currentLoc} → ${targetLocLabel}`,
-    };
-    setState((prev) => ({
-      ...prev,
-      orders: prev.orders.map((o) => (o.id === selectedOrder.id ? updatedOrder : o)),
-      audit: [...prev.audit, auditEntry],
-    }));
-    if (firebaseUser) {
-      void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-        notify(`Error cambiando mesa en Firestore: ${formatActionErr(err)}`);
-      });
-    }
-    setCurrentService(moveTargetService);
-    setCurrentTable(moveTargetLocation);
-    setMoveTableModalOpen(false);
-    notify(`Cuenta #${selectedOrder.number} movida a ${targetLocLabel}.`);
-  };
-
-  const handleConfirmMergeOrders = (targetOrder: Order) => {
-    if (!selectedOrder) return;
-    const now = new Date().toISOString();
-    const updatedTarget = mergeOrdersIntoTarget(targetOrder, selectedOrder, now);
-
-    const auditEntry: AuditLogEntry = {
-      id: uid(),
-      at: now,
-      user: state.activeUser.name,
-      action: 'Cuentas unidas',
-      detail: `Cuenta #${selectedOrder.number} unida dentro de Cuenta #${targetOrder.number} (${locationLabel(targetOrder.service, targetOrder.location)})`,
-    };
-
-    setState((prev) => ({
-      ...prev,
-      orders: prev.orders
-        .filter((o) => o.id !== selectedOrder.id)
-        .map((o) => (o.id === targetOrder.id ? updatedTarget : o)),
-      audit: [...prev.audit, auditEntry],
-    }));
-
-    if (firebaseUser) {
-      void fsMergeOrders(updatedTarget, selectedOrder.id, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-        notify(`Error uniendo cuentas en Firestore: ${formatActionErr(err)}`);
-      });
-    }
-
-    setMoveTableModalOpen(false);
-    loadOrderIntoDraft(updatedTarget);
-    notify(`Cuenta #${selectedOrder.number} unida a Cuenta #${targetOrder.number}.`);
-  };
-
-  // Cancel whole account (permission gated)
-  const handleCancelAccount = () => {
-    if (!canCancelOrders) {
-      notify('Tu rol no tiene autorización para cancelar cuentas completas.');
-      return;
-    }
-    if (!selectedOrder) {
-      notify('No hay una cuenta activa para cancelar.');
-      return;
-    }
-    setModalReason({
-      title: `Cancelar Cuenta #${selectedOrder.number} completa`,
-      onConfirm: (reason) => {
-        const now = new Date().toISOString();
-        const canceledOrder = selectedOrder;
-        const auditEntry: AuditLogEntry = {
-          id: uid(),
-          at: now,
-          user: state.activeUser.name,
-          action: 'Cuenta cancelada',
-          detail: `Cuenta #${canceledOrder.number} en ${locationLabel(canceledOrder.service, canceledOrder.location)} por $${(canceledOrder.totalCents / 100).toFixed(2)}`,
-          reason,
-        };
-        setCurrentOrderId(null);
-        setCart([]);
-        setGeneralNote('');
-        setPriority('normal');
-        setDeliveryData({ name: '', phone: '', address: '', reference: '' });
-        setState((prev) => ({
-          ...prev,
-          orders: prev.orders.filter((o) => o.id !== canceledOrder.id),
-          audit: [...prev.audit, auditEntry],
-        }));
-        if (firebaseUser) {
-          void fsCancelOrder(canceledOrder, isFirebaseAdmin, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-            notify(`Error cancelando cuenta en Firestore: ${formatActionErr(err)}`);
-          });
-        }
-        notify(`Cuenta #${canceledOrder.number} cancelada y registrada en bitácora.`);
-      },
-    });
-  };
-
-  // Apply discount (permission gated)
-  const handleApplyDiscount = () => {
-    if (!canApplyDiscount) {
-      notify('Tu rol no tiene autorización para aplicar descuentos.');
-      return;
-    }
-    if (!selectedOrder) {
-      notify('Primero guarda o selecciona una comanda abierta.');
-      return;
-    }
-    setPromptModal({
-      title: 'Aplicar descuento autorizado',
-      label: `Ingresa el monto del descuento en PESOS (Subtotal: ${formatMoney(selectedOrder.totalCents)}):`,
-      defaultValue: '50',
-      onConfirm: (val) => {
-        const amountPesos = Number(val);
-        if (!Number.isFinite(amountPesos) || amountPesos <= 0) {
-          notify('Monto de descuento no válido.');
-          return;
-        }
-        const discountCents = Math.round(amountPesos * 100);
-        setModalReason({
-          title: `Autorizar descuento de ${formatMoney(discountCents)}`,
-          onConfirm: (reason) => {
-            const now = new Date().toISOString();
-            const sub = subtotalCents(selectedOrder.items);
-            const nextTotal = Math.max(0, sub - discountCents);
-            const updatedOrder: Order = {
-              ...selectedOrder,
-              discountCents,
-              totalCents: nextTotal,
-              updatedAt: now,
-            };
-            const auditEntry: AuditLogEntry = {
-              id: uid(),
-              at: now,
-              user: state.activeUser.name,
-              action: 'Descuento autorizado',
-              detail: `Descuento de ${formatMoney(discountCents)} aplicado a Cuenta #${selectedOrder.number}`,
-              reason,
-            };
-            setState((prev) => ({
-              ...prev,
-              orders: prev.orders.map((o) => (o.id === selectedOrder.id ? updatedOrder : o)),
-              audit: [...prev.audit, auditEntry],
-            }));
-            if (firebaseUser) {
-              void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-                notify(`Error aplicando descuento en Firestore: ${formatActionErr(err)}`);
-              });
-            }
-            notify(`Descuento de ${formatMoney(discountCents)} aplicado.`);
-          },
-        });
-      },
-    });
-    setPromptValue('50');
-  };
-
-  // Execute payment in cashier (enforces Fase 2 unserved items check & open shift check)
-  const executePaymentConfirmed = (order: Order, forceMarkServed: boolean) => {
-    if (!canCollectPayment) {
-      notify('Tu rol no tiene permiso para cobrar cuentas.');
-      return;
-    }
-    if (!state.shift.isOpen) {
-      notify('El turno de caja está cerrado. Abre un nuevo turno antes de cobrar.');
-      return;
-    }
-
-    const workingOrder: Order = forceMarkServed
-      ? {
-          ...order,
-          items: order.items.map((it) => ({ ...it, itemStatus: 'served' as ItemStatus })),
-          status: 'served',
-        }
-      : order;
-
-    const preparedState: FullPosState = forceMarkServed
-      ? {
-          ...state,
-          orders: state.orders.map((o) => (o.id === order.id ? workingOrder : o)),
-        }
-      : state;
-
-    const cashVal = Number(cashTendered) ? Math.round(Number(cashTendered) * 100) : undefined;
-    const change = cashVal && cashVal > workingOrder.totalCents ? cashVal - workingOrder.totalCents : 0;
-    const mixedCashCents =
-      paymentMethod === 'mixto'
-        ? Math.min(workingOrder.totalCents, Math.max(0, Math.round((Number(mixedCashInput) || 0) * 100)))
-        : undefined;
-
-    try {
-      const nextState = closeAndPayOrder(preparedState, {
-        orderId: workingOrder.id,
-        paymentMethod,
-        amountCash: paymentMethod === 'efectivo' ? workingOrder.totalCents : mixedCashCents,
-        amountCard:
-          paymentMethod === 'tarjeta'
-            ? workingOrder.totalCents
-            : paymentMethod === 'mixto'
-            ? workingOrder.totalCents - (mixedCashCents || 0)
-            : undefined,
-      });
-
-      setState(nextState);
-      if (currentOrderId === workingOrder.id) {
-        setCurrentOrderId(null);
-        setCart([]);
-        setGeneralNote('');
-      }
-      const closedOrder = nextState.orders.find((o) => o.id === workingOrder.id);
-      const sale = nextState.sales[nextState.sales.length - 1];
-      const latestAudit = nextState.audit[nextState.audit.length - 1];
-
-      if (firebaseUser && closedOrder && sale && latestAudit) {
-        void fsCloseAndPayOrder(
-          closedOrder,
-          { ...sale, changeGiven: change },
-          nextState.shift,
-          firebaseUser,
-          authorizedEmails,
-          latestAudit
-        )
-          .then(({ assignedReceipt }) => {
-            if (assignedReceipt && assignedReceipt !== sale.receipt) {
-              setState((prev) => ({
-                ...prev,
-                sales: prev.sales.map((s) => (s.id === sale.id ? { ...s, receipt: assignedReceipt } : s)),
-              }));
-              setActiveReceiptSale((prev) => (prev && prev.id === sale.id ? { ...prev, receipt: assignedReceipt } : prev));
-            }
-          })
-          .catch((err) => {
-            const rawMsg = err instanceof Error ? err.message : 'Sin permisos';
-            if (rawMsg.startsWith('ALREADY_PAID:')) {
-              notify(rawMsg.replace('ALREADY_PAID:', ''));
-            } else {
-              notify(`Error guardando cobro en Firestore: ${formatActionErr(err)}`);
-            }
-          });
-      }
-
-      setActiveReceiptSale(sale);
-      setPayOrderId('');
-      setCashTendered('');
-      setMixedCashInput('');
-      setConfirmUnservedPay(false);
-      notify(`Cobro registrado con éxito. Folio: ${sale.receipt}${change > 0 ? ` · Cambio: ${formatMoney(change)}` : ''}`);
-    } catch (err: unknown) {
-      notify(err instanceof Error ? err.message : 'Error al procesar cobro');
-    }
-  };
-
-  const handleExecutePayment = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!canCollectPayment) {
-      notify('Tu rol no tiene autorización para registrar cobros.');
-      return;
-    }
-    if (!state.shift.isOpen) {
-      notify('El turno de caja está cerrado. Abre un nuevo turno antes de cobrar.');
-      return;
-    }
-    if (!payOrderId) {
-      notify('Selecciona una cuenta pendiente de cobro.');
-      return;
-    }
-    const order = state.orders.find((o) => o.id === payOrderId && !o.paid);
-    if (!order) {
-      notify('Cuenta no encontrada o ya está cobrada.');
-      return;
-    }
-    if (hasUnservedItems(order) && !confirmUnservedPay) {
-      setConfirmUnservedPay(true);
-      notify('Esta cuenta aún tiene productos pendientes de marcar como servidos.');
-      return;
-    }
-    executePaymentConfirmed(order, true);
-  };
-
-  // Perform Cash Cut (Corte de Turno - permission gated)
-  const handlePerformCashCut = () => {
-    if (!canCashCut) {
-      notify('Tu rol no tiene autorización para realizar cortes de caja.');
-      return;
-    }
-    const counted = Number(physicalCashCount);
-    if (!Number.isFinite(counted) || counted < 0) {
-      notify('Ingresa el monto del conteo físico de efectivo en caja.');
-      return;
-    }
-    const actualCents = Math.round(counted * 100);
-    const expected = state.shift.expectedCashCents;
-    const diff = actualCents - expected;
-
-    const shift = {
-      ...state.shift,
-      isOpen: false,
-      closedAt: new Date().toISOString(),
-      actualCashCents: actualCents,
-      differenceCents: diff,
-      closedByUser: state.activeUser.name,
-    };
-
-    let detail = `Corte de turno completado. Esperado: ${formatMoney(expected)} · Conteo físico: ${formatMoney(actualCents)}`;
-    if (diff === 0) detail += ' (Caja cuadrada exacta)';
-    else if (diff > 0) detail += ` (Sobrante: +${formatMoney(diff)})`;
-    else detail += ` (Faltante: ${formatMoney(diff)})`;
-
-    const auditEntry: AuditLogEntry = {
-      id: uid(),
-      at: new Date().toISOString(),
-      user: state.activeUser.name,
-      action: 'Corte de caja Z',
-      detail,
-    };
-
-    setState((prev) => ({
-      ...prev,
-      shift,
-      audit: [...prev.audit, auditEntry],
-    }));
-
-    if (firebaseUser) {
-      void fsCloseShift(shift, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-        notify(`Error cerrando turno en Firestore: ${formatActionErr(err)}`);
-      });
-    }
-
-    notify(`Corte de turno completado: ${detail}`);
-  };
-
-  // Open New Shift after Corte Z with explicit opening cash fund (defaults to 0)
-  const handleOpenNewShift = () => {
-    if (!canCashCut) {
-      notify('Tu rol no tiene autorización para abrir turnos de caja.');
-      return;
-    }
-    const openingPesos = Number(openingCashInput);
-    if (!Number.isFinite(openingPesos) || openingPesos < 0) {
-      notify('Ingresa un fondo inicial válido ($0.00 o mayor).');
-      return;
-    }
-    const initialCents = Math.round(openingPesos * 100);
-    const newShift = createInitialShift(initialCents);
-    const auditEntry: AuditLogEntry = {
-      id: uid(),
-      at: new Date().toISOString(),
-      user: state.activeUser.name,
-      action: 'Apertura de turno de caja',
-      detail: `Nuevo turno ${newShift.id} abierto con fondo inicial ${formatMoney(newShift.initialCashCents)}`,
-    };
-    setState((prev) => ({
-      ...prev,
-      shift: newShift,
-      audit: [...prev.audit, auditEntry],
-    }));
-    setPhysicalCashCount('');
-    setOpeningCashInput('0');
-    if (firebaseUser) {
-      void fsOpenNewShift(newShift, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-        notify(`Error abriendo turno en Firestore: ${formatActionErr(err)}`);
-      });
-    }
-    notify(`Nuevo turno abierto (${newShift.id}) con fondo ${formatMoney(initialCents)}.`);
-  };
-
-  // Record Cash Drawer Movement (Ingreso / Retiro de efectivo via transactional delta)
-  const handleSaveDrawerMovement = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!canCashCut) {
-      notify('Tu rol no tiene autorización para registrar movimientos de efectivo.');
-      return;
-    }
-    if (!drawerModalType) return;
-    if (!state.shift.isOpen) {
-      notify('Abre un turno de caja antes de registrar ingresos o retiros.');
-      return;
-    }
-    const pesos = Number(drawerAmount);
-    if (!Number.isFinite(pesos) || pesos <= 0) {
-      notify('Ingresa un monto mayor a $0.00.');
-      return;
-    }
-    const cents = Math.round(pesos * 100);
-    if (drawerModalType === 'retiro' && cents > state.shift.expectedCashCents) {
-      notify('El retiro no puede superar el efectivo esperado en cajón.');
-      return;
-    }
-    const movementType = drawerModalType;
-    const reason = drawerReason.trim() || (movementType === 'deposito' ? 'Ingreso de cambio a caja' : 'Retiro parcial de caja');
-    const updatedShift = {
-      ...state.shift,
-      depositosCents: (state.shift.depositosCents || 0) + (movementType === 'deposito' ? cents : 0),
-      retirosCents: (state.shift.retirosCents || 0) + (movementType === 'retiro' ? cents : 0),
-      expectedCashCents:
-        movementType === 'deposito'
-          ? state.shift.expectedCashCents + cents
-          : Math.max(0, state.shift.expectedCashCents - cents),
-    };
-    const auditEntry: AuditLogEntry = {
-      id: uid(),
-      at: new Date().toISOString(),
-      user: state.activeUser.name,
-      action: movementType === 'deposito' ? 'Ingreso de efectivo' : 'Retiro de efectivo',
-      detail: `${movementType === 'deposito' ? '+' : '-'}${formatMoney(cents)} · Nuevo esperado: ${formatMoney(updatedShift.expectedCashCents)}`,
-      reason,
-    };
-
-    setState((prev) => ({
-      ...prev,
-      shift: updatedShift,
-      audit: [...prev.audit, auditEntry],
-    }));
-
-    if (firebaseUser) {
-      void fsRecordCashDrawerMovement(
-        { shiftId: state.shift.id, type: movementType, amountCents: cents },
-        firebaseUser,
-        authorizedEmails,
-        auditEntry
-      )
-        .then(({ expectedCashCents }) => {
-          if (typeof expectedCashCents === 'number') {
-            setState((prev) => ({
-              ...prev,
-              shift: { ...prev.shift, expectedCashCents },
-            }));
-          }
-        })
-        .catch((err) => {
-          notify(`Error registrando movimiento de caja: ${formatActionErr(err)}`);
-        });
-    }
-
-    setDrawerModalType(null);
-    setDrawerAmount('');
-    setDrawerReason('');
-    notify(`${movementType === 'deposito' ? 'Ingreso' : 'Retiro'} de ${formatMoney(cents)} registrado.`);
-  };
-
-  // Reopen Last Sale
-  const handleReopenLastSale = () => {
-    const lastSale = state.sales[state.sales.length - 1];
-    if (!lastSale) {
-      notify('No hay ventas registradas para reabrir.');
-      return;
-    }
-
-    setModalReason({
-      title: `Reabrir venta ${lastSale.receipt}`,
-      onConfirm: (reason) => {
-        const now = new Date().toISOString();
-        const reopenedNum = state.nextOrderNumber;
-        const newOrderId = uid();
-
-        const reopenedOrder: Order = {
-          id: newOrderId,
-          number: reopenedNum,
-          service: lastSale.service,
-          location: lastSale.location,
-          table: lastSale.location,
-          waiter: lastSale.waiter,
-          note: `Reapertura derivada de ${lastSale.receipt}`,
-          items: lastSale.items.map((i) => ({ ...i, itemStatus: i.itemStatus || 'pending' })),
-          totalCents: lastSale.totalCents,
-          discountCents: 0,
-          priority: 'normal',
-          status: 'sent',
-          paid: false,
-          createdAt: now,
-          updatedAt: now,
-        };
-
-        const auditEntry: AuditLogEntry = {
-          id: uid(),
-          at: now,
-          user: state.activeUser.name,
-          action: 'Venta reabierta',
-          detail: `Nueva cuenta #${reopenedNum} creada a partir de venta ${lastSale.receipt}`,
-          reason,
-        };
-
-        setState((prev) => ({
-          ...prev,
-          orders: [...prev.orders, reopenedOrder],
-          nextOrderNumber: reopenedNum + 1,
-          audit: [...prev.audit, auditEntry],
-        }));
-
-        if (firebaseUser) {
-          void fsSaveOrder(reopenedOrder, true, firebaseUser, authorizedEmails, auditEntry)
-            .then((assignedNum) => {
-              if (assignedNum !== reopenedOrder.number) {
-                setState((prev) => ({
-                  ...prev,
-                  orders: prev.orders.map((o) => (o.id === newOrderId ? { ...o, number: assignedNum } : o)),
-                  nextOrderNumber: Math.max(prev.nextOrderNumber, assignedNum + 1),
-                }));
-              }
-            })
-            .catch((err) => {
-              notify(`Error reabriendo venta en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
-            });
-        }
-
-        loadOrderIntoDraft(reopenedOrder);
-        notify(`Venta reabierta como Cuenta #${reopenedNum}.`);
-      },
-    });
-  };
-
   // Export CSV
-  const handleExportSalesCsv = () => {
+  const handleExportSalesCsv = useCallback(() => {
     if (state.sales.length === 0) {
       notify('No hay ventas para exportar.');
       return;
@@ -1850,196 +836,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
     downloadCsvFile(`barbachu-ventas-${new Date().toISOString().slice(0, 10)}.csv`, headers, rows);
     notify('Reporte de ventas exportado a CSV.');
-  };
+  }, [notify, state.sales]);
 
-  // Inventory Stock Adjustment or Intake or MinStock change
-  const commitInlineInventoryMovement = (
-    payload: {
-      clave: number;
-      descripcion: string;
-      type: 'entrada' | 'ajuste' | 'merma';
-      qtyNum: number;
-      costNum: number;
-      reasonText: string;
-    },
-    authorizingAdminName?: string
-  ) => {
-    const now = new Date().toISOString();
-    const currentItem = state.inventory[payload.clave] || {
-      clave: payload.clave,
-      descripcion: payload.descripcion,
-      unidad: 'PZA',
-      categoria: 'GENERAL',
-      costo: payload.costNum,
-      stock: 0,
-      minStock: 5,
-    };
-
-    let newStock = currentItem.stock;
-    if (payload.type === 'entrada') {
-      newStock += payload.qtyNum;
-    } else if (payload.type === 'merma') {
-      newStock = Math.max(0, currentItem.stock - payload.qtyNum);
-    } else {
-      newStock = payload.qtyNum;
-    }
-
-    const updatedItem: InventoryItem = {
-      ...currentItem,
-      stock: Math.max(0, newStock),
-      costo: payload.costNum > 0 ? payload.costNum : currentItem.costo,
-    };
-
-    const baseReason =
-      payload.reasonText.trim() || (payload.type === 'merma' ? 'Merma / Desperdicio' : 'Ajuste operativo');
-    const finalReason = authorizingAdminName
-      ? `${baseReason} (Autorizado por Admin: ${authorizingAdminName})`
-      : baseReason;
-
-    const mov = {
-      id: uid(),
-      at: now,
-      clave: payload.clave,
-      descripcion: payload.descripcion,
-      type: payload.type,
-      qty: payload.qtyNum,
-      costUnit: payload.costNum > 0 ? payload.costNum : currentItem.costo,
-      reason: finalReason,
-      user: state.activeUser.name,
-    };
-
-    const auditEntry: AuditLogEntry = {
-      id: uid(),
-      at: now,
-      user: state.activeUser.name,
-      action: `Inventario: ${payload.type.toUpperCase()}`,
-      detail: `${payload.descripcion} (${currentItem.unidad}) · ${
-        payload.type === 'entrada'
-          ? `+${payload.qtyNum}`
-          : payload.type === 'merma'
-          ? `-${payload.qtyNum} (Merma)`
-          : `fijado a ${payload.qtyNum}`
-      } · Nuevo stock: ${updatedItem.stock}${authorizingAdminName ? ` · Autorizó: ${authorizingAdminName}` : ''}`,
-      reason: finalReason,
-    };
-
-    setState((prev) => ({
-      ...prev,
-      inventory: {
-        ...prev.inventory,
-        [payload.clave]: updatedItem,
-      },
-      inventoryMovements: [...prev.inventoryMovements, mov],
-      audit: [...prev.audit, auditEntry],
-    }));
-
-    if (firebaseUser) {
-      const costChanged = isFirebaseAdmin && payload.costNum > 0 && payload.costNum !== currentItem.costo;
-      void fsSaveInventoryMovement(updatedItem, mov, firebaseUser, authorizedEmails, auditEntry, {
-        updateCost: costChanged,
-      })
-        .then((committedStock) => {
-          setState((prev) => {
-            const target = prev.inventory[payload.clave];
-            if (!target || target.stock === committedStock) return prev;
-            return {
-              ...prev,
-              inventory: { ...prev.inventory, [payload.clave]: { ...target, stock: committedStock } },
-            };
-          });
-        })
-        .catch((err) => {
-          notify(`Error guardando inventario en Firestore: ${formatActionErr(err)}`);
-        });
-    }
-
-    setInventoryModal(null);
-    setInvQty('');
-    setInvCost('');
-    setInvReason('');
-    notify(`Inventario actualizado: ${payload.descripcion} ahora tiene ${updatedItem.stock} ${updatedItem.unidad}.`);
-  };
-
-  const handleSaveInventoryMovement = () => {
-    if (!inventoryModal) return;
-    const qtyNum = Number(invQty);
-    const costNum = Number(invCost) || 0;
-    const now = new Date().toISOString();
-
-    const currentItem = state.inventory[inventoryModal.clave] || {
-      clave: inventoryModal.clave,
-      descripcion: inventoryModal.descripcion,
-      unidad: 'PZA',
-      categoria: 'GENERAL',
-      costo: costNum,
-      stock: 0,
-      minStock: 5,
-    };
-
-    if (inventoryModal.type === 'minStock') {
-      if (!Number.isFinite(qtyNum) || qtyNum < 0) {
-        notify('Ingresa un umbral de stock mínimo válido.');
-        return;
-      }
-      const updatedItem: InventoryItem = {
-        ...currentItem,
-        minStock: qtyNum,
-      };
-      const auditEntry: AuditLogEntry = {
-        id: uid(),
-        at: now,
-        user: state.activeUser.name,
-        action: 'Alerta de inventario modificada',
-        detail: `${inventoryModal.descripcion}: umbral mínimo fijado a ${qtyNum} ${currentItem.unidad}`,
-      };
-      setState((prev) => ({
-        ...prev,
-        inventory: {
-          ...prev.inventory,
-          [inventoryModal.clave]: updatedItem,
-        },
-        audit: [...prev.audit, auditEntry],
-      }));
-      if (firebaseUser) {
-        void fsSaveInventoryMovement(updatedItem, null, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-          notify(`Error actualizando umbral en Firestore: ${formatActionErr(err)}`);
-        });
-      }
-      setInventoryModal(null);
-      setInvQty('');
-      notify(`Umbral de alerta actualizado a ${qtyNum} ${currentItem.unidad}.`);
-      return;
-    }
-
-    if (!Number.isFinite(qtyNum) || (inventoryModal.type === 'ajuste' ? qtyNum < 0 : qtyNum <= 0)) {
-      notify(inventoryModal.type === 'ajuste' ? 'Ingresa un conteo válido (0 o mayor).' : 'Ingresa una cantidad mayor a 0.');
-      return;
-    }
-
-    if ((inventoryModal.type === 'merma' || inventoryModal.type === 'ajuste') && state.activeUser.role !== 'admin') {
-      setPendingInvMermaAuth({
-        clave: inventoryModal.clave,
-        descripcion: inventoryModal.descripcion,
-        type: inventoryModal.type,
-        qtyNum,
-        costNum,
-        reasonText: invReason.trim(),
-      });
-      return;
-    }
-
-    commitInlineInventoryMovement(
-      {
-        clave: inventoryModal.clave,
-        descripcion: inventoryModal.descripcion,
-        type: inventoryModal.type,
-        qtyNum,
-        costNum,
-        reasonText: invReason.trim(),
-      },
-      inventoryModal.type === 'merma' || inventoryModal.type === 'ajuste' ? state.activeUser.name : undefined
-    );
-  };
+  // Inventory & Stock Movements handled cleanly via useInventory() hook above
 
   // Advanced POS Features Handlers (Split Bill, Transfer, Merge, Device Station & Sync)
   const handleUpdateDeviceStation = (station: DeviceStation, stationName: string, autoLock: number) => {
@@ -2149,38 +948,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     setPinPadMode('unlock');
   };
 
-  const handleOpenPreCheck = (order: Order) => {
+  const handleOpenPreCheck = useCallback((order: Order) => {
     setActivePreCheckOrder(order);
-  };
-
-  const handleOpenDraftPreCheck = () => {
-    if (selectedOrder) {
-      setActivePreCheckOrder(selectedOrder);
-      return;
-    }
-    if (cart.length === 0) {
-      notify('Agrega productos antes de emitir una pre-cuenta.');
-      return;
-    }
-    const now = new Date().toISOString();
-    setActivePreCheckOrder({
-      id: 'draft-precheck',
-      number: state.nextOrderNumber,
-      service: currentService,
-      location: currentTable,
-      table: currentTable,
-      waiter,
-      note: generalNote,
-      items: cart,
-      totalCents: totalCents(cart, 0),
-      discountCents: 0,
-      priority,
-      status: 'sent',
-      paid: false,
-      createdAt: now,
-      updatedAt: now,
-    });
-  };
+  }, []);
 
   // Total sales calculated
   const totalSalesCents = useMemo(() => {
@@ -2216,11 +986,6 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       { service: 'domicilio' as ServiceType, loc: '0', label: 'Pedidos a Domicilio', section: 'Reparto' },
     ];
   }, []);
-
-  const totalOccupiedTables = useMemo(() => {
-    const locs = new Set(openOrders.map((o) => `${o.service}-${o.location}`));
-    return locs.size;
-  }, [openOrders]);
 
   // Auth loading state
   if (!authReady || cloudBooting) {
@@ -3644,976 +2409,58 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
           {/* VIEW 3: FAST iOS TABLES MAP */}
           {view === 'tables' && (
-            <div className="space-y-5">
-              {/* Top Filter & Stats Bar */}
-              <div className="p-4 sm:p-5 ios-glass-card space-y-3.5">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-                  <div>
-                    <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">
-                      Mapa de Mesas y Barra
-                    </h3>
-                    <p className="text-xs text-[rgba(240,230,211,0.68)] tabular-nums mt-0.5">
-                      {totalOccupiedTables} ocupadas · {openOrders.filter((o) => o.status === 'ready').length} listas para servir · {formatMoney(openOrders.reduce((s, o) => s + o.totalCents, 0))} acumulado activo
-                    </p>
-                  </div>
-
-                  {/* Search Table / Waiter / #Order */}
-                  <div className="relative w-full md:w-64">
-                    <input
-                      type="text"
-                      value={tableSearch}
-                      onChange={(e) => setTableSearch(e.target.value)}
-                      placeholder="Buscar mesa, mesero o #..."
-                      className="w-full min-h-[42px] pl-9 pr-8 py-2 rounded-2xl bg-[#0a0a0b]/70 border border-white/10 text-xs text-white placeholder-[rgba(240,230,211,0.45)] focus:outline-none focus:border-[#c8a84b]"
-                    />
-                    <Search className="w-3.5 h-3.5 absolute left-3 top-3.5 text-[rgba(240,230,211,0.55)]" />
-                    {tableSearch && (
-                      <button
-                        type="button"
-                        onClick={() => setTableSearch('')}
-                        className="absolute right-2 top-1.5 w-7 h-7 rounded-xl flex items-center justify-center text-[rgba(240,230,211,0.6)] hover:text-white"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* Zone & Status Segmented Controls */}
-                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
-                  <div className="flex items-center gap-1 p-1 rounded-2xl bg-[#0a0a0b]/70 border border-white/10 overflow-x-auto">
-                    {(
-                      [
-                        { id: 'todas', label: 'Todas las Zonas' },
-                        { id: 'mesa', label: 'Salón' },
-                        { id: 'barra_exterior', label: 'Terraza' },
-                        { id: 'barra_interior', label: 'Barra Int.' },
-                        { id: 'para_llevar', label: 'Mostrador' },
-                        { id: 'domicilio', label: 'Domicilio' },
-                      ] as const
-                    ).map((z) => (
-                      <button
-                        key={z.id}
-                        type="button"
-                        onClick={() => setTableZoneFilter(z.id)}
-                        className={`min-h-[36px] px-3 py-1 rounded-xl text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
-                          tableZoneFilter === z.id
-                            ? 'bg-[#c8a84b] text-[#0a0a0b]'
-                            : 'text-[rgba(240,230,211,0.68)] hover:text-white'
-                        }`}
-                      >
-                        {z.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="flex items-center gap-1 p-1 rounded-2xl bg-[#0a0a0b]/70 border border-white/10 shrink-0 overflow-x-auto">
-                    {(
-                      [
-                        { id: 'todas', label: 'Todas' },
-                        { id: 'free', label: 'Disponibles' },
-                        { id: 'busy', label: 'Ocupadas' },
-                        { id: 'ready', label: 'Listas KDS' },
-                      ] as const
-                    ).map((st) => (
-                      <button
-                        key={st.id}
-                        type="button"
-                        onClick={() => setTableStatusFilter(st.id)}
-                        className={`min-h-[36px] px-3 py-1 rounded-xl text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
-                          tableStatusFilter === st.id
-                            ? 'bg-white/15 text-white'
-                            : 'text-[rgba(240,230,211,0.62)] hover:text-white'
-                        }`}
-                      >
-                        {st.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {['Salón Principal', 'Barra Exterior', 'Barra Interior', 'Mostrador', 'Reparto'].map((sec) => {
-                const q = tableSearch.trim().toLowerCase();
-                const locs = tableLocations.filter((t) => {
-                  if (tableZoneFilter !== 'todas' && t.service !== tableZoneFilter) return false;
-                  if (t.section !== sec) return false;
-
-                  const ordersAtLoc = openOrdersByLocation.get(`${t.service}::${t.loc}`) || [];
-                  const isBusy = ordersAtLoc.length > 0;
-                  const hasReady = ordersAtLoc.some((o) => o.status === 'ready');
-
-                  if (tableStatusFilter === 'free' && isBusy) return false;
-                  if (tableStatusFilter === 'busy' && !isBusy) return false;
-                  if (tableStatusFilter === 'ready' && !hasReady) return false;
-
-                  if (q) {
-                    const matchLabel = t.label.toLowerCase().includes(q) || t.section.toLowerCase().includes(q);
-                    const matchOrder = ordersAtLoc.some(
-                      (o) =>
-                        String(o.number).includes(q) ||
-                        o.waiter.toLowerCase().includes(q)
-                    );
-                    if (!matchLabel && !matchOrder) return false;
-                  }
-                  return true;
-                });
-
-                if (locs.length === 0) return null;
-
-                return (
-                  <div key={sec} className="space-y-3">
-                    <h4 className="text-xs uppercase tracking-[0.08em] font-bold text-[rgba(240,230,211,0.58)] px-1">{sec}</h4>
-                    <div className="table-map-grid">
-                      {locs.map((loc) => {
-                        const ordersAtLoc = openOrdersByLocation.get(`${loc.service}::${loc.loc}`) || [];
-                        const isBusy = ordersAtLoc.length > 0;
-                        const hasReady = ordersAtLoc.some((o) => o.status === 'ready');
-                        const totalLoc = ordersAtLoc.reduce((sum, o) => sum + o.totalCents, 0);
-                        const oldestOrder = ordersAtLoc.reduce<Order | null>((oldest, cur) => {
-                          if (!oldest) return cur;
-                          return new Date(cur.createdAt).getTime() < new Date(oldest.createdAt).getTime() ? cur : oldest;
-                        }, null);
-
-                        const tileStateClass = hasReady ? 'ready' : isBusy ? 'busy' : 'free';
-
-                        return (
-                          <button
-                            type="button"
-                            key={`${loc.service}-${loc.loc}`}
-                            onClick={() => {
-                              if (isBusy) {
-                                setTableSheetLoc(loc);
-                              } else if (canViewPos) {
-                                setCurrentService(loc.service);
-                                setCurrentTable(loc.loc);
-                                setCurrentOrderId(null);
-                                setCart([]);
-                                setView('pos');
-                                notify(`${loc.label} lista para tomar comanda.`);
-                              } else {
-                                notify('Esta ubicación está disponible.');
-                              }
-                            }}
-                            className={`table-tile ${tileStateClass} w-full text-left`}
-                          >
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="font-bold text-sm text-white truncate">{loc.label}</span>
-                                <span
-                                  className={`text-xs font-bold uppercase tracking-wide shrink-0 ${
-                                    hasReady
-                                      ? 'text-[#25d366]'
-                                      : isBusy
-                                      ? 'text-[#e8d090]'
-                                      : 'text-[rgba(240,230,211,0.52)]'
-                                  }`}
-                                >
-                                  {hasReady ? 'Lista' : isBusy ? 'Ocupada' : 'Libre'}
-                                </span>
-                              </div>
-
-                              <p className="text-xs text-[rgba(240,230,211,0.68)] truncate tabular-nums">
-                                {isBusy
-                                  ? `${ordersAtLoc.length} cuenta${ordersAtLoc.length > 1 ? 's' : ''} · ${ordersAtLoc[0].waiter.split(' ')[0]}`
-                                  : canViewPos
-                                  ? 'Tocar para abrir'
-                                  : 'Disponible'}
-                              </p>
-
-                              {isBusy && oldestOrder && (
-                                <div className="inline-flex items-center gap-1 text-xs font-semibold text-[#e8d090] tabular-nums">
-                                  <Clock className="w-3 h-3" /> {formatElapsedTime(oldestOrder.createdAt, nowMs)}
-                                </div>
-                              )}
-                            </div>
-
-                            <div className="pt-3 border-t border-white/10 flex items-end justify-between gap-2">
-                              <div>
-                                <div className="text-xs text-[rgba(240,230,211,0.52)]">Total</div>
-                                <div className="font-mono font-bold text-sm text-[#e8d090] tabular-nums">
-                                  {isBusy ? formatMoney(totalLoc) : '$0.00'}
-                                </div>
-                              </div>
-                              {isBusy && (
-                                <span className="text-xs font-bold text-white/80">Gestionar →</span>
-                              )}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+            <TableMap
+              openOrders={openOrders}
+              openOrdersByLocation={openOrdersByLocation}
+              totalOccupiedTables={totalOccupiedTables}
+              tableLocations={tableLocations}
+              nowMs={nowMs}
+              canViewPos={canViewPos}
+              canCollectPayment={canCollectPayment}
+              onOpenEmptyLocation={openLocationDraft}
+              onLoadOrder={loadOrderIntoDraft}
+              onAdvanceOrderStatus={handleAdvanceOrderStatus}
+              onOpenPreCheck={handleOpenPreCheck}
+              onGoToCash={handleGoToCash}
+              onNotify={notify}
+            />
           )}
 
           {/* VIEW 4: KITCHEN / KDS */}
           {view === 'kitchen' && (
-            <div className="space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 ios-glass-card">
-                <div>
-                  <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">
-                    Comandero de Producción (KDS)
-                  </h3>
-                  <p className="text-xs text-[rgba(240,230,211,0.62)]">
-                    Avanza cada ticket conforme se prepara y entrega al comensal.
-                  </p>
-                </div>
-                <div className="flex gap-1.5 text-xs p-1 rounded-2xl bg-white/[0.04] border border-white/10">
-                  {(['todas', 'cocina', 'barra'] as const).map((st) => (
-                    <button
-                      key={st}
-                      type="button"
-                      onClick={() => setKitchenStation(st)}
-                      className={`min-h-[38px] px-3.5 py-1.5 rounded-xl font-bold uppercase transition-all duration-150 ${
-                        kitchenStation === st
-                          ? 'bg-[#c8a84b] text-[#0a0a0b]'
-                          : 'text-[rgba(240,230,211,0.68)] hover:text-white'
-                      }`}
-                    >
-                      {st}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Kanban Columns */}
-              <div className="kds-board">
-                {/* Column 1: Recibida */}
-                <div className="kds-column">
-                  <div className="kds-column-header">
-                    <span className="font-bold text-sm text-[#e5a43b] tracking-tight">
-                      RECIBIDAS
-                    </span>
-                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-white/10 text-white tabular-nums">
-                      {openOrders.filter((o) => o.status === 'sent').length}
-                    </span>
-                  </div>
-
-                  <div className="space-y-3">
-                    {openOrders.filter((o) => o.status === 'sent').length === 0 ? (
-                      <div className="py-16 text-center text-[#8b92a0] text-xs">Sin órdenes en espera</div>
-                    ) : (
-                      <AnimatePresence mode="popLayout">
-                        {openOrders
-                          .filter((o) => o.status === 'sent')
-                          .map((order, orderIdx) => (
-                            <motion.div
-                              key={order.id}
-                              layout
-                              initial={{ opacity: 0, y: 14, scale: 0.97 }}
-                              animate={{ opacity: 1, y: 0, scale: 1 }}
-                              exit={{ opacity: 0, scale: 0.95 }}
-                              transition={{
-                                type: 'spring',
-                                stiffness: 400,
-                                damping: 30,
-                                delay: Math.min(orderIdx * 0.03, 0.15),
-                              }}
-                              className={`kds-ticket ${order.priority === 'alta' ? 'priority-alta' : ''}`}
-                            >
-                              <div className="flex items-start justify-between">
-                                <div>
-                                  <div className="text-sm font-bold text-white flex items-center gap-1.5">
-                                    <span>Cuenta #{order.number}</span>
-                                    <span className="text-xs text-[#eed889]">· {locationLabel(order.service, order.location)}</span>
-                                  </div>
-                                  <div className="text-xs text-[#8b92a0]">
-                                    {order.waiter} · {new Date(order.createdAt).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}
-                                  </div>
-                                </div>
-                                {order.priority === 'alta' && (
-                                  <span className="px-2 py-0.5 rounded text-xs bg-[#e05252] text-white font-bold">ALTA</span>
-                                )}
-                              </div>
-
-                              <div className="my-3 py-2 border-y border-[#2b303c] space-y-2 text-xs">
-                                {order.items
-                                  .filter((i) => kitchenStation === 'todas' || (i.station || 'cocina') === kitchenStation)
-                                  .map((i, idx) => {
-                                    const st = i.itemStatus || 'pending';
-                                    const nxt = nextItemStatus(st);
-                                    return (
-                                      <motion.div
-                                        key={i.lineId || `${i.key}-${idx}`}
-                                        initial={{ opacity: 0, x: -6 }}
-                                        animate={{ opacity: 1, x: 0 }}
-                                        transition={{ type: 'spring', stiffness: 440, damping: 32, delay: Math.min(idx * 0.02, 0.1) }}
-                                        className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-[#16191f]/70"
-                                      >
-                                        <div className="min-w-0">
-                                          <div className="font-bold text-white truncate">{i.qty} × {i.name}</div>
-                                          <div className="text-xs text-[#8b92a0] uppercase">{i.station || 'cocina'} · {st}</div>
-                                          {(i.modifiers || i.modificadores || []).length > 0 && (
-                                            <div className="flex flex-wrap gap-1 mt-1">
-                                              {(i.modifiers || i.modificadores || []).map((mod, mi) => (
-                                                <span key={mi} className="px-1.5 py-0.5 rounded bg-[#c8a84b]/15 text-[#eed889] text-[10px] font-semibold">
-                                                  {mod.name}{mod.priceCents > 0 ? ` (+${formatMoney(mod.priceCents)})` : ''}
-                                                </span>
-                                              ))}
-                                            </div>
-                                          )}
-                                          {i.note && <span className="text-xs text-[#eed889] block">Nota: {i.note}</span>}
-                                        </div>
-                                        {nxt && (
-                                          <button
-                                            type="button"
-                                            onClick={() => handleAdvanceItemStatus(order.id, i.lineId || i.key, nxt)}
-                                            className="px-2 py-1 rounded bg-[#e5a43b]/20 hover:bg-[#e5a43b] hover:text-black text-[#e5a43b] font-bold text-xs shrink-0"
-                                          >
-                                            ▶ Preparar
-                                          </button>
-                                        )}
-                                      </motion.div>
-                                    );
-                                  })}
-                              </div>
-
-                              {order.note && (
-                                <p className="text-xs text-[#8b92a0] mb-3 italic">Nota general: {order.note}</p>
-                              )}
-
-                              <button
-                                type="button"
-                                onClick={() => handleAdvanceOrderStatus(order.id, 'sent')}
-                                className="w-full py-2 rounded-xl bg-[#e5a43b] hover:bg-[#d4af37] text-black font-bold text-xs"
-                              >
-                                ▶ Iniciar Preparación Completa
-                              </button>
-                            </motion.div>
-                          ))}
-                      </AnimatePresence>
-                    )}
-                  </div>
-                </div>
-
-                {/* Column 2: Preparando */}
-                <div className="kds-column">
-                  <div className="kds-column-header">
-                    <span className="font-bold text-sm text-[#3b82f6] tracking-tight">
-                      EN PREPARACIÓN
-                    </span>
-                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-white/10 text-white tabular-nums">
-                      {openOrders.filter((o) => o.status === 'preparing').length}
-                    </span>
-                  </div>
-
-                  <div className="space-y-3">
-                    {openOrders.filter((o) => o.status === 'preparing').length === 0 ? (
-                      <div className="py-16 text-center text-[#8b92a0] text-xs">Sin órdenes en cocción</div>
-                    ) : (
-                      <AnimatePresence mode="popLayout">
-                        {openOrders
-                          .filter((o) => o.status === 'preparing')
-                          .map((order, orderIdx) => (
-                            <motion.div
-                              key={order.id}
-                              layout
-                              initial={{ opacity: 0, y: 14, scale: 0.97 }}
-                              animate={{ opacity: 1, y: 0, scale: 1 }}
-                              exit={{ opacity: 0, scale: 0.95 }}
-                              transition={{
-                                type: 'spring',
-                                stiffness: 400,
-                                damping: 30,
-                                delay: Math.min(orderIdx * 0.03, 0.15),
-                              }}
-                              className={`kds-ticket ${order.priority === 'alta' ? 'priority-alta' : ''}`}
-                            >
-                              <div className="flex items-start justify-between">
-                                <div>
-                                  <div className="text-sm font-bold text-white flex items-center gap-1.5">
-                                    <span>Cuenta #{order.number}</span>
-                                    <span className="text-xs text-[#eed889]">· {locationLabel(order.service, order.location)}</span>
-                                  </div>
-                                  <div className="text-xs text-[#8b92a0]">
-                                    {order.waiter} · {new Date(order.createdAt).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}
-                                  </div>
-                                </div>
-                              </div>
-
-                              <div className="my-3 py-2 border-y border-[#2b303c] space-y-2 text-xs">
-                                {order.items
-                                  .filter((i) => kitchenStation === 'todas' || (i.station || 'cocina') === kitchenStation)
-                                  .map((i, idx) => {
-                                    const st = i.itemStatus || 'pending';
-                                    const nxt = nextItemStatus(st);
-                                    return (
-                                      <motion.div
-                                        key={i.lineId || `${i.key}-${idx}`}
-                                        initial={{ opacity: 0, x: -6 }}
-                                        animate={{ opacity: 1, x: 0 }}
-                                        transition={{ type: 'spring', stiffness: 440, damping: 32, delay: Math.min(idx * 0.02, 0.1) }}
-                                        className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-[#16191f]/70"
-                                      >
-                                        <div className="min-w-0">
-                                          <div className="font-bold text-white truncate">{i.qty} × {i.name}</div>
-                                          <div className="text-xs text-[#8b92a0] uppercase">{i.station || 'cocina'} · {st}</div>
-                                          {(i.modifiers || i.modificadores || []).length > 0 && (
-                                            <div className="flex flex-wrap gap-1 mt-1">
-                                              {(i.modifiers || i.modificadores || []).map((mod, mi) => (
-                                                <span key={mi} className="px-1.5 py-0.5 rounded bg-[#c8a84b]/15 text-[#eed889] text-[10px] font-semibold">
-                                                  {mod.name}{mod.priceCents > 0 ? ` (+${formatMoney(mod.priceCents)})` : ''}
-                                                </span>
-                                              ))}
-                                            </div>
-                                          )}
-                                          {i.note && <span className="text-xs text-[#eed889] block">Nota: {i.note}</span>}
-                                        </div>
-                                        {nxt && (
-                                          <button
-                                            type="button"
-                                            onClick={() => handleAdvanceItemStatus(order.id, i.lineId || i.key, nxt)}
-                                            className="px-2 py-1 rounded bg-[#25d366]/20 hover:bg-[#25d366] hover:text-black text-[#25d366] font-bold text-xs shrink-0"
-                                          >
-                                            {nxt === 'ready' ? '✓ Listo' : nxt === 'served' ? '🍽️ Servido' : '▶ Preparar'}
-                                          </button>
-                                        )}
-                                      </motion.div>
-                                    );
-                                  })}
-                              </div>
-
-                              <button
-                                type="button"
-                                onClick={() => handleAdvanceOrderStatus(order.id, 'preparing')}
-                                className="w-full py-2 rounded-xl bg-[#25d366] hover:bg-[#20b858] text-black font-bold text-xs"
-                              >
-                                ✓ Marcar Estación Lista
-                              </button>
-                            </motion.div>
-                          ))}
-                      </AnimatePresence>
-                    )}
-                  </div>
-                </div>
-
-                {/* Column 3: Lista / Entregada */}
-                <div className="kds-column">
-                  <div className="kds-column-header">
-                    <span className="font-bold text-sm text-[#25d366] tracking-tight">
-                      LISTA PARA ENTREGAR
-                    </span>
-                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-white/10 text-white tabular-nums">
-                      {openOrders.filter((o) => o.status === 'ready' || o.status === 'served').length}
-                    </span>
-                  </div>
-
-                  <div className="space-y-3">
-                    {openOrders.filter((o) => o.status === 'ready' || o.status === 'served').length === 0 ? (
-                      <div className="py-16 text-center text-[#8b92a0] text-xs">Sin órdenes por servir</div>
-                    ) : (
-                      <AnimatePresence mode="popLayout">
-                        {openOrders
-                          .filter((o) => o.status === 'ready' || o.status === 'served')
-                          .map((order, orderIdx) => (
-                            <motion.div
-                              key={order.id}
-                              layout
-                              initial={{ opacity: 0, y: 14, scale: 0.97 }}
-                              animate={{ opacity: 1, y: 0, scale: 1 }}
-                              exit={{ opacity: 0, scale: 0.95 }}
-                              transition={{
-                                type: 'spring',
-                                stiffness: 400,
-                                damping: 30,
-                                delay: Math.min(orderIdx * 0.03, 0.15),
-                              }}
-                              className="kds-ticket border-[#25d366]/40"
-                            >
-                              <div className="flex items-start justify-between">
-                                <div>
-                                  <div className="text-sm font-bold text-white flex items-center gap-1.5">
-                                    <span>Cuenta #{order.number}</span>
-                                    <span className="text-xs text-[#eed889]">· {locationLabel(order.service, order.location)}</span>
-                                  </div>
-                                  <div className="text-xs text-[#8b92a0]">
-                                    Mesero: {order.waiter} · Estado: <span className="text-[#25d366] font-bold uppercase">{order.status}</span>
-                                  </div>
-                                </div>
-                              </div>
-
-                              <div className="my-3 py-2 border-y border-[#2b303c] space-y-1.5 text-xs">
-                                {order.items
-                                  .filter((i) => kitchenStation === 'todas' || (i.station || 'cocina') === kitchenStation)
-                                  .map((i, idx) => {
-                                    const st = i.itemStatus || 'pending';
-                                    const nxt = nextItemStatus(st);
-                                    return (
-                                      <motion.div
-                                        key={i.lineId || `${i.key}-${idx}`}
-                                        initial={{ opacity: 0, x: -6 }}
-                                        animate={{ opacity: 1, x: 0 }}
-                                        transition={{ type: 'spring', stiffness: 440, damping: 32, delay: Math.min(idx * 0.02, 0.1) }}
-                                        className="flex items-center justify-between gap-2"
-                                      >
-                                        <span className="font-medium text-white truncate">
-                                          {i.qty} × {i.name} <span className="text-xs text-[#8b92a0]">({st})</span>
-                                        </span>
-                                        {nxt === 'served' && (
-                                          <button
-                                            type="button"
-                                            onClick={() => handleAdvanceItemStatus(order.id, i.lineId || i.key, 'served')}
-                                            className="px-2 py-0.5 rounded bg-[#173c34] text-[#25d366] font-bold text-xs"
-                                          >
-                                            🍽️ Servir
-                                          </button>
-                                        )}
-                                      </motion.div>
-                                    );
-                                  })}
-                              </div>
-
-                              {order.status !== 'served' ? (
-                                <button
-                                  type="button"
-                                  onClick={() => handleAdvanceOrderStatus(order.id, 'ready')}
-                                  className="w-full py-2 rounded-xl bg-[#1e222b] hover:bg-[#2b303c] border border-[#2b303c] text-white font-bold text-xs"
-                                >
-                                  🤝 Marcar Todo Entregado en Mesa
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setPayOrderId(order.id);
-                                    setView('cash');
-                                  }}
-                                  className="w-full py-2 rounded-xl bg-[#d4af37] text-black font-bold text-xs"
-                                >
-                                  💵 Lista para Cobrar en Caja
-                                </button>
-                              )}
-                            </motion.div>
-                          ))}
-                      </AnimatePresence>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
+            <KitchenView
+              openOrders={openOrders}
+              kitchenStation={kitchenStation}
+              onChangeKitchenStation={setKitchenStation}
+              onAdvanceItemStatus={handleAdvanceItemStatus}
+              onAdvanceOrderStatus={handleAdvanceOrderStatus}
+              onGoToCash={handleGoToCash}
+            />
           )}
 
           {/* VIEW 5: CASH & SETTLEMENT */}
           {view === 'cash' && (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              {/* Payment Processing Form */}
-              <div className="lg:col-span-6 p-6 ios-glass-card space-y-4">
-                <div className="flex items-center justify-between pb-3 border-b border-white/10">
-                  <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">Módulo de Cobro en Caja</h3>
-                  <span className={`text-xs font-bold ${state.shift.isOpen ? 'text-[#25d366]' : 'text-[#e5a43b]'}`}>
-                    {state.shift.isOpen ? 'Turno Abierto' : 'Turno Cerrado'}
-                  </span>
-                </div>
-
-                <form onSubmit={handleExecutePayment} className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-[#8b92a0] mb-1">
-                      Seleccionar Cuenta Pendiente de Cobro
-                    </label>
-                    <select
-                      value={payOrderId}
-                      onChange={(e) => {
-                        setPayOrderId(e.target.value);
-                        setConfirmUnservedPay(false);
-                      }}
-                      className="w-full px-3 py-2.5 rounded-xl bg-[#1e222b] border border-[#2b303c] text-sm text-white focus:outline-none focus:border-[#d4af37]"
-                    >
-                      <option value="">-- Elige una cuenta por cobrar --</option>
-                      {openOrders.map((o) => (
-                        <option key={o.id} value={o.id}>
-                          Cuenta #{o.number} · {locationLabel(o.service, o.location)} · {formatMoney(o.totalCents)} ({o.items.length} productos)
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Summary of chosen order */}
-                  {payOrderId && (
-                    <div className="p-4 rounded-xl bg-[#1e222b] border border-[#2b303c] space-y-2 text-xs">
-                      {(() => {
-                        const ord = state.orders.find((o) => o.id === payOrderId);
-                        if (!ord) return null;
-                        return (
-                          <>
-                            <div className="flex justify-between items-center font-bold text-white text-sm">
-                              <span>Cuenta #{ord.number} ({locationLabel(ord.service, ord.location)})</span>
-                              <div className="flex items-center gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => handleOpenPreCheck(ord)}
-                                  className="px-2.5 py-1 rounded-lg bg-[#16191f] border border-white/15 text-[#eed889] text-xs font-semibold hover:border-[#d4af37] inline-flex items-center gap-1"
-                                >
-                                  <FileText className="w-3.5 h-3.5" /> Pre-cuenta
-                                </button>
-                                <span className="font-mono text-[#eed889] tabular-nums">{formatMoney(ord.totalCents)}</span>
-                              </div>
-                            </div>
-                            <div className="text-[#8b92a0]">Mesero responsable: {ord.waiter}</div>
-                            <div className="pt-2 border-t border-[#2b303c] space-y-1">
-                              {ord.items.map((i, idx) => (
-                                <div key={idx} className="flex justify-between gap-2 text-[#8b92a0]">
-                                  <div className="min-w-0">
-                                    <span>
-                                      {i.qty} × {i.name}{' '}
-                                      <span className="text-xs uppercase text-[#d4af37]">
-                                        [{i.itemStatus || 'pending'}]
-                                      </span>
-                                    </span>
-                                    {(i.modifiers || i.modificadores || []).length > 0 && (
-                                      <div className="text-[11px] text-[#eed889]/85 truncate">
-                                        Extras: {(i.modifiers || i.modificadores || []).map((m) => `${m.name}${m.priceCents > 0 ? ` (+${formatMoney(m.priceCents)})` : ''}`).join(', ')}
-                                      </div>
-                                    )}
-                                  </div>
-                                  <span className="tabular-nums shrink-0">{formatMoney(lineTotalCents(i))}</span>
-                                </div>
-                              ))}
-                            </div>
-                            {ord.discountCents > 0 && (
-                              <div className="flex justify-between text-[#25d366] font-bold pt-1 tabular-nums">
-                                <span>Descuento aplicado</span>
-                                <span>- {formatMoney(ord.discountCents)}</span>
-                              </div>
-                            )}
-                          </>
-                        );
-                      })()}
-                    </div>
-                  )}
-
-                  {confirmUnservedPay && payOrderId && (
-                    <div className="p-3.5 rounded-xl bg-[#e5a43b]/15 border border-[#e5a43b]/50 text-xs space-y-2">
-                      <div className="font-bold text-[#eed889]">
-                        ⚠️ Hay productos en esta orden aún no marcados como servidos en KDS.
-                      </div>
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const ord = state.orders.find((o) => o.id === payOrderId && !o.paid);
-                            if (ord) executePaymentConfirmed(ord, true);
-                          }}
-                          className="flex-1 py-2 px-3 rounded-lg bg-[#25d366] text-black font-bold"
-                        >
-                          ✓ Marcar Servido y Cobrar
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmUnservedPay(false)}
-                          className="px-3 py-2 rounded-lg bg-[#16191f] text-[#8b92a0]"
-                        >
-                          Cancelar
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Payment method selector */}
-                  <div>
-                    <label className="block text-xs font-semibold text-[#8b92a0] mb-2">Método de Pago</label>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                      {(['efectivo', 'tarjeta', 'transferencia', 'mixto'] as const).map((m) => (
-                        <button
-                          key={m}
-                          type="button"
-                          onClick={() => setPaymentMethod(m)}
-                          className={`py-2 px-3 rounded-xl text-xs font-bold uppercase transition-all border ${
-                            paymentMethod === m
-                              ? 'bg-[#d4af37] text-black border-[#d4af37]'
-                              : 'bg-[#1e222b] text-[#8b92a0] border-[#2b303c] hover:text-white'
-                          }`}
-                        >
-                          {m}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Cash Change Calculator */}
-                  {paymentMethod === 'efectivo' && payOrderId && (
-                    <div className="p-3 bg-[#1e222b] rounded-xl border border-[#2b303c] space-y-2">
-                      <label className="block text-xs font-semibold text-[#8b92a0]">Efectivo Entregado por Cliente ($)</label>
-                      <input
-                        type="number"
-                        placeholder="Monto entregado (ej. 200, 500)"
-                        value={cashTendered}
-                        onChange={(e) => setCashTendered(e.target.value)}
-                        className="w-full px-3 py-2 rounded-xl bg-[#16191f] border border-[#2b303c] text-white text-sm font-mono"
-                      />
-                      <div className="flex gap-1.5 pt-1">
-                        {[50, 100, 200, 500, 1000].map((billete) => (
-                          <button
-                            key={billete}
-                            type="button"
-                            onClick={() => setCashTendered(String(billete))}
-                            className="px-2 py-1 rounded-lg text-xs bg-[#16191f] border border-[#2b303c] text-[#8b92a0] hover:text-white"
-                          >
-                            ${billete}
-                          </button>
-                        ))}
-                      </div>
-
-                      {(() => {
-                        const ord = state.orders.find((o) => o.id === payOrderId);
-                        const val = Number(cashTendered);
-                        if (!ord || !val) return null;
-                        const change = val * 100 - ord.totalCents;
-                        return (
-                          <div className="pt-2 border-t border-[#2b303c] flex justify-between font-mono font-bold text-sm">
-                            <span className="text-[#8b92a0]">Cambio a Devolver:</span>
-                            <span className={change >= 0 ? 'text-[#25d366]' : 'text-[#e05252]'}>
-                              {change >= 0 ? formatMoney(change) : `Faltan ${formatMoney(-change)}`}
-                            </span>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  )}
-
-                  {/* Mixed Payment Split Input */}
-                  {paymentMethod === 'mixto' && payOrderId && (
-                    <div className="p-3 bg-[#1e222b] rounded-xl border border-[#2b303c] space-y-2 text-xs">
-                      <label className="block font-semibold text-[#8b92a0]">
-                        Monto pagado en EFECTIVO ($ MXN) — el resto va a Tarjeta
-                      </label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        placeholder="0.00"
-                        value={mixedCashInput}
-                        onChange={(e) => setMixedCashInput(e.target.value)}
-                        className="w-full px-3 py-2 rounded-xl bg-[#16191f] border border-[#2b303c] text-white text-sm font-mono"
-                      />
-                      {(() => {
-                        const ord = state.orders.find((o) => o.id === payOrderId);
-                        if (!ord) return null;
-                        const cashCents = Math.min(
-                          ord.totalCents,
-                          Math.max(0, Math.round((Number(mixedCashInput) || 0) * 100))
-                        );
-                        const cardCents = ord.totalCents - cashCents;
-                        return (
-                          <div className="flex justify-between font-mono font-bold pt-1 text-[#eed889]">
-                            <span>Efectivo: {formatMoney(cashCents)}</span>
-                            <span>Tarjeta: {formatMoney(cardCents)}</span>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  )}
-
-                  <button
-                    type="submit"
-                    disabled={!payOrderId}
-                    className="w-full py-3.5 rounded-xl bg-[#25d366] hover:bg-[#20b858] text-black font-bold text-sm transition-all shadow-lg disabled:opacity-40"
-                  >
-                    Confirmar Cobro e Imprimir Ticket
-                  </button>
-                </form>
-
-                {/* Operations: Reopen last sale & Export CSV */}
-                <div className="pt-4 border-t border-[#2b303c] flex flex-wrap gap-2 text-xs">
-                  <button
-                    type="button"
-                    onClick={handleExportSalesCsv}
-                    className="flex-1 py-2 px-3 rounded-xl bg-[#1e222b] hover:bg-[#2b303c] border border-[#2b303c] text-white font-bold"
-                  >
-                    📥 Exportar Ventas (CSV)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleReopenLastSale}
-                    className="py-2 px-3 rounded-xl bg-[#1e222b] hover:bg-[#2b303c] border border-[#2b303c] text-[#eed889] font-bold"
-                  >
-                    🔄 Reabrir Última Venta
-                  </button>
-                </div>
-              </div>
-
-              {/* Cash Shift Summary & Cut (Corte de Turno) */}
-              <div className="lg:col-span-6 space-y-6">
-                <div className="p-6 ios-glass-card space-y-4">
-                  <div className="flex items-center justify-between pb-3 border-b border-white/10">
-                    <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">Arqueo y Corte de Caja</h3>
-                    <span className="text-xs text-[#8b92a0] tabular-nums">
-                      Turno iniciado: {new Date(state.shift.openedAt).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs tabular-nums">
-                    <div className="p-3 bg-[#1e222b] rounded-xl border border-[#2b303c]">
-                      <div className="text-[#8b92a0]">Fondo Inicial</div>
-                      <div className="text-base font-mono font-bold text-white mt-1">
-                        {formatMoney(state.shift.initialCashCents)}
-                      </div>
-                    </div>
-                    <div className="p-3 bg-[#1e222b] rounded-xl border border-[#2b303c]">
-                      <div className="text-[#8b92a0]">Ventas Efectivo</div>
-                      <div className="text-base font-mono font-bold text-[#25d366] mt-1">
-                        {formatMoney(state.shift.cashSalesCents)}
-                      </div>
-                    </div>
-                    <div className="p-3 bg-[#1e222b] rounded-xl border border-[#2b303c]">
-                      <div className="text-[#8b92a0]">Ventas Tarjeta</div>
-                      <div className="text-base font-mono font-bold text-[#eed889] mt-1">
-                        {formatMoney(state.shift.cardSalesCents)}
-                      </div>
-                    </div>
-                    <div className="p-3 bg-[#1e222b] rounded-xl border border-[#2b303c]">
-                      <div className="text-[#8b92a0]">Depósitos (+)</div>
-                      <div className="text-base font-mono font-bold text-[#25d366] mt-1">
-                        +{formatMoney(state.shift.depositosCents || 0)}
-                      </div>
-                    </div>
-                    <div className="p-3 bg-[#1e222b] rounded-xl border border-[#2b303c]">
-                      <div className="text-[#8b92a0]">Retiros (-)</div>
-                      <div className="text-base font-mono font-bold text-[#e05252] mt-1">
-                        -{formatMoney(state.shift.retirosCents || 0)}
-                      </div>
-                    </div>
-                    <div className="p-3 bg-[#1e222b] rounded-xl border border-[#d4af37]/40">
-                      <div className="text-[#eed889] font-semibold">Esperado en Cajón</div>
-                      <div className="text-base font-mono font-bold text-[#eed889] mt-1">
-                        {formatMoney(state.shift.expectedCashCents)}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Cash Drawer Movements (Ingreso / Retiro) */}
-                  {state.shift.isOpen && (
-                    <div className="grid grid-cols-2 gap-2.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setDrawerModalType('deposito');
-                          setDrawerAmount('');
-                          setDrawerReason('');
-                        }}
-                        className="min-h-[44px] py-2 px-3 rounded-xl bg-[#122822] hover:bg-[#173c34] border border-[#25d366]/40 text-[#25d366] text-xs font-bold flex items-center justify-center gap-1.5 transition-colors"
-                      >
-                        <ArrowDownCircle className="w-4 h-4" /> Ingreso de Efectivo
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setDrawerModalType('retiro');
-                          setDrawerAmount('');
-                          setDrawerReason('');
-                        }}
-                        className="min-h-[44px] py-2 px-3 rounded-xl bg-[#e05252]/10 hover:bg-[#e05252]/20 border border-[#e05252]/40 text-[#e05252] text-xs font-bold flex items-center justify-center gap-1.5 transition-colors"
-                      >
-                        <ArrowUpCircle className="w-4 h-4" /> Retiro de Efectivo
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Physical count input / Open New Shift with real cash fund */}
-                  <div className="p-4 bg-[#1e222b] rounded-xl border border-[#2b303c] space-y-3 text-xs">
-                    {state.shift.isOpen ? (
-                      <>
-                        <label className="block text-[#8b92a0] font-semibold">
-                          Conteo Físico de Dinero en Cajón ($ MXN)
-                        </label>
-                        <div className="flex gap-2">
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            placeholder="0.00"
-                            value={physicalCashCount}
-                            onChange={(e) => setPhysicalCashCount(e.target.value)}
-                            className="flex-1 min-h-[44px] px-3 py-2 rounded-xl bg-[#16191f] border border-[#2b303c] text-white font-mono tabular-nums"
-                          />
-                          <button
-                            type="button"
-                            onClick={handlePerformCashCut}
-                            className="min-h-[44px] px-4 py-2 rounded-xl bg-[#d4af37] text-black font-bold hover:bg-[#eed889]"
-                          >
-                            Hacer Corte Z
-                          </button>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <label className="block text-[#eed889] font-semibold">
-                          Fondo Inicial de Caja ($ MXN) para Nuevo Turno
-                        </label>
-                        <div className="flex gap-2">
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            placeholder="0.00"
-                            value={openingCashInput}
-                            onChange={(e) => setOpeningCashInput(e.target.value)}
-                            className="flex-1 min-h-[44px] px-3 py-2 rounded-xl bg-[#16191f] border border-[#2b303c] text-white font-mono tabular-nums"
-                          />
-                          <button
-                            type="button"
-                            onClick={handleOpenNewShift}
-                            className="min-h-[44px] px-4 py-2 rounded-xl bg-[#25d366] text-black font-bold hover:bg-[#20b858]"
-                          >
-                            Abrir Nuevo Turno
-                          </button>
-                        </div>
-                      </>
-                    )}
-                    {state.shift.closedAt && (
-                      <div className="text-xs pt-1">
-                        <span className="text-[#8b92a0]">Último corte registrado: </span>
-                        <span className="font-bold text-white tabular-nums">
-                          Diferencia: {formatMoney(state.shift.differenceCents || 0)}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Sales history of current shift */}
-                <div className="p-6 ios-glass-card">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="font-serif font-bold text-base text-white tracking-[-0.02em]">Historial de Ventas</h3>
-                    <span className="text-xs text-[rgba(240,230,211,0.58)] tabular-nums">{state.sales.length} cobros</span>
-                  </div>
-                  {state.sales.length === 0 ? (
-                    <div className="py-8 text-center text-[#8b92a0] text-xs">Sin ventas cobradas aún en este turno.</div>
-                  ) : (
-                    <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
-                      {state.sales.slice().reverse().map((sale) => (
-                        <div
-                          key={sale.id}
-                          className="flex items-center justify-between p-3 rounded-xl bg-[#1e222b] border border-[#2b303c] text-xs"
-                        >
-                          <div>
-                            <div className="font-bold text-white flex items-center gap-2">
-                              <span>{sale.receipt}</span>
-                              <span className="text-[#8b92a0]">· {locationLabel(sale.service, sale.location)}</span>
-                            </div>
-                            <div className="text-xs text-[#8b92a0]">
-                              {sale.paymentMethod.toUpperCase()} · {sale.waiter} · {new Date(sale.paidAt).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-3">
-                            <span className="font-mono font-bold text-sm text-[#eed889]">{formatMoney(sale.totalCents)}</span>
-                            <button
-                              type="button"
-                              onClick={() => setActiveReceiptSale(sale)}
-                              className="px-2 py-1 rounded bg-[#16191f] border border-[#2b303c] text-[#8b92a0] hover:text-white"
-                            >
-                              Ticket
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
+            <CashierView
+              state={state}
+              setState={setState}
+              openOrders={openOrders}
+              payOrderId={payOrderId}
+              setPayOrderId={setPayOrderId}
+              currentOrderId={currentOrderId}
+              onClearActiveDraft={handleClearActiveDraft}
+              canCollectPayment={canCollectPayment}
+              canCashCut={canCashCut}
+              firebaseUser={firebaseUser}
+              authorizedEmails={authorizedEmails}
+              hasMoreSales={hasMoreSales}
+              loadingMoreSales={loadingMoreSales}
+              onLoadMoreSales={() => void handleLoadMoreSales()}
+              onExportSalesCsv={handleExportSalesCsv}
+              onReopenLastSale={handleReopenLastSale}
+              onOpenPreCheck={handleOpenPreCheck}
+              onOpenReceipt={setActiveReceiptSale}
+              onNotify={notify}
+            />
           )}
 
           {/* VIEW 6: INVENTORY & STOCK */}
@@ -5089,70 +2936,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         </div>
       )}
 
-      {/* Cash Drawer Movement Modal (Ingreso / Retiro) */}
-      {drawerModalType && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
-          <div className="ios-glass-modal max-w-sm w-full p-6 space-y-4 text-left">
-            <div className="flex items-center justify-between">
-              <h3 className="font-serif font-bold text-base text-white tracking-[-0.02em]">
-                {drawerModalType === 'deposito' ? 'Ingreso de Efectivo a Caja' : 'Retiro Parcial de Caja'}
-              </h3>
-              <button
-                type="button"
-                onClick={() => setDrawerModalType(null)}
-                className="w-11 h-11 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-[rgba(240,230,211,0.72)] hover:text-white transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleSaveDrawerMovement} className="space-y-3 text-xs">
-              <div>
-                <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">Monto ($ MXN) *</label>
-                <input
-                  autoFocus
-                  type="number"
-                  min="1"
-                  step="0.01"
-                  placeholder="0.00"
-                  value={drawerAmount}
-                  onChange={(e) => setDrawerAmount(e.target.value)}
-                  className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white font-mono text-sm tabular-nums focus:outline-none focus:border-[#c8a84b]"
-                />
-              </div>
-              <div>
-                <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">Concepto / Motivo</label>
-                <input
-                  type="text"
-                  placeholder={drawerModalType === 'deposito' ? 'Ej. Cambio en monedas / fondo adicional' : 'Ej. Pago a proveedor / corte parcial'}
-                  value={drawerReason}
-                  onChange={(e) => setDrawerReason(e.target.value)}
-                  className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white focus:outline-none focus:border-[#c8a84b]"
-                />
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setDrawerModalType(null)}
-                  className="min-h-[44px] px-4 py-2 rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] font-semibold text-white transition-colors"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  className={`min-h-[44px] px-5 py-2 rounded-2xl font-bold transition-colors ${
-                    drawerModalType === 'deposito'
-                      ? 'bg-[#25d366] text-[#0a0a0b]'
-                      : 'bg-[#e05252] text-white'
-                  }`}
-                >
-                  Registrar {drawerModalType === 'deposito' ? 'Ingreso' : 'Retiro'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Cash Drawer Movement Modal now encapsulated inside CashierView.tsx */}
 
       {/* Inventory Intake / Adjust / MinStock Modal */}
       {inventoryModal && (
@@ -5236,133 +3020,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         </div>
       )}
 
-      {/* iOS Table Quick-Action Sheet Modal */}
-      {tableSheetLoc && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-end sm:items-center justify-center p-0 sm:p-4" role="dialog" aria-modal="true">
-          <div className="ios-glass-modal w-full sm:max-w-lg rounded-b-none sm:rounded-[28px] p-6 space-y-4 text-left max-h-[85dvh] overflow-y-auto">
-            {(() => {
-              const ordersHere = state.orders.filter(
-                (o) =>
-                  o.status !== 'closed' &&
-                  o.service === tableSheetLoc.service &&
-                  String(o.location) === tableSheetLoc.loc
-              );
-              const totalHere = ordersHere.reduce((s, o) => s + o.totalCents, 0);
-              return (
-                <>
-                  <div className="flex items-start justify-between gap-3 pb-3 border-b border-white/10">
-                    <div>
-                      <h3 className="font-serif font-bold text-xl text-white tracking-[-0.02em]">
-                        {tableSheetLoc.label}
-                      </h3>
-                      <p className="text-xs text-[rgba(240,230,211,0.68)] tabular-nums mt-0.5">
-                        {tableSheetLoc.section} · {ordersHere.length} cuenta{ordersHere.length !== 1 ? 's' : ''} · {formatMoney(totalHere)}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setTableSheetLoc(null)}
-                      className="w-11 h-11 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-[rgba(240,230,211,0.72)] hover:text-white transition-colors"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-
-                  <div className="space-y-3">
-                    {ordersHere.map((ord) => (
-                      <div
-                        key={ord.id}
-                        className="p-4 rounded-2xl bg-[#0a0a0b]/60 border border-white/10 space-y-3"
-                      >
-                        <div className="flex items-center justify-between gap-2 tabular-nums">
-                          <div>
-                            <div className="text-sm font-bold text-white flex items-center gap-2">
-                              <span>Cuenta #{ord.number}</span>
-                              <span className="text-xs text-[#e8d090] uppercase">{ord.status}</span>
-                            </div>
-                            <div className="text-xs text-[rgba(240,230,211,0.62)] mt-0.5">
-                              {ord.waiter} · {ord.items.reduce((s, i) => s + i.qty, 0)} art. · {formatElapsedTime(ord.createdAt, nowMs)}
-                            </div>
-                          </div>
-                          <div className="font-mono font-bold text-base text-[#e8d090]">
-                            {formatMoney(ord.totalCents)}
-                          </div>
-                        </div>
-
-                        <div className="flex flex-wrap gap-2">
-                          {canViewPos && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setTableSheetLoc(null);
-                                loadOrderIntoDraft(ord);
-                              }}
-                              className="flex-1 min-h-[42px] px-3 py-2 rounded-2xl bg-[#173c34] hover:bg-[#28584c] border border-[#c8a84b]/40 text-white text-xs font-bold whitespace-nowrap"
-                            >
-                              Editar / Agregar
-                            </button>
-                          )}
-                          {ord.status === 'ready' && (
-                            <button
-                              type="button"
-                              onClick={() => handleAdvanceOrderStatus(ord.id, 'ready')}
-                              className="min-h-[42px] px-3 py-2 rounded-2xl bg-[#25d366]/20 hover:bg-[#25d366] text-[#25d366] hover:text-[#0a0a0b] text-xs font-bold whitespace-nowrap transition-colors"
-                            >
-                              Marcar Servido
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setTableSheetLoc(null);
-                              handleOpenPreCheck(ord);
-                            }}
-                            className="min-h-[42px] px-3 py-2 rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-[#e8d090] text-xs font-semibold whitespace-nowrap inline-flex items-center gap-1"
-                          >
-                            <FileText className="w-3.5 h-3.5" /> Pre-cuenta
-                          </button>
-                          {canCollectPayment && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setTableSheetLoc(null);
-                                setPayOrderId(ord.id);
-                                setView('cash');
-                              }}
-                              className="min-h-[42px] px-3.5 py-2 rounded-2xl bg-[#c8a84b] hover:bg-[#e8d090] text-[#0a0a0b] text-xs font-bold whitespace-nowrap inline-flex items-center gap-1"
-                            >
-                              <DollarSign className="w-3.5 h-3.5" /> Cobrar
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  {canViewPos && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const target = tableSheetLoc;
-                        setTableSheetLoc(null);
-                        setCurrentService(target.service);
-                        setCurrentTable(target.loc);
-                        setCurrentOrderId(null);
-                        setCart([]);
-                        setView('pos');
-                        notify(`Nueva cuenta independiente en ${target.label}.`);
-                      }}
-                      className="w-full min-h-[46px] py-3 rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/15 text-[#e8d090] font-bold text-xs flex items-center justify-center gap-1.5 transition-colors"
-                    >
-                      <Plus className="w-4 h-4" /> Abrir Otra Cuenta Independiente en {tableSheetLoc.label}
-                    </button>
-                  )}
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
+      {/* Table Quick-Action Sheet Modal now encapsulated inside TableMap.tsx */}
 
       {/* Employee Firestore PIN Authentication Module (Gate / Switch / Lock) */}
       {(!employeeAuthenticated || pinPadMode === 'switch' || pinPadMode === 'unlock' || isSessionLocked) && (
@@ -5857,23 +3515,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                 type="button"
                 onClick={() => {
                   const modsArray = getModifiersArray(selectedModifiers);
-                  const station = modifierModalProduct.station || classifyProductStation(modifierModalProduct.category);
-
-                  setCart((prev) => [
-                    ...prev,
-                    {
-                      lineId: uid(),
-                      key: modifierModalProduct.key,
-                      name: modifierModalProduct.name,
-                      priceCents: modifierModalProduct.priceCents,
-                      qty: 1,
-                      note: '',
-                      station,
-                      itemStatus: 'pending',
-                      modifiers: modsArray,
-                    },
-                  ]);
-                  notify(`+1 ${modifierModalProduct.name} (${modsArray.length} modificadores)`);
+                  handleAddProductWithModifiers(modifierModalProduct, modsArray);
                   setModifierModalProduct(null);
                   setSelectedModifiers({});
                 }}

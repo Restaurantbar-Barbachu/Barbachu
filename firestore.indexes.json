@@ -9,6 +9,23 @@
       ]
     },
     {
+      "collectionGroup": "orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "paid", "order": "ASCENDING" },
+        { "fieldPath": "updatedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "authorizedEmails", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "paid", "order": "ASCENDING" },
+        { "fieldPath": "updatedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "sales",
       "queryScope": "COLLECTION",
       "fields": [
@@ -22,6 +39,31 @@
       "fields": [
         { "fieldPath": "authorizedEmails", "arrayConfig": "CONTAINS" },
         { "fieldPath": "openedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "shifts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "isOpen", "order": "ASCENDING" },
+        { "fieldPath": "openedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "shifts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "authorizedEmails", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "isOpen", "order": "ASCENDING" },
+        { "fieldPath": "openedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "inventory",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "authorizedEmails", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "clave", "order": "ASCENDING" }
       ]
     },
     {
@@ -54,6 +96,14 @@
       "fields": [
         { "fieldPath": "role", "order": "ASCENDING" },
         { "fieldPath": "authorizedEmails", "arrayConfig": "CONTAINS" }
+      ]
+    },
+    {
+      "collectionGroup": "pos_terminals",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "authorizedEmails", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "lastSeenAt", "order": "DESCENDING" }
       ]
     }
   ],

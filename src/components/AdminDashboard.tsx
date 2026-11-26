@@ -463,7 +463,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       const nextProd = {
         ...p,
         priceCents: newCents,
-        sourcePrice: Math.round(newCents / 100),
+        sourcePrice: Math.round(newCents) / 100,
       };
       changedProducts.push(nextProd);
       return nextProd;

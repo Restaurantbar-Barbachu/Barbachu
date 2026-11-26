@@ -51,7 +51,7 @@
   ],
   "rewrites": [
     {
-      "source": "/((?!api/|assets/|sw\\.js$|manifest\\.json$|robots\\.txt$|icon\\.svg$|.*\\.(?:png|ico|svg|webp|jpg|jpeg|css|js|txt|xml|json)).*)",
+      "source": "/((?!api/|assets/|sw\\.js$|manifest\\.json$|manifest\\.webmanifest$|robots\\.txt$|icon\\.svg$|.*\\.(?:png|ico|svg|webp|jpg|jpeg|css|js|txt|xml|json|webmanifest)).*)",
       "destination": "/index.html"
     }
   ]

@@ -356,6 +356,107 @@ export function closeAndPayOrder(
   return nextState;
 }
 
+function getNormalizedModifierSignature(item: OrderItem): string {
+  const mods = item.modifiers || item.modificadores || [];
+  if (mods.length === 0) return '';
+  return mods
+    .map((m) => `${String(m.name || '').trim().toLowerCase()}:${Math.max(0, Math.round(Number(m.priceCents) || 0))}`)
+    .sort()
+    .join('|');
+}
+
+export function splitOrderItemByTarget(
+  original: Order,
+  targetKeyOrLineId: string,
+  splitOrderNumber: number,
+  newOrderId: string = uid(),
+  nowIso: string = new Date().toISOString()
+): { updatedOriginal: Order; splitOrder: Order; movedItem: OrderItem } | null {
+  const cleanTarget = targetKeyOrLineId.trim();
+  if (!cleanTarget || original.items.length < 2) return null;
+
+  let matchIdx = original.items.findIndex((i) => i.lineId && i.lineId === cleanTarget);
+  if (matchIdx < 0) {
+    matchIdx = original.items.findIndex((i) => i.key === cleanTarget);
+  }
+  if (matchIdx < 0) return null;
+
+  const matchedItem = original.items[matchIdx];
+  const remainingItems = original.items.filter((_, idx) => idx !== matchIdx);
+  const remainingSub = subtotalCents(remainingItems);
+  const clampedDiscount = Math.min(Math.max(0, original.discountCents || 0), remainingSub);
+
+  const movedItem: OrderItem = {
+    ...matchedItem,
+    lineId: matchedItem.lineId || uid(),
+  };
+
+  const splitOrder: Order = {
+    ...original,
+    id: newOrderId,
+    number: splitOrderNumber,
+    items: [movedItem],
+    totalCents: lineTotalCents(movedItem),
+    discountCents: 0,
+    note: `Dividida de cuenta #${original.number}`,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  const updatedOriginal: Order = {
+    ...original,
+    items: remainingItems,
+    discountCents: clampedDiscount,
+    totalCents: Math.max(0, remainingSub - clampedDiscount),
+    updatedAt: nowIso,
+  };
+
+  return { updatedOriginal, splitOrder, movedItem };
+}
+
+export function mergeOrdersIntoTarget(
+  targetOrder: Order,
+  sourceOrder: Order,
+  nowIso: string = new Date().toISOString()
+): Order {
+  const mergedMap = new Map<string, OrderItem>();
+  for (const it of [...targetOrder.items, ...sourceOrder.items]) {
+    const modSig = getNormalizedModifierSignature(it);
+    const mergeKey = `${it.key}::${(it.note || '').trim()}::${it.itemStatus || 'pending'}::${modSig}`;
+    const existing = mergedMap.get(mergeKey);
+    if (existing) {
+      mergedMap.set(mergeKey, {
+        ...existing,
+        qty: existing.qty + it.qty,
+      });
+    } else {
+      mergedMap.set(mergeKey, {
+        ...it,
+        lineId: it.lineId || uid(),
+      });
+    }
+  }
+
+  const mergedItems = Array.from(mergedMap.values());
+  const mergedSub = subtotalCents(mergedItems);
+  const rawDiscount = Math.max(0, targetOrder.discountCents || 0) + Math.max(0, sourceOrder.discountCents || 0);
+  const mergedDiscount = Math.min(mergedSub, rawDiscount);
+  const mergedTotal = Math.max(0, mergedSub - mergedDiscount);
+  const mergedNote = [targetOrder.note, sourceOrder.note, `Unida con Cuenta #${sourceOrder.number}`]
+    .filter(Boolean)
+    .join(' · ')
+    .slice(0, 300);
+
+  return {
+    ...targetOrder,
+    items: mergedItems,
+    discountCents: mergedDiscount,
+    totalCents: mergedTotal,
+    note: mergedNote,
+    updatedAt: nowIso,
+  };
+}
+
 interface ReceiptConfig {
   name?: string;
   address?: string;

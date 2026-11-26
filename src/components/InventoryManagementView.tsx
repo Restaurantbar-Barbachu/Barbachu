@@ -1,4 +1,5 @@
-import React, { useState, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { User } from 'firebase/auth';
 import {
   AlertTriangle,
@@ -6,14 +7,22 @@ import {
   Package,
   Plus,
   Search,
+  ShieldCheck,
   Trash2,
   X,
 } from 'lucide-react';
 import { FullPosState, InventoryItem, InventoryMovement, AuditLogEntry } from '../types';
 import { formatMoney } from '../storage';
 import { uid } from '../core';
-import { fsCreateInventoryItem, fsDeleteInventoryItem, fsSaveInventoryMovement } from '../lib/firestoreSync';
+import {
+  fsCreateInventoryItem,
+  fsDeleteInventoryItem,
+  fsSaveInventoryMovement,
+  fsVerifyAnyAdminPinFromFirestore,
+} from '../lib/firestoreSync';
 import { downloadCsvFile } from '../utils/csv';
+import { verifyPinSecret } from '../utils/pinSecurity';
+import { IosPinPadModal } from './IosPinPadModal';
 
 interface InventoryManagementViewProps {
   state: FullPosState;
@@ -54,9 +63,35 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
   const [modalQty, setModalQty] = useState<string>('');
   const [modalCost, setModalCost] = useState<string>('');
   const [modalReason, setModalReason] = useState<string>('');
+  const [pendingMermaAuth, setPendingMermaAuth] = useState<{
+    item: InventoryItem;
+    type: 'merma' | 'ajuste';
+    qtyVal: number;
+    costVal: number;
+    reasonText: string;
+  } | null>(null);
 
   // Delete confirmation
   const [confirmDeleteClave, setConfirmDeleteClave] = useState<number | null>(null);
+
+  const openActionModal = (item: InventoryItem, type: 'entrada' | 'ajuste' | 'merma' | 'minStock') => {
+    setModalQty(type === 'minStock' ? String(item.minStock ?? 0) : type === 'ajuste' ? String(item.stock ?? 0) : '');
+    setModalCost(item.costo > 0 ? String(item.costo) : '');
+    setModalReason('');
+    setModalAction({ item, type });
+  };
+
+  useEffect(() => {
+    if (!modalAction && confirmDeleteClave === null) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setModalAction(null);
+        setConfirmDeleteClave(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [modalAction, confirmDeleteClave]);
 
   const inventoryList = useMemo(() => Object.values(state.inventory || {}), [state.inventory]);
 
@@ -149,6 +184,110 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
     setActiveSubTab('insumos');
   };
 
+  const commitInventoryMovement = (
+    payload: {
+      item: InventoryItem;
+      type: 'entrada' | 'ajuste' | 'merma';
+      qtyVal: number;
+      costVal: number;
+      reasonText: string;
+    },
+    authorizingAdminName?: string
+  ) => {
+    const { item, type, qtyVal, costVal, reasonText } = payload;
+    const now = new Date().toISOString();
+
+    let nextStock = item.stock;
+    if (type === 'entrada') {
+      nextStock += qtyVal;
+    } else if (type === 'merma') {
+      nextStock = Math.max(0, item.stock - qtyVal);
+    } else {
+      nextStock = qtyVal; // Ajuste directo
+    }
+
+    const updatedItem: InventoryItem = {
+      ...item,
+      stock: Math.max(0, nextStock),
+      costo: costVal > 0 ? costVal : item.costo,
+    };
+
+    const defaultReason =
+      type === 'entrada'
+        ? 'Compra / Recepción'
+        : type === 'merma'
+        ? 'Merma / Desperdicio'
+        : 'Ajuste de inventario físico';
+
+    const baseReason = reasonText.trim() || defaultReason;
+    const finalReason = authorizingAdminName
+      ? `${baseReason} (Autorizado por Admin: ${authorizingAdminName})`
+      : baseReason;
+
+    const mov: InventoryMovement = {
+      id: uid(),
+      at: now,
+      clave: item.clave,
+      descripcion: item.descripcion,
+      type,
+      qty: qtyVal,
+      costUnit: costVal > 0 ? costVal : item.costo,
+      reason: finalReason,
+      user: state.activeUser.name,
+    };
+
+    const actionVerb =
+      type === 'entrada'
+        ? `+${qtyVal}`
+        : type === 'merma'
+        ? `-${qtyVal} (Merma)`
+        : `ajustado a ${qtyVal}`;
+
+    const auditEntry: AuditLogEntry = {
+      id: uid(),
+      at: now,
+      user: state.activeUser.name,
+      action: `Inventario: ${type.toUpperCase()}`,
+      detail: `${item.descripcion} (${item.unidad}) · ${actionVerb} · Stock final: ${updatedItem.stock}${
+        authorizingAdminName ? ` · Autorizó: ${authorizingAdminName}` : ''
+      }`,
+      reason: finalReason,
+    };
+
+    setState((prev) => ({
+      ...prev,
+      inventory: { ...prev.inventory, [item.clave]: updatedItem },
+      inventoryMovements: [...(prev.inventoryMovements || []), mov],
+      audit: [...prev.audit, auditEntry],
+    }));
+
+    if (firebaseUser) {
+      const costChanged = isFirebaseAdmin && costVal > 0 && costVal !== item.costo;
+      void fsSaveInventoryMovement(updatedItem, mov, firebaseUser, authorizedEmails, auditEntry, {
+        updateCost: costChanged,
+      })
+        .then((committedStock) => {
+          setState((prev) => {
+            const current = prev.inventory[item.clave];
+            if (!current || current.stock === committedStock) return prev;
+            return {
+              ...prev,
+              inventory: { ...prev.inventory, [item.clave]: { ...current, stock: committedStock } },
+            };
+          });
+        })
+        .catch((err) => {
+          notify(`Error guardando movimiento en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+        });
+    }
+
+    setModalAction(null);
+    setModalQty('');
+    setModalCost('');
+    setModalReason('');
+    notify(`Inventario actualizado: ${item.descripcion} (${updatedItem.stock} ${item.unidad}).`);
+  };
+
   const handleExecuteModalAction = () => {
     if (!modalAction) return;
     const { item, type } = modalAction;
@@ -193,77 +332,27 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
       return;
     }
 
-    let nextStock = item.stock;
-    if (type === 'entrada') {
-      nextStock += qtyVal;
-    } else if (type === 'merma') {
-      nextStock = Math.max(0, item.stock - qtyVal);
-    } else {
-      nextStock = qtyVal; // Ajuste directo
-    }
-
-    const updatedItem: InventoryItem = {
-      ...item,
-      stock: Math.max(0, nextStock),
-      costo: costVal > 0 ? costVal : item.costo,
-    };
-
-    const defaultReason =
-      type === 'entrada'
-        ? 'Compra / Recepción'
-        : type === 'merma'
-        ? 'Merma / Desperdicio'
-        : 'Ajuste de inventario físico';
-
-    const mov: InventoryMovement = {
-      id: uid(),
-      at: now,
-      clave: item.clave,
-      descripcion: item.descripcion,
-      type,
-      qty: qtyVal,
-      costUnit: costVal > 0 ? costVal : item.costo,
-      reason: modalReason.trim() || defaultReason,
-      user: state.activeUser.name,
-    };
-
-    const actionVerb =
-      type === 'entrada'
-        ? `+${qtyVal}`
-        : type === 'merma'
-        ? `-${qtyVal} (Merma)`
-        : `ajustado a ${qtyVal}`;
-
-    const auditEntry: AuditLogEntry = {
-      id: uid(),
-      at: now,
-      user: state.activeUser.name,
-      action: `Inventario: ${type.toUpperCase()}`,
-      detail: `${item.descripcion} (${item.unidad}) · ${actionVerb} · Stock final: ${updatedItem.stock}`,
-      reason: modalReason,
-    };
-
-    setState((prev) => ({
-      ...prev,
-      inventory: { ...prev.inventory, [item.clave]: updatedItem },
-      inventoryMovements: [...(prev.inventoryMovements || []), mov],
-      audit: [...prev.audit, auditEntry],
-    }));
-
-    if (firebaseUser) {
-      const costChanged = isFirebaseAdmin && costVal > 0 && costVal !== item.costo;
-      void fsSaveInventoryMovement(updatedItem, mov, firebaseUser, authorizedEmails, auditEntry, {
-        updateCost: costChanged,
-      }).catch((err) => {
-        notify(`Error guardando movimiento en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+    if ((type === 'merma' || type === 'ajuste') && state.activeUser.role !== 'admin') {
+      setPendingMermaAuth({
+        item,
+        type,
+        qtyVal,
+        costVal: Number.isFinite(costVal) ? costVal : 0,
+        reasonText: modalReason.trim(),
       });
+      return;
     }
 
-    setModalAction(null);
-    setModalQty('');
-    setModalCost('');
-    setModalReason('');
-    notify(`Inventario actualizado: ${item.descripcion} (${updatedItem.stock} ${item.unidad}).`);
+    commitInventoryMovement(
+      {
+        item,
+        type,
+        qtyVal,
+        costVal: Number.isFinite(costVal) ? costVal : 0,
+        reasonText: modalReason.trim(),
+      },
+      type === 'merma' || type === 'ajuste' ? state.activeUser.name : undefined
+    );
   };
 
   const handleDeleteItem = (clave: number) => {
@@ -505,7 +594,7 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
                       <td className="py-3.5 pr-2 text-right space-x-1.5 whitespace-nowrap">
                         <button
                           type="button"
-                          onClick={() => setModalAction({ item, type: 'minStock' })}
+                          onClick={() => openActionModal(item, 'minStock')}
                           className="min-h-[34px] px-2.5 py-1 rounded-xl bg-white/[0.06] hover:bg-white/[0.14] text-[#e8d090] border border-white/15 font-semibold"
                           title="Establecer umbral de alerta"
                         >
@@ -513,7 +602,7 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
                         </button>
                         <button
                           type="button"
-                          onClick={() => setModalAction({ item, type: 'entrada' })}
+                          onClick={() => openActionModal(item, 'entrada')}
                           className="min-h-[34px] px-2.5 py-1 rounded-xl bg-[#173c34] hover:bg-[#28584c] text-[#25d366] border border-[#25d366]/40 font-bold"
                           title="Registrar compra / entrada"
                         >
@@ -521,17 +610,17 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
                         </button>
                         <button
                           type="button"
-                          onClick={() => setModalAction({ item, type: 'merma' })}
+                          onClick={() => openActionModal(item, 'merma')}
                           className="min-h-[34px] px-2.5 py-1 rounded-xl bg-[#e05252]/15 hover:bg-[#e05252]/25 text-[#e05252] border border-[#e05252]/40 font-bold"
-                          title="Registrar merma o salida por desperdicio"
+                          title="Registrar merma o salida por desperdicio (requiere autorización de Admin)"
                         >
                           − Merma
                         </button>
                         <button
                           type="button"
-                          onClick={() => setModalAction({ item, type: 'ajuste' })}
+                          onClick={() => openActionModal(item, 'ajuste')}
                           className="min-h-[34px] px-2.5 py-1 rounded-xl bg-white/[0.06] hover:bg-white/[0.14] text-white border border-white/15 font-semibold"
-                          title="Ajustar conteo físico"
+                          title="Ajustar conteo físico (requiere autorización de Admin)"
                         >
                           Ajustar
                         </button>
@@ -735,130 +824,187 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
         </div>
       )}
 
-      {/* MODAL: ACCIÓN EN INSUMO (ENTRADA / AJUSTE / MÍNIMO) */}
-      {modalAction && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
-          <div className="ios-glass-modal max-w-sm w-full p-6 space-y-4 text-left">
-            <div className="flex items-center justify-between">
-              <h3 className="font-serif font-bold text-base text-white">
-                {modalAction.type === 'entrada'
-                  ? 'Registrar Compra / Entrada'
-                  : modalAction.type === 'merma'
-                  ? 'Registrar Merma / Baja'
-                  : modalAction.type === 'ajuste'
-                  ? 'Ajustar Conteo Físico'
-                  : 'Configurar Umbral de Alerta'}
-              </h3>
-              <button
-                type="button"
-                onClick={() => setModalAction(null)}
-                className="w-9 h-9 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div>
-              <div className="text-sm font-bold text-[#e8d090]">{modalAction.item.descripcion}</div>
-              <div className="text-xs text-[rgba(240,230,211,0.68)]">
-                Stock actual: <strong className="text-white">{modalAction.item.stock} {modalAction.item.unidad}</strong>
-              </div>
-            </div>
-
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">
+      {/* MODAL: ACCIÓN EN INSUMO (ENTRADA / MERMA / AJUSTE / MÍNIMO) */}
+      {modalAction &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
+            <div className="ios-glass-modal max-w-sm w-full p-6 space-y-4 text-left max-h-[90dvh] overflow-y-auto">
+              <div className="flex items-center justify-between">
+                <h3 className="font-serif font-bold text-base text-white">
                   {modalAction.type === 'entrada'
-                    ? 'Cantidad a sumar (Compra)'
+                    ? 'Registrar Compra / Entrada'
                     : modalAction.type === 'merma'
-                    ? 'Cantidad a descontar (Merma)'
+                    ? 'Registrar Merma / Baja'
                     : modalAction.type === 'ajuste'
-                    ? 'Nueva existencia física total'
-                    : 'Umbral mínimo para alerta'}
-                </label>
-                <input
-                  type="number"
-                  autoFocus
-                  value={modalQty}
-                  onChange={(e) => setModalQty(e.target.value)}
-                  placeholder="Cantidad..."
-                  className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white font-mono tabular-nums focus:outline-none focus:border-[#c8a84b]"
-                />
+                    ? 'Ajustar Conteo Físico'
+                    : 'Configurar Umbral de Alerta'}
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setModalAction(null)}
+                  aria-label="Cerrar modal de inventario"
+                  className="w-9 h-9 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-white"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
 
-              {modalAction.type !== 'minStock' && (
-                <>
-                  <div>
-                    <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">Costo Unitario ($ MXN)</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={modalCost || modalAction.item.costo}
-                      onChange={(e) => setModalCost(e.target.value)}
-                      className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white font-mono tabular-nums focus:outline-none focus:border-[#c8a84b]"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">Motivo / Factura / Proveedor</label>
-                    <input
-                      type="text"
-                      value={modalReason}
-                      onChange={(e) => setModalReason(e.target.value)}
-                      placeholder="Ej. Factura #492, Conteo semanal..."
-                      className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white focus:outline-none focus:border-[#c8a84b]"
-                    />
-                  </div>
-                </>
-              )}
-            </div>
+              <div>
+                <div className="text-sm font-bold text-[#e8d090]">{modalAction.item.descripcion}</div>
+                <div className="text-xs text-[rgba(240,230,211,0.68)]">
+                  Stock actual: <strong className="text-white">{modalAction.item.stock} {modalAction.item.unidad}</strong>
+                </div>
+              </div>
 
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setModalAction(null)}
-                className="min-h-[42px] px-4 py-2 rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] text-xs font-semibold text-white transition-colors"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                onClick={handleExecuteModalAction}
-                className="min-h-[42px] px-5 py-2 rounded-2xl text-xs font-bold bg-[#c8a84b] hover:bg-[#e8d090] text-[#0a0a0b] transition-colors"
-              >
-                Guardar
-              </button>
+              {(modalAction.type === 'merma' || modalAction.type === 'ajuste') && state.activeUser.role !== 'admin' && (
+                <div className="p-2.5 rounded-2xl bg-[#f2a93b]/15 border border-[#f2a93b]/40 text-[11px] text-[#f2a93b] flex items-center gap-2 font-semibold">
+                  <ShieldCheck className="w-4 h-4 shrink-0" />
+                  <span>Al guardar se solicitará el PIN de un Administrador para autorizar la baja.</span>
+                </div>
+              )}
+
+              <div className="space-y-3 text-xs">
+                <div>
+                  <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">
+                    {modalAction.type === 'entrada'
+                      ? 'Cantidad a sumar (Compra)'
+                      : modalAction.type === 'merma'
+                      ? 'Cantidad a descontar (Merma)'
+                      : modalAction.type === 'ajuste'
+                      ? 'Nueva existencia física total'
+                      : 'Umbral mínimo para alerta'}
+                  </label>
+                  <input
+                    type="number"
+                    autoFocus
+                    min="0"
+                    step="any"
+                    value={modalQty}
+                    onChange={(e) => setModalQty(e.target.value)}
+                    placeholder="Cantidad..."
+                    className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white font-mono tabular-nums focus:outline-none focus:border-[#c8a84b]"
+                  />
+                </div>
+
+                {modalAction.type !== 'minStock' && (
+                  <>
+                    <div>
+                      <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">Costo Unitario ($ MXN)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={modalCost}
+                        onChange={(e) => setModalCost(e.target.value)}
+                        placeholder={String(modalAction.item.costo || 0)}
+                        className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white font-mono tabular-nums focus:outline-none focus:border-[#c8a84b]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">Motivo / Factura / Proveedor</label>
+                      <input
+                        type="text"
+                        value={modalReason}
+                        onChange={(e) => setModalReason(e.target.value)}
+                        placeholder={
+                          modalAction.type === 'merma'
+                            ? 'Ej. Producto caducado, derrame o merma de preparación...'
+                            : 'Ej. Factura #492, Conteo semanal...'
+                        }
+                        className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white focus:outline-none focus:border-[#c8a84b]"
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setModalAction(null)}
+                  className="min-h-[42px] px-4 py-2 rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] text-xs font-semibold text-white transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExecuteModalAction}
+                  className="min-h-[42px] px-5 py-2 rounded-2xl text-xs font-bold bg-[#c8a84b] hover:bg-[#e8d090] text-[#0a0a0b] transition-colors"
+                >
+                  {modalAction.type === 'merma' && state.activeUser.role !== 'admin'
+                    ? 'Autorizar y Guardar'
+                    : 'Guardar'}
+                </button>
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body
+        )}
 
       {/* CONFIRM DELETE MODAL */}
-      {confirmDeleteClave !== null && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
-          <div className="ios-glass-modal max-w-sm w-full p-6 space-y-4 text-left">
-            <h3 className="font-serif font-bold text-base text-[#e05252]">Eliminar Insumo</h3>
-            <p className="text-xs text-[rgba(240,230,211,0.8)]">
-              ¿Estás seguro de eliminar este insumo del sistema? Esta acción no se puede deshacer.
-            </p>
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setConfirmDeleteClave(null)}
-                className="min-h-[40px] px-4 py-2 rounded-2xl bg-white/[0.06] text-white text-xs font-semibold"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                onClick={() => handleDeleteItem(confirmDeleteClave)}
-                className="min-h-[40px] px-4 py-2 rounded-2xl bg-[#e05252] text-white text-xs font-bold"
-              >
-                Sí, Eliminar
-              </button>
+      {confirmDeleteClave !== null &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
+            <div className="ios-glass-modal max-w-sm w-full p-6 space-y-4 text-left">
+              <h3 className="font-serif font-bold text-base text-[#e05252]">Eliminar Insumo</h3>
+              <p className="text-xs text-[rgba(240,230,211,0.8)]">
+                ¿Estás seguro de eliminar este insumo del sistema? Esta acción no se puede deshacer.
+              </p>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setConfirmDeleteClave(null)}
+                  className="min-h-[40px] px-4 py-2 rounded-2xl bg-white/[0.06] text-white text-xs font-semibold"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDeleteItem(confirmDeleteClave)}
+                  className="min-h-[40px] px-4 py-2 rounded-2xl bg-[#e05252] text-white text-xs font-bold"
+                >
+                  Sí, Eliminar
+                </button>
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body
+        )}
+
+      {/* ADMIN PIN AUTHORIZATION FOR MERMA / AJUSTE */}
+      <IosPinPadModal
+        open={Boolean(pendingMermaAuth)}
+        title="Autorización de Administrador — Merma"
+        subtitle={`Confirma el registro de ${pendingMermaAuth?.type === 'merma' ? 'merma' : 'ajuste'} para "${pendingMermaAuth?.item.descripcion || ''}" (${pendingMermaAuth?.qtyVal ?? ''} ${pendingMermaAuth?.item.unidad || ''}).`}
+        rateLimitScope="inventory-merma-admin"
+        allowCancel={true}
+        onCancel={() => setPendingMermaAuth(null)}
+        onValidatePin={async (enteredPin) => {
+          if (!pendingMermaAuth) return false;
+          let adminName: string | null = null;
+          if (firebaseUser) {
+            const res = await fsVerifyAnyAdminPinFromFirestore(enteredPin, firebaseUser, authorizedEmails);
+            if (res.ok && res.user) {
+              adminName = res.user.name;
+            }
+          } else {
+            for (const u of (state.users || []).filter((usr) => usr.role === 'admin')) {
+              const ok = await verifyPinSecret(enteredPin, u.pinHash, u.pin);
+              if (ok) {
+                adminName = u.name;
+                break;
+              }
+            }
+          }
+          if (!adminName) return false;
+          const payload = pendingMermaAuth;
+          setPendingMermaAuth(null);
+          commitInventoryMovement(payload, adminName);
+          return true;
+        }}
+      />
     </div>
   );
 };

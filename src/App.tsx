@@ -1,6 +1,8 @@
 import React, { useState, useEffect, Component, ErrorInfo, ReactNode, lazy, Suspense } from 'react';
 import { MotionConfig } from 'framer-motion';
 import { OfflineIndicator } from './components/PwaControls';
+import { purgeFirestorePersistenceCache, recoverFromFirestoreInternalError } from './lib/firebase';
+import { isFirestoreInternalAssertionError } from './utils/firestoreRecovery';
 
 const PosView = lazy(() => import('./components/PosView').then(m => ({ default: m.PosView })));
 const MenuView = lazy(() => import('./components/MenuView').then(m => ({ default: m.MenuView })));
@@ -12,12 +14,13 @@ interface ErrorBoundaryProps {
 interface ErrorBoundaryState {
   hasError: boolean;
   error?: Error;
+  resetting?: boolean;
 }
 
 class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   constructor(props: ErrorBoundaryProps) {
     super(props);
-    this.state = { hasError: false };
+    this.state = { hasError: false, resetting: false };
   }
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
@@ -26,10 +29,26 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error('ErrorBoundary caught an error:', error, errorInfo);
+    if (isFirestoreInternalAssertionError(error)) {
+      void recoverFromFirestoreInternalError(error);
+    }
   }
 
-  handleReset = () => {
-    this.setState({ hasError: false, error: undefined });
+  handleReset = async (forceMemoryMode = false) => {
+    this.setState({ resetting: true });
+    const rawMsg = this.state.error?.message || '';
+    const isFsRelated =
+      isFirestoreInternalAssertionError(this.state.error) ||
+      forceMemoryMode ||
+      rawMsg.includes('"operationType"');
+    if (isFsRelated) {
+      try {
+        await purgeFirestorePersistenceCache({ forceMemoryMode });
+      } catch {
+        // Proceed with reload even if cache cleanup reported an error
+      }
+    }
+    this.setState({ hasError: false, error: undefined, resetting: false });
     window.location.reload();
   };
 
@@ -49,6 +68,7 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
           parsedFsError = null;
         }
       }
+      const isInternalFsCrash = isFirestoreInternalAssertionError(this.state.error);
 
       return (
         <div className="min-h-dvh bg-[#0a0a0b] text-[#f0e6d3] flex items-center justify-center p-6">
@@ -57,7 +77,19 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
               !
             </div>
             <h2 className="font-serif font-bold text-xl text-white">Barbachu POS · Recuperación</h2>
-            {parsedFsError ? (
+            {isInternalFsCrash ? (
+              <div className="space-y-2 text-left bg-[#1e222b] border border-[#2a2f3a] rounded-xl p-3.5">
+                <p className="text-xs font-semibold text-[#eed889]">
+                  Se detectó un conflicto en la caché local de sincronización.
+                </p>
+                <p className="text-xs text-[#8b92a0]">
+                  Puedes reparar la caché local sin perder los pedidos guardados en Cloud Firestore.
+                </p>
+                <div className="p-2.5 bg-[#12151b] rounded-lg font-mono text-[11px] text-gray-300 break-words max-h-24 overflow-auto">
+                  {parsedFsError?.error || rawMsg || 'INTERNAL ASSERTION FAILED'}
+                </div>
+              </div>
+            ) : parsedFsError ? (
               <div className="space-y-2 text-left bg-[#1e222b] border border-[#2a2f3a] rounded-xl p-3.5">
                 <div className="flex items-center justify-between text-xs uppercase tracking-wider text-[#8b92a0]">
                   <span>Error de Permisos / Sincronización</span>
@@ -87,13 +119,30 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
                 </div>
               </>
             )}
-            <button
-              type="button"
-              onClick={this.handleReset}
-              className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-[#d4af37] to-[#eed889] text-black font-bold text-xs uppercase tracking-wider hover:opacity-95 shadow-lg"
-            >
-              Reiniciar Sistema POS
-            </button>
+            <div className="space-y-2">
+              <button
+                type="button"
+                disabled={this.state.resetting}
+                onClick={() => void this.handleReset(false)}
+                className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-[#d4af37] to-[#eed889] text-black font-bold text-xs uppercase tracking-wider hover:opacity-95 shadow-lg disabled:opacity-60"
+              >
+                {this.state.resetting
+                  ? 'Reparando caché...'
+                  : isInternalFsCrash
+                  ? 'Reparar Caché y Reiniciar POS'
+                  : 'Reiniciar Sistema POS'}
+              </button>
+              {(isInternalFsCrash || parsedFsError) && (
+                <button
+                  type="button"
+                  disabled={this.state.resetting}
+                  onClick={() => void this.handleReset(true)}
+                  className="w-full py-2 px-4 rounded-xl border border-[#2a2f3a] bg-[#1e222b] text-[#f0e6d3] font-semibold text-xs hover:bg-[#252a35] transition-colors disabled:opacity-60"
+                >
+                  Iniciar en Modo Seguro (sin caché local)
+                </button>
+              )}
+            </div>
           </div>
         </div>
       );

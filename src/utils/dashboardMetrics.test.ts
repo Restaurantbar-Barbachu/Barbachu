@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import {
   buildHourlySalesTrend,
   buildInventoryLevels,
+  buildSalesPerformanceMetrics,
   buildSalesTrend,
   classifyInventoryHealth,
   toLocalDateKey,
 } from './dashboardMetrics';
-import type { InventoryItem, Sale } from '../types';
+import type { InventoryItem, Sale, SoftProduct } from '../types';
 
 function makeSale(id: string, paidAt: string, totalCents: number): Sale {
   return {
@@ -99,4 +100,56 @@ test('classifyInventoryHealth and buildInventoryLevels prioritize critical and l
   assert.equal(summary.chartItems[0].clave, 4);
   assert.equal(summary.chartItems[1].clave, 2);
   assert.equal(summary.chartItems[2].clave, 3);
+});
+
+test('buildSalesPerformanceMetrics includes modifier pricing and weights discounts proportionally', () => {
+  const products: SoftProduct[] = [
+    { key: '801', name: 'HAMBURGUESA', group: '01', category: 'HAMBURGUESAS', sourcePrice: 100, priceCents: 10000, saleEnabled: true },
+    { key: '201', name: 'CORONA', group: '02', category: 'CERVEZA', sourcePrice: 50, priceCents: 5000, saleEnabled: true },
+  ];
+
+  // Item 1: 100 + 20 mod = 120; Item 2: 80 => gross 200; discount 20 => net 180 (90% of gross)
+  const saleWithModsAndDiscount: Sale = {
+    id: 's1',
+    receipt: 'BC-00001',
+    service: 'mesa',
+    location: '1',
+    table: '1',
+    waiter: 'Mesero',
+    items: [
+      {
+        key: '801',
+        name: 'HAMBURGUESA',
+        priceCents: 10000,
+        qty: 1,
+        note: '',
+        modifiers: [{ name: 'Extra queso', priceCents: 2000 }],
+      },
+      {
+        key: '201',
+        name: 'CORONA',
+        priceCents: 4000,
+        qty: 2,
+        note: '',
+      },
+    ],
+    subtotalCents: 20000,
+    discountCents: 2000,
+    totalCents: 18000,
+    paymentMethod: 'efectivo',
+    paidAt: new Date().toISOString(),
+  };
+
+  const { topProducts, categorySales } = buildSalesPerformanceMetrics([saleWithModsAndDiscount], products, 'revenue');
+  assert.equal(topProducts.length, 2);
+  assert.equal(topProducts[0].fullName, 'HAMBURGUESA');
+  assert.equal(topProducts[0].ingresos, 108); // 120 * 0.9
+  assert.equal(topProducts[1].fullName, 'CORONA');
+  assert.equal(topProducts[1].ingresos, 72); // 80 * 0.9
+
+  assert.equal(categorySales.length, 2);
+  assert.equal(categorySales[0].categoria, 'HAMBURGUESAS');
+  assert.equal(categorySales[0].ventas, 108);
+  assert.equal(categorySales[1].categoria, 'CERVEZA');
+  assert.equal(categorySales[1].ventas, 72);
 });

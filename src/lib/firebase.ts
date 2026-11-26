@@ -7,29 +7,251 @@ import {
   type User,
 } from 'firebase/auth';
 import {
-  initializeFirestore,
-  persistentLocalCache,
-  persistentMultipleTabManager,
+  clearIndexedDbPersistence,
   doc,
   getDocFromServer,
+  initializeFirestore,
+  memoryLocalCache,
+  persistentLocalCache,
+  persistentSingleTabManager,
+  terminate,
+  type Firestore,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
+import {
+  buildFirestoreIndexedDbNames,
+  evaluateRecoveryAction,
+  FIRESTORE_CACHE_MODE_KEY,
+  FIRESTORE_LAST_RECOVERY_KEY,
+  isFirestoreInternalAssertionError,
+  type FirestoreCacheMode,
+} from '../utils/firestoreRecovery';
 
 export const BOOTSTRAPPED_ADMIN_EMAIL = 'maurocazqiez013@gmail.com';
 export const FIREBASE_CONFIG = firebaseConfig;
 
 const app = initializeApp(firebaseConfig);
 
-// CRITICAL: Configure Firestore with offline persistence (persistent local cache) and named database ID
-export const db = initializeFirestore(
-  app,
-  {
-    localCache: persistentLocalCache({
-      tabManager: persistentMultipleTabManager(),
+function readPersistedCacheMode(): FirestoreCacheMode {
+  if (typeof window === 'undefined') return 'persistent';
+  try {
+    return window.sessionStorage.getItem(FIRESTORE_CACHE_MODE_KEY) === 'memory'
+      ? 'memory'
+      : 'persistent';
+  } catch {
+    return 'persistent';
+  }
+}
+
+let activeCacheMode: FirestoreCacheMode = readPersistedCacheMode();
+
+function createResilientFirestore(): Firestore {
+  if (activeCacheMode === 'memory') {
+    return initializeFirestore(
+      app,
+      { localCache: memoryLocalCache() },
+      firebaseConfig.firestoreDatabaseId
+    );
+  }
+  try {
+    return initializeFirestore(
+      app,
+      {
+        localCache: persistentLocalCache({
+          tabManager: persistentSingleTabManager({ forceOwnership: true }),
+        }),
+      },
+      firebaseConfig.firestoreDatabaseId
+    );
+  } catch (err) {
+    console.warn('Persistent Firestore cache unavailable; falling back to memory cache.', err);
+    activeCacheMode = 'memory';
+    return initializeFirestore(
+      app,
+      { localCache: memoryLocalCache() },
+      firebaseConfig.firestoreDatabaseId
+    );
+  }
+}
+
+// CRITICAL: Configure Firestore with named database ID and resilient offline persistence
+export const db = createResilientFirestore();
+
+function deleteIndexedDbByName(dbName: string): Promise<void> {
+  if (typeof window === 'undefined' || !('indexedDB' in window) || !dbName) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+    const timer = window.setTimeout(done, 700);
+    try {
+      const req = window.indexedDB.deleteDatabase(dbName);
+      req.onsuccess = () => {
+        window.clearTimeout(timer);
+        done();
+      };
+      req.onerror = () => {
+        window.clearTimeout(timer);
+        done();
+      };
+      req.onblocked = () => {
+        window.clearTimeout(timer);
+        done();
+      };
+    } catch {
+      window.clearTimeout(timer);
+      done();
+    }
+  });
+}
+
+function clearFirestoreWebStorageKeys(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    for (const store of [window.localStorage, window.sessionStorage]) {
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < store.length; i++) {
+        const key = store.key(i);
+        if (
+          key &&
+          key !== FIRESTORE_CACHE_MODE_KEY &&
+          key !== FIRESTORE_LAST_RECOVERY_KEY &&
+          (/^firestore[_/]/i.test(key) || key.startsWith('firebase:persistence:'))
+        ) {
+          keysToRemove.push(key);
+        }
+      }
+      for (const key of keysToRemove) {
+        store.removeItem(key);
+      }
+    }
+  } catch {
+    // Ignore storage access errors in restricted contexts
+  }
+}
+
+export async function purgeFirestorePersistenceCache(options?: { forceMemoryMode?: boolean }): Promise<void> {
+  if (options?.forceMemoryMode && typeof window !== 'undefined') {
+    try {
+      window.sessionStorage.setItem(FIRESTORE_CACHE_MODE_KEY, 'memory');
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  // Terminate with short timeout so a wedged AsyncQueue never hangs recovery
+  await Promise.race([
+    (async () => {
+      try {
+        await terminate(db);
+        await clearIndexedDbPersistence(db);
+      } catch {
+        // Ignore if already terminated or failed
+      }
+    })(),
+    new Promise<void>((resolve) => {
+      if (typeof window !== 'undefined') {
+        window.setTimeout(resolve, 800);
+      } else {
+        resolve();
+      }
     }),
-  },
-  firebaseConfig.firestoreDatabaseId
-);
+  ]);
+
+  const dbNames = new Set<string>(
+    buildFirestoreIndexedDbNames(firebaseConfig.projectId, firebaseConfig.firestoreDatabaseId)
+  );
+  if (typeof window !== 'undefined' && typeof window.indexedDB?.databases === 'function') {
+    try {
+      const existing = await Promise.race([
+        window.indexedDB.databases(),
+        new Promise<IDBDatabaseInfo[]>((resolve) => window.setTimeout(() => resolve([]), 500)),
+      ]);
+      for (const info of existing) {
+        if (info.name && /^firestore/i.test(info.name)) {
+          dbNames.add(info.name);
+        }
+      }
+    } catch {
+      // Ignore if databases() enumerator is restricted
+    }
+  }
+
+  await Promise.all(Array.from(dbNames).map((name) => deleteIndexedDbByName(name)));
+  clearFirestoreWebStorageKeys();
+}
+
+let recoveryInFlight = false;
+
+export async function recoverFromFirestoreInternalError(error: unknown): Promise<boolean> {
+  if (typeof window === 'undefined' || !isFirestoreInternalAssertionError(error)) {
+    return false;
+  }
+  if (recoveryInFlight) return true;
+  recoveryInFlight = true;
+
+  try {
+    let lastRaw: string | null = null;
+    try {
+      lastRaw = window.sessionStorage.getItem(FIRESTORE_LAST_RECOVERY_KEY);
+    } catch {
+      lastRaw = null;
+    }
+    const lastAutoReloadAt = lastRaw ? Number(lastRaw) : null;
+    const now = Date.now();
+    const action = evaluateRecoveryAction({
+      lastAutoReloadAt: Number.isFinite(lastAutoReloadAt) ? lastAutoReloadAt : null,
+      now,
+      persistenceMode: activeCacheMode,
+    });
+
+    if (action === 'manual_prompt') {
+      await purgeFirestorePersistenceCache({ forceMemoryMode: true });
+      return false;
+    }
+
+    try {
+      window.sessionStorage.setItem(FIRESTORE_LAST_RECOVERY_KEY, String(now));
+      if (action === 'fallback_memory') {
+        window.sessionStorage.setItem(FIRESTORE_CACHE_MODE_KEY, 'memory');
+      }
+    } catch {
+      // Ignore sessionStorage failures
+    }
+
+    await purgeFirestorePersistenceCache({
+      forceMemoryMode: action === 'fallback_memory',
+    });
+    window.location.reload();
+    return true;
+  } catch {
+    recoveryInFlight = false;
+    return false;
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('error', (event) => {
+    const candidate = event.error ?? event.message;
+    if (isFirestoreInternalAssertionError(candidate)) {
+      event.preventDefault();
+      void recoverFromFirestoreInternalError(candidate);
+    }
+  });
+
+  window.addEventListener('unhandledrejection', (event) => {
+    if (isFirestoreInternalAssertionError(event.reason)) {
+      event.preventDefault();
+      void recoverFromFirestoreInternalError(event.reason);
+    }
+  });
+}
 
 export const auth = getAuth(app);
 
@@ -67,6 +289,9 @@ export function handleFirestoreError(
   operationType: OperationType,
   path: string | null
 ): never {
+  if (isFirestoreInternalAssertionError(error)) {
+    void recoverFromFirestoreInternalError(error);
+  }
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {

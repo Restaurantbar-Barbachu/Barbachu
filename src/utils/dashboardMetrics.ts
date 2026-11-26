@@ -1,4 +1,5 @@
-import type { InventoryItem, Sale } from '../types';
+import { lineTotalCents } from '../core';
+import type { InventoryItem, Sale, SoftProduct } from '../types';
 
 export type InventoryHealthStatus = 'critico' | 'bajo' | 'optimo';
 
@@ -194,4 +195,84 @@ export function buildInventoryLevels(
     totalValuation: Math.round(totalValuation * 100) / 100,
     chartItems: mapped.slice(0, Math.max(1, maxItems)),
   };
+}
+
+export interface TopProductMetric {
+  name: string;
+  fullName: string;
+  unidades: number;
+  ingresos: number;
+  categoria: string;
+}
+
+export interface CategorySalesMetric {
+  categoria: string;
+  ventas: number;
+}
+
+export function buildSalesPerformanceMetrics(
+  sales: Sale[],
+  products: SoftProduct[],
+  productMetric: 'revenue' | 'units' = 'revenue'
+): { topProducts: TopProductMetric[]; categorySales: CategorySalesMetric[] } {
+  const productMap = new Map<string, SoftProduct>();
+  for (const p of products) {
+    productMap.set(p.key, p);
+  }
+
+  const productStats = new Map<string, { name: string; category: string; units: number; revenueCents: number }>();
+  const categoryStats = new Map<string, number>();
+
+  for (const sale of sales) {
+    let itemsGrossCents = 0;
+    const itemRevenues = sale.items.map((item) => {
+      const gross = lineTotalCents(item);
+      itemsGrossCents += gross;
+      return gross;
+    });
+
+    const netRatio =
+      itemsGrossCents > 0 && sale.discountCents > 0
+        ? Math.max(0, sale.totalCents) / itemsGrossCents
+        : 1;
+
+    sale.items.forEach((item, idx) => {
+      const prod = productMap.get(item.key);
+      const category = prod?.category || 'PLATILLOS';
+      const netItemCents = Math.round(itemRevenues[idx] * netRatio);
+
+      const curr = productStats.get(item.key) || {
+        name: item.name,
+        category,
+        units: 0,
+        revenueCents: 0,
+      };
+      curr.units += item.qty;
+      curr.revenueCents += netItemCents;
+      productStats.set(item.key, curr);
+
+      categoryStats.set(category, (categoryStats.get(category) || 0) + netItemCents);
+    });
+  }
+
+  const topProducts: TopProductMetric[] = Array.from(productStats.values())
+    .sort((a, b) => (productMetric === 'revenue' ? b.revenueCents - a.revenueCents : b.units - a.units))
+    .slice(0, 7)
+    .map((p) => ({
+      name: p.name.length > 18 ? p.name.slice(0, 16) + '...' : p.name,
+      fullName: p.name,
+      unidades: p.units,
+      ingresos: Math.round((p.revenueCents / 100) * 100) / 100,
+      categoria: p.category,
+    }));
+
+  const categorySales: CategorySalesMetric[] = Array.from(categoryStats.entries())
+    .map(([categoria, cents]) => ({
+      categoria,
+      ventas: Math.round((cents / 100) * 100) / 100,
+    }))
+    .sort((a, b) => b.ventas - a.ventas)
+    .slice(0, 6);
+
+  return { topProducts, categorySales };
 }

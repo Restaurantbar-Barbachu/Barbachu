@@ -180,7 +180,33 @@ function buildAuditPayload(
   return payload;
 }
 
+const bootstrapInFlightByUid = new Map<
+  string,
+  Promise<{
+    isAdmin: boolean;
+    authorized: boolean;
+    seeded: boolean;
+    workspaceOwnerUid: string;
+  }>
+>();
+
 export async function bootstrapWorkspace(user: User): Promise<{
+  isAdmin: boolean;
+  authorized: boolean;
+  seeded: boolean;
+  workspaceOwnerUid: string;
+}> {
+  const existing = bootstrapInFlightByUid.get(user.uid);
+  if (existing) return existing;
+
+  const task = runBootstrapWorkspace(user).finally(() => {
+    bootstrapInFlightByUid.delete(user.uid);
+  });
+  bootstrapInFlightByUid.set(user.uid, task);
+  return task;
+}
+
+async function runBootstrapWorkspace(user: User): Promise<{
   isAdmin: boolean;
   authorized: boolean;
   seeded: boolean;
@@ -944,37 +970,64 @@ export async function fsUpdateOrder(
 ): Promise<void> {
   const ordId = sanitizeFirestoreId(order.id, 'ord');
   const path = `orders/${ordId}`;
-  try {
-    const batch = writeBatch(db);
-    const updatePayload: Record<string, unknown> = {
-      service: order.service,
-      location: boundStr(order.location, 40, '1'),
-      table: boundStr(order.table || order.location, 40, '1'),
-      waiter: boundStr(order.waiter, 80, 'Staff'),
-      note: boundStr(order.note, 300),
-      items: sanitizeOrderItemsForFirestore(order.items),
-      totalCents: Math.max(0, Math.round(Number(order.totalCents) || 0)),
-      discountCents: Math.max(0, Math.round(Number(order.discountCents) || 0)),
-      priority: order.priority === 'alta' ? 'alta' : 'normal',
-      status: order.status,
-      paid: Boolean(order.paid),
-      updatedAt: serverTimestamp(),
+  const ordRef = doc(db, 'orders', ordId);
+  const updatePayload: Record<string, unknown> = {
+    service: order.service,
+    location: boundStr(order.location, 40, '1'),
+    table: boundStr(order.table || order.location, 40, '1'),
+    waiter: boundStr(order.waiter, 80, 'Staff'),
+    note: boundStr(order.note, 300),
+    items: sanitizeOrderItemsForFirestore(order.items),
+    totalCents: Math.max(0, Math.round(Number(order.totalCents) || 0)),
+    discountCents: Math.max(0, Math.round(Number(order.discountCents) || 0)),
+    priority: order.priority === 'alta' ? 'alta' : 'normal',
+    status: order.status,
+    paid: Boolean(order.paid),
+    updatedAt: serverTimestamp(),
+  };
+  if (order.customer) {
+    updatePayload.customer = {
+      name: boundStr(order.customer.name, 80),
+      phone: boundStr(order.customer.phone, 30),
+      address: boundStr(order.customer.address, 200),
+      reference: boundStr(order.customer.reference, 120),
     };
-    if (order.customer) {
-      updatePayload.customer = {
-        name: boundStr(order.customer.name, 80),
-        phone: boundStr(order.customer.phone, 30),
-        address: boundStr(order.customer.address, 200),
-        reference: boundStr(order.customer.reference, 120),
-      };
-    }
-    batch.update(doc(db, 'orders', ordId), updatePayload);
-    if (auditEntry) {
-      const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-      batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    }
-    await batch.commit();
+  }
+
+  try {
+    await runTransaction(db, async (tx) => {
+      const ordSnap = await tx.get(ordRef);
+      if (ordSnap.exists()) {
+        const cur = ordSnap.data();
+        if (cur.paid === true || cur.status === 'closed') {
+          throw new Error('ORDER_CLOSED:La cuenta ya fue cerrada o cobrada en otra terminal.');
+        }
+      }
+      tx.update(ordRef, updatePayload);
+      if (auditEntry) {
+        const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+        tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+      }
+    });
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith('ORDER_CLOSED:')) {
+      throw error;
+    }
+    if (isOfflineTransactionError(error)) {
+      try {
+        const batch = writeBatch(db);
+        batch.update(ordRef, updatePayload);
+        if (auditEntry) {
+          const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+          batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+        }
+        await batch.commit();
+        return;
+      } catch (offlineErr) {
+        handleFirestoreError(offlineErr, OperationType.UPDATE, path);
+        return;
+      }
+    }
     handleFirestoreError(error, OperationType.UPDATE, path);
   }
 }
@@ -1253,16 +1306,30 @@ export async function fsCloseShift(
       if (!shiftSnap.exists()) {
         throw new Error('SHIFT_NOT_FOUND:El turno no existe en Firestore.');
       }
+      const liveShift = shiftSnap.data();
+      if (liveShift.isOpen === false) {
+        throw new Error('SHIFT_ALREADY_CLOSED:Este turno ya fue cerrado en otra terminal.');
+      }
+      const actualCents = Math.max(0, Math.round(Number(shift.actualCashCents) || 0));
+      const liveExpectedCents = Math.max(0, Math.round(Number(liveShift.expectedCashCents) || 0));
+      const liveDiffCents = actualCents - liveExpectedCents;
+
       tx.update(shiftRef, {
         isOpen: false,
         closedAt: serverTimestamp(),
-        actualCashCents: Math.round(shift.actualCashCents || 0),
-        differenceCents: Math.round(shift.differenceCents || 0),
+        actualCashCents: actualCents,
+        differenceCents: liveDiffCents,
         closedByUser: boundStr(shift.closedByUser, 80, 'Caja'),
       });
       tx.set(audRef, buildAuditPayload(auditEntry, user.uid, authorizedEmails));
     });
   } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.startsWith('SHIFT_NOT_FOUND:') || error.message.startsWith('SHIFT_ALREADY_CLOSED:'))
+    ) {
+      throw error;
+    }
     handleFirestoreError(error, OperationType.UPDATE, `shifts/${shiftId}`);
   }
 }
@@ -1355,40 +1422,95 @@ export async function fsSaveInventoryMovement(
   authorizedEmails: string[],
   auditEntry: AuditLogEntry,
   options?: { updateCost?: boolean }
-): Promise<void> {
+): Promise<number> {
   const itemId = sanitizeFirestoreId(String(item.clave), 'inv');
+  const itemRef = doc(db, 'inventory', itemId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+
+  const computeNextStock = (baseStock: number): number => {
+    if (!movement) return baseStock;
+    const qty = Math.max(0, Number(movement.qty) || 0);
+    if (movement.type === 'entrada') return Math.max(0, baseStock + qty);
+    if (movement.type === 'merma') return Math.max(0, baseStock - qty);
+    return Math.max(0, qty);
+  };
+
   try {
-    const batch = writeBatch(db);
-    const updatePayload: Record<string, unknown> = {
-      stock: Number(item.stock) || 0,
-      minStock: Number(item.minStock) || 0,
-      updatedAt: serverTimestamp(),
-    };
-    if (options?.updateCost) {
-      updatePayload.costo = Number(item.costo) || 0;
-    }
-    batch.update(doc(db, 'inventory', itemId), updatePayload);
-    if (movement) {
-      const movId = sanitizeFirestoreId(movement.id, 'mov');
-      batch.set(doc(db, 'inventory_movements', movId), {
-        id: movId,
-        at: serverTimestamp(),
-        clave: Math.round(Number(movement.clave) || 0),
-        descripcion: boundStr(movement.descripcion, 140),
-        type: movement.type,
-        qty: Number(movement.qty) || 0,
-        costUnit: Number(movement.costUnit) || 0,
-        reason: boundStr(movement.reason, 200),
-        user: boundStr(movement.user, 80),
-        ownerUid: sanitizeFirestoreId(user.uid, 'usr'),
-        authorizedEmails: ensureEmailList(authorizedEmails),
-      });
-    }
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
+    const finalStock = await runTransaction(db, async (tx) => {
+      const snap = await tx.get(itemRef);
+      const liveStock = snap.exists() ? Math.max(0, Number(snap.data().stock) || 0) : Math.max(0, Number(item.stock) || 0);
+      const nextStock = movement ? computeNextStock(liveStock) : Math.max(0, Number(item.stock) || liveStock);
+
+      const updatePayload: Record<string, unknown> = {
+        stock: nextStock,
+        minStock: Math.max(0, Number(item.minStock) || 0),
+        updatedAt: serverTimestamp(),
+      };
+      if (options?.updateCost) {
+        updatePayload.costo = Math.max(0, Number(item.costo) || 0);
+      }
+      tx.update(itemRef, updatePayload);
+
+      if (movement) {
+        const movId = sanitizeFirestoreId(movement.id, 'mov');
+        tx.set(doc(db, 'inventory_movements', movId), {
+          id: movId,
+          at: serverTimestamp(),
+          clave: Math.round(Number(movement.clave) || 0),
+          descripcion: boundStr(movement.descripcion, 140),
+          type: movement.type,
+          qty: Number(movement.qty) || 0,
+          costUnit: Number(movement.costUnit) || 0,
+          reason: boundStr(movement.reason, 200),
+          user: boundStr(movement.user, 80),
+          ownerUid: sanitizeFirestoreId(user.uid, 'usr'),
+          authorizedEmails: ensureEmailList(authorizedEmails),
+        });
+      }
+
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+      return nextStock;
+    });
+    return finalStock;
   } catch (error) {
+    if (isOfflineTransactionError(error)) {
+      try {
+        const batch = writeBatch(db);
+        const updatePayload: Record<string, unknown> = {
+          stock: Math.max(0, Number(item.stock) || 0),
+          minStock: Math.max(0, Number(item.minStock) || 0),
+          updatedAt: serverTimestamp(),
+        };
+        if (options?.updateCost) {
+          updatePayload.costo = Math.max(0, Number(item.costo) || 0);
+        }
+        batch.update(itemRef, updatePayload);
+        if (movement) {
+          const movId = sanitizeFirestoreId(movement.id, 'mov');
+          batch.set(doc(db, 'inventory_movements', movId), {
+            id: movId,
+            at: serverTimestamp(),
+            clave: Math.round(Number(movement.clave) || 0),
+            descripcion: boundStr(movement.descripcion, 140),
+            type: movement.type,
+            qty: Number(movement.qty) || 0,
+            costUnit: Number(movement.costUnit) || 0,
+            reason: boundStr(movement.reason, 200),
+            user: boundStr(movement.user, 80),
+            ownerUid: sanitizeFirestoreId(user.uid, 'usr'),
+            authorizedEmails: ensureEmailList(authorizedEmails),
+          });
+        }
+        batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+        await batch.commit();
+        return Math.max(0, Number(item.stock) || 0);
+      } catch (offlineErr) {
+        handleFirestoreError(offlineErr, OperationType.UPDATE, `inventory/${itemId}`);
+        return Math.max(0, Number(item.stock) || 0);
+      }
+    }
     handleFirestoreError(error, OperationType.UPDATE, `inventory/${itemId}`);
+    return Math.max(0, Number(item.stock) || 0);
   }
 }
 
@@ -1502,7 +1624,7 @@ export async function fsUpdatePosPermissionsAndEmails(
     // Propagate authorizedEmails to workspace collections so newly authorized operators can list them
     const callerEmail = (user.email || '').toLowerCase();
     const isBootstrap = Boolean(user.emailVerified && callerEmail === BOOTSTRAPPED_ADMIN_EMAIL);
-    const colsToSync = ['orders', 'sales', 'shifts', 'inventory', 'staff_users', 'staff_clock'] as const;
+    const colsToSync = ['orders', 'sales', 'shifts', 'inventory', 'staff_users', 'staff_clock', 'pos_terminals'] as const;
     for (const colName of colsToSync) {
       const colQ = isBootstrap
         ? collection(db, colName)
@@ -1602,24 +1724,68 @@ export async function fsUpdateRestaurantConfig(
 }
 
 export async function fsRecordCashDrawerMovement(
-  updatedShift: CashShift,
+  movement: { shiftId: string; type: 'deposito' | 'retiro'; amountCents: number },
   user: User,
   authorizedEmails: string[],
   auditEntry: AuditLogEntry
-): Promise<void> {
-  const shiftId = sanitizeFirestoreId(updatedShift.id, 'TURNO');
+): Promise<{ expectedCashCents?: number }> {
+  const shiftId = sanitizeFirestoreId(movement.shiftId, 'TURNO');
+  const shiftRef = doc(db, 'shifts', shiftId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+  const delta = Math.max(0, Math.round(Number(movement.amountCents) || 0));
+
   try {
-    const batch = writeBatch(db);
-    batch.update(doc(db, 'shifts', shiftId), {
-      retirosCents: Math.max(0, Math.round(Number(updatedShift.retirosCents) || 0)),
-      depositosCents: Math.max(0, Math.round(Number(updatedShift.depositosCents) || 0)),
-      expectedCashCents: Math.max(0, Math.round(Number(updatedShift.expectedCashCents) || 0)),
+    const finalExpected = await runTransaction(db, async (tx) => {
+      const snap = await tx.get(shiftRef);
+      if (!snap.exists()) {
+        throw new Error('SHIFT_CLOSED:No se encontró el turno activo en Firestore.');
+      }
+      const s = snap.data();
+      if (s.isOpen === false) {
+        throw new Error('SHIFT_CLOSED:El turno de caja ya fue cerrado en otra terminal.');
+      }
+      const liveExpected = Math.max(0, Math.round(Number(s.expectedCashCents) || 0));
+      if (movement.type === 'retiro' && delta > liveExpected) {
+        throw new Error('INSUFFICIENT_CASH:El retiro excede el efectivo actual en caja.');
+      }
+      const nextExpected = movement.type === 'deposito' ? liveExpected + delta : Math.max(0, liveExpected - delta);
+      const nextDepositos = Math.max(0, Math.round(Number(s.depositosCents) || 0) + (movement.type === 'deposito' ? delta : 0));
+      const nextRetiros = Math.max(0, Math.round(Number(s.retirosCents) || 0) + (movement.type === 'retiro' ? delta : 0));
+
+      tx.update(shiftRef, {
+        depositosCents: nextDepositos,
+        retirosCents: nextRetiros,
+        expectedCashCents: nextExpected,
+      });
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+      return nextExpected;
     });
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
+    return { expectedCashCents: finalExpected };
   } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.startsWith('SHIFT_CLOSED:') || error.message.startsWith('INSUFFICIENT_CASH:'))
+    ) {
+      throw error;
+    }
+    if (isOfflineTransactionError(error)) {
+      try {
+        const batch = writeBatch(db);
+        batch.update(shiftRef, {
+          depositosCents: increment(movement.type === 'deposito' ? delta : 0),
+          retirosCents: increment(movement.type === 'retiro' ? delta : 0),
+          expectedCashCents: increment(movement.type === 'deposito' ? delta : -delta),
+        });
+        batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+        await batch.commit();
+        return {};
+      } catch (offlineErr) {
+        handleFirestoreError(offlineErr, OperationType.UPDATE, `shifts/${shiftId}`);
+        return {};
+      }
+    }
     handleFirestoreError(error, OperationType.UPDATE, `shifts/${shiftId}`);
+    return {};
   }
 }
 
@@ -1632,19 +1798,68 @@ export async function fsMergeOrders(
 ): Promise<void> {
   const targetId = sanitizeFirestoreId(targetOrder.id, 'ord');
   const sourceId = sanitizeFirestoreId(sourceOrderId, 'ord');
+  if (targetId === sourceId) return;
+
+  const targetRef = doc(db, 'orders', targetId);
+  const sourceRef = doc(db, 'orders', sourceId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+
+  const targetUpdate = {
+    items: sanitizeOrderItemsForFirestore(targetOrder.items),
+    discountCents: Math.max(0, Math.round(Number(targetOrder.discountCents) || 0)),
+    totalCents: Math.max(0, Math.round(Number(targetOrder.totalCents) || 0)),
+    note: boundStr(targetOrder.note, 300),
+    updatedAt: serverTimestamp(),
+  };
+
   try {
-    const batch = writeBatch(db);
-    batch.update(doc(db, 'orders', targetId), {
-      items: sanitizeOrderItemsForFirestore(targetOrder.items),
-      totalCents: Math.max(0, Math.round(targetOrder.totalCents)),
-      note: boundStr(targetOrder.note, 300),
-      updatedAt: serverTimestamp(),
+    await runTransaction(db, async (tx) => {
+      const [targetSnap, sourceSnap] = await Promise.all([tx.get(targetRef), tx.get(sourceRef)]);
+      if (targetSnap.exists()) {
+        const td = targetSnap.data();
+        if (td.paid === true || td.status === 'closed') {
+          throw new Error('ORDER_CLOSED:La cuenta destino ya fue cerrada o cobrada.');
+        }
+      }
+      if (sourceSnap.exists()) {
+        const sd = sourceSnap.data();
+        if (sd.paid === true || sd.status === 'closed') {
+          throw new Error('ORDER_CLOSED:La cuenta origen ya fue cerrada o cobrada.');
+        }
+      }
+
+      const sourceOldNote = sourceSnap.exists() ? String(sourceSnap.data().note || '') : '';
+      tx.update(targetRef, targetUpdate);
+      tx.update(sourceRef, {
+        status: 'closed',
+        paid: false,
+        note: boundStr(`[UNIDA CON #${targetOrder.number}] ${sourceOldNote}`.trim(), 300),
+        updatedAt: serverTimestamp(),
+      });
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
     });
-    batch.delete(doc(db, 'orders', sourceId));
-    const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
-    batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
-    await batch.commit();
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith('ORDER_CLOSED:')) {
+      throw error;
+    }
+    if (isOfflineTransactionError(error)) {
+      try {
+        const batch = writeBatch(db);
+        batch.update(targetRef, targetUpdate);
+        batch.update(sourceRef, {
+          status: 'closed',
+          paid: false,
+          note: boundStr(`[UNIDA CON #${targetOrder.number}]`, 300),
+          updatedAt: serverTimestamp(),
+        });
+        batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+        await batch.commit();
+        return;
+      } catch (offlineErr) {
+        handleFirestoreError(offlineErr, OperationType.WRITE, `orders/${targetId}`);
+        return;
+      }
+    }
     handleFirestoreError(error, OperationType.WRITE, `orders/${targetId}`);
   }
 }
@@ -1904,6 +2119,9 @@ export async function fsVerifyAnyAdminPinFromFirestore(
   }
 }
 
+const heartbeatInFlightByDevice = new Map<string, Promise<void>>();
+const lastHeartbeatByDevice = new Map<string, { fingerprint: string; sentAt: number }>();
+
 export async function upsertTerminalHeartbeat(
   params: {
     deviceId: string;
@@ -1915,35 +2133,63 @@ export async function upsertTerminalHeartbeat(
     online: boolean;
   },
   user: User,
-  authorizedEmails: string[]
+  authorizedEmails: string[],
+  options?: { force?: boolean }
 ): Promise<void> {
   const cleanId = sanitizeFirestoreId(params.deviceId, 'term').slice(0, 64);
-  const terminalRef = doc(db, 'pos_terminals', cleanId);
-  try {
-    const existingSnap = await getDoc(terminalRef);
-    const ownerUid = existingSnap.exists()
-      ? String(existingSnap.data().ownerUid || user.uid)
-      : sanitizeFirestoreId(user.uid, 'usr');
+  const emails = ensureEmailList(authorizedEmails, user.email);
+  const fingerprint = `${user.uid}|${params.station}|${params.stationName}|${params.staffName}|${params.staffRole}|${params.online}|${emails.join(',')}`;
+  const now = Date.now();
+  const prev = lastHeartbeatByDevice.get(cleanId);
 
-    await setDoc(terminalRef, {
-      deviceId: cleanId,
-      station: params.station,
-      stationName: boundStr(params.stationName, 80, 'Terminal POS'),
-      staffName: boundStr(params.staffName, 80, 'En espera de PIN'),
-      staffRole: ['admin', 'caja', 'mesero', 'cocina'].includes(params.staffRole)
-        ? params.staffRole
-        : 'mesero',
-      operatorEmail: boundStr((user.email || '').toLowerCase(), 180, ''),
-      online: Boolean(params.online),
-      platform: boundStr(params.platform, 60, 'Web Terminal'),
-      ownerUid,
-      authorizedEmails: ensureEmailList(authorizedEmails, user.email),
-      lastSeenAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  } catch {
-    // Heartbeats should degrade gracefully offline without crashing UI
+  if (!options?.force && prev && prev.fingerprint === fingerprint && now - prev.sentAt < 15_000) {
+    return;
   }
+
+  const pending = heartbeatInFlightByDevice.get(cleanId);
+  if (pending && !options?.force) {
+    return pending;
+  }
+
+  const run = (async () => {
+    if (pending) {
+      await pending.catch(() => undefined);
+    }
+    const terminalRef = doc(db, 'pos_terminals', cleanId);
+    try {
+      const existingSnap = await getDoc(terminalRef);
+      const ownerUid = existingSnap.exists()
+        ? String(existingSnap.data().ownerUid || user.uid)
+        : sanitizeFirestoreId(user.uid, 'usr');
+
+      await setDoc(terminalRef, {
+        deviceId: cleanId,
+        station: params.station,
+        stationName: boundStr(params.stationName, 80, 'Terminal POS'),
+        staffName: boundStr(params.staffName, 80, 'En espera de PIN'),
+        staffRole: ['admin', 'caja', 'mesero', 'cocina'].includes(params.staffRole)
+          ? params.staffRole
+          : 'mesero',
+        operatorEmail: boundStr((user.email || '').toLowerCase(), 180, ''),
+        online: Boolean(params.online),
+        platform: boundStr(params.platform, 60, 'Web Terminal'),
+        ownerUid,
+        authorizedEmails: emails,
+        lastSeenAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      lastHeartbeatByDevice.set(cleanId, { fingerprint, sentAt: Date.now() });
+    } catch {
+      // Heartbeats should degrade gracefully offline without crashing UI
+    }
+  })().finally(() => {
+    if (heartbeatInFlightByDevice.get(cleanId) === run) {
+      heartbeatInFlightByDevice.delete(cleanId);
+    }
+  });
+
+  heartbeatInFlightByDevice.set(cleanId, run);
+  return run;
 }
 
 export function subscribeTerminalSessions(

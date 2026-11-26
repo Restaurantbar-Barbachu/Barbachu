@@ -74,10 +74,12 @@ const InventoryManagementView = lazy(() => import('./InventoryManagementView').t
 import {
   auth,
   BOOTSTRAPPED_ADMIN_EMAIL,
+  recoverFromFirestoreInternalError,
   signInWithGoogle,
   signOutFirebase,
   testConnection,
 } from '../lib/firebase';
+import { isFirestoreInternalAssertionError } from '../utils/firestoreRecovery';
 import {
   bootstrapWorkspace,
   deleteTerminalSession,
@@ -111,11 +113,13 @@ import {
   lineTotalCents,
   locationLabel,
   locationOptions,
+  mergeOrdersIntoTarget,
   modifiersTotalCents,
   nextItemStatus,
   printPreCheckText,
   printReceiptText,
   serviceName,
+  splitOrderItemByTarget,
   subtotalCents,
   totalCents,
   uid,
@@ -133,7 +137,7 @@ import {
 } from '../storage';
 import { toLocalDateKey } from '../utils/dashboardMetrics';
 import { downloadCsvFile } from '../utils/csv';
-import { isValidFourDigitPin, isWeakDefaultPin } from '../utils/pinSecurity';
+import { isValidFourDigitPin, isWeakDefaultPin, verifyPinSecret } from '../utils/pinSecurity';
 import {
   buildCatalogHierarchy,
   filterCatalogProductsByHierarchy,
@@ -159,6 +163,14 @@ function formatElapsedTime(createdAt: string, nowMs: number): string {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   return `${h}h ${m}m`;
+}
+
+function formatActionErr(err: unknown, fallback = 'Sin permisos'): string {
+  const raw = err instanceof Error ? err.message : fallback;
+  return raw.replace(
+    /^(ORDER_CLOSED|ALREADY_PAID|SHIFT_CLOSED|SHIFT_ALREADY_CLOSED|SHIFT_NOT_FOUND|INSUFFICIENT_CASH):/,
+    ''
+  );
 }
 
 export interface ModifierOption {
@@ -387,6 +399,14 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [invQty, setInvQty] = useState<string>('');
   const [invCost, setInvCost] = useState<string>('');
   const [invReason, setInvReason] = useState<string>('');
+  const [pendingInvMermaAuth, setPendingInvMermaAuth] = useState<{
+    clave: number;
+    descripcion: string;
+    type: 'merma' | 'ajuste';
+    qtyNum: number;
+    costNum: number;
+    reasonText: string;
+  } | null>(null);
 
   // Employee PIN Auth & Session Lock State (verified against Firestore staff_users)
   const [employeeAuthenticated, setEmployeeAuthenticated] = useState<boolean>(false);
@@ -489,9 +509,14 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     }
   }, []);
 
+  const firebaseUserUid = firebaseUser?.uid || null;
+  const firebaseUserRef = React.useRef<User | null>(firebaseUser);
+  firebaseUserRef.current = firebaseUser;
+
   // Bootstrap & subscribe to Firestore workspace when authenticated
   useEffect(() => {
-    if (!authReady || !firebaseUser) return;
+    const activeUser = firebaseUserRef.current;
+    if (!authReady || !activeUser || !firebaseUserUid) return;
     let active = true;
     let unsubWorkspace: (() => void) | null = null;
     let unsubTerminals: (() => void) | null = null;
@@ -499,12 +524,12 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
     setCloudBooting(true);
     void testConnection();
-    bootstrapWorkspace(firebaseUser)
+    bootstrapWorkspace(activeUser)
       .then((res) => {
         if (!active) return;
         setIsFirebaseAdmin(res.isAdmin);
         setWorkspaceAuthorized(res.authorized);
-        setWorkspaceOwnerUid(res.workspaceOwnerUid || firebaseUser.uid);
+        setWorkspaceOwnerUid(res.workspaceOwnerUid || activeUser.uid);
 
         if (!res.authorized) {
           setCloudBooting(false);
@@ -515,7 +540,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           setToastMessage('Base de datos Cloud Firestore inicializada con catálogo e inventario.');
         }
 
-        unsubWorkspace = subscribePosWorkspace(firebaseUser, res.isAdmin, {
+        unsubWorkspace = subscribePosWorkspace(activeUser, res.isAdmin, {
           onConfig: ({ config, nextOrderNumber, nextReceiptNumber, permissions, authorizedEmails, ownerUid }) => {
             setWorkspaceOwnerUid(ownerUid);
             setState((prev) => ({
@@ -535,8 +560,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           onMovements: (inventoryMovements) => setState((prev) => ({ ...prev, inventoryMovements })),
           onUsers: (users) =>
             setState((prev) => {
-              const matchedEmailUser = firebaseUser.email
-                ? users.find((u) => u.email?.toLowerCase() === firebaseUser.email?.toLowerCase())
+              const matchedEmailUser = activeUser.email
+                ? users.find((u) => u.email?.toLowerCase() === activeUser.email?.toLowerCase())
                 : undefined;
               const currentStillExists = users.find((u) => u.id === prev.activeUser.id);
               const nextActive =
@@ -548,17 +573,27 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
             }),
           onClock: (staffClock) => setState((prev) => ({ ...prev, staffClock })),
           onAudit: (audit) => setState((prev) => ({ ...prev, audit })),
-          onError: (err) => setSyncError(err),
+          onError: (err) => {
+            if (!active) return;
+            if (isFirestoreInternalAssertionError(err)) {
+              void recoverFromFirestoreInternalError(err);
+            }
+            setSyncError(err);
+          },
         });
 
-        unsubTerminals = subscribeTerminalSessions(firebaseUser, res.isAdmin, setTerminals);
+        unsubTerminals = subscribeTerminalSessions(activeUser, res.isAdmin, setTerminals);
         unsubSyncPulse = subscribeFirestoreSyncPulse(setLastSyncMs);
         setCloudBooting(false);
       })
       .catch((err) => {
         if (!active) return;
         setCloudBooting(false);
-        setSyncError(err instanceof Error ? err : new Error(String(err)));
+        const normalized = err instanceof Error ? err : new Error(String(err));
+        if (isFirestoreInternalAssertionError(normalized)) {
+          void recoverFromFirestoreInternalError(normalized);
+        }
+        setSyncError(normalized);
       });
 
     return () => {
@@ -567,26 +602,31 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       if (unsubTerminals) unsubTerminals();
       if (unsubSyncPulse) unsubSyncPulse();
     };
-  }, [authReady, firebaseUser]);
+  }, [authReady, firebaseUserUid]);
 
   // Propagate fatal Firestore permission errors to ErrorBoundary cleanly
   if (syncError) {
     throw syncError;
   }
 
-  // Keep lightweight offline cache of state
+  // Keep lightweight offline cache of terminal config only
   useEffect(() => {
     savePosState(state);
-  }, [state]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.deviceConfig, state.config]);
 
   const authorizedEmails = useMemo(
     () => ensureEmailList(state.authorizedEmails, firebaseUser?.email),
     [state.authorizedEmails, firebaseUser?.email]
   );
+  const authorizedEmailsKey = authorizedEmails.join(',');
+  const authorizedEmailsRef = React.useRef<string[]>(authorizedEmails);
+  authorizedEmailsRef.current = authorizedEmails;
 
-  // Live terminal presence heartbeat (every 45s while connected)
+  // Live terminal presence heartbeat (every 45s while connected, debounced on mount for StrictMode)
   useEffect(() => {
-    if (!authReady || !firebaseUser || !workspaceAuthorized) return;
+    const activeUser = firebaseUserRef.current;
+    if (!authReady || !activeUser || !firebaseUserUid || !workspaceAuthorized) return;
 
     const pushHeartbeat = () => {
       void upsertTerminalHeartbeat(
@@ -599,18 +639,23 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           platform: platformLabel,
           online: isOnline,
         },
-        firebaseUser,
-        authorizedEmails
+        activeUser,
+        authorizedEmailsRef.current
       );
     };
 
-    pushHeartbeat();
-    if (!isOnline) return;
+    const initialTimer = window.setTimeout(pushHeartbeat, 500);
+    if (!isOnline) {
+      return () => window.clearTimeout(initialTimer);
+    }
     const intervalId = window.setInterval(pushHeartbeat, 45000);
-    return () => window.clearInterval(intervalId);
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(intervalId);
+    };
   }, [
     authReady,
-    firebaseUser,
+    firebaseUserUid,
     workspaceAuthorized,
     isOnline,
     deviceId,
@@ -620,7 +665,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     employeeAuthenticated,
     state.activeUser.name,
     state.activeUser.role,
-    authorizedEmails,
+    authorizedEmailsKey,
   ]);
 
   const notify = (msg: string) => {
@@ -767,7 +812,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         counts.set(it.key, (counts.get(it.key) || 0) + it.qty);
       }
     }
-    const enabled = state.products.filter((p) => p.saleEnabled);
+    const enabled = state.products.filter((p) => p.saleEnabled && p.category !== 'MODIFICADORES');
     return enabled
       .slice()
       .sort((a, b) => (counts.get(b.key) || 0) - (counts.get(a.key) || 0))
@@ -793,12 +838,25 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     return state.orders.filter((o) => o.status !== 'closed');
   }, [state.orders]);
 
+  // O(1) lookup map for active orders grouped by service::location
+  const openOrdersByLocation = useMemo(() => {
+    const map = new Map<string, Order[]>();
+    for (const o of openOrders) {
+      const key = `${o.service}::${String(o.location)}`;
+      const bucket = map.get(key);
+      if (bucket) {
+        bucket.push(o);
+      } else {
+        map.set(key, [o]);
+      }
+    }
+    return map;
+  }, [openOrders]);
+
   // Active accounts for current service & location
   const currentLocOrders = useMemo(() => {
-    return state.orders.filter(
-      (o) => o.status !== 'closed' && o.service === currentService && String(o.location) === String(currentTable)
-    );
-  }, [state.orders, currentService, currentTable]);
+    return openOrdersByLocation.get(`${currentService}::${String(currentTable)}`) || [];
+  }, [openOrdersByLocation, currentService, currentTable]);
 
   // Current selected order
   const selectedOrder = useMemo(() => {
@@ -874,6 +932,17 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   };
 
   const handleUpdateQty = (targetId: string, delta: number) => {
+    const targetItem = cart.find((i) => (i.lineId || i.key) === targetId);
+    if (!targetItem) return;
+    if (
+      delta < 0 &&
+      targetItem.qty <= 1 &&
+      selectedOrder &&
+      (targetItem.itemStatus || 'pending') !== 'pending'
+    ) {
+      handleCancelItem(targetId);
+      return;
+    }
     setCart((prev) =>
       prev
         .map((i) => ((i.lineId || i.key) === targetId ? { ...i, qty: i.qty + delta } : i))
@@ -926,12 +995,19 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       notify('Tu rol no tiene permiso para cancelar productos.');
       return;
     }
+    if (selectedOrder && cart.length <= 1) {
+      notify('Es el último producto de una cuenta abierta. Usa "Cancelar Cuenta" para cerrarla con bitácora.');
+      return;
+    }
 
     setModalReason({
       title: `Cancelar producto: ${item.name}`,
       onConfirm: (reason) => {
-        const nextCart = cart.filter((i) => (i.lineId || i.key) !== targetId);
-        setCart(nextCart);
+        let nextCartSnapshot: OrderItem[] = [];
+        setCart((prev) => {
+          nextCartSnapshot = prev.filter((i) => (i.lineId || i.key) !== targetId);
+          return nextCartSnapshot;
+        });
         const auditEntry: AuditLogEntry = {
           id: uid(),
           at: new Date().toISOString(),
@@ -944,23 +1020,23 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           ...prev,
           audit: [...prev.audit, auditEntry],
         }));
-        if (firebaseUser) {
-          if (selectedOrder && nextCart.length > 0) {
-            const nextTotal = Math.max(0, subtotalCents(nextCart) - (selectedOrder.discountCents || 0));
-            const updatedOrder: Order = {
-              ...selectedOrder,
-              items: nextCart,
-              totalCents: nextTotal,
-              updatedAt: new Date().toISOString(),
-            };
-            void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-              notify(`Error actualizando orden en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
-            });
-          } else {
-            void fsRecordAudit(auditEntry, firebaseUser, authorizedEmails).catch((err) => {
-              notify(`Error registrando bitácora en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
-            });
-          }
+        if (firebaseUser && selectedOrder && nextCartSnapshot.length > 0) {
+          const nextDiscount = Math.min(selectedOrder.discountCents || 0, subtotalCents(nextCartSnapshot));
+          const nextTotal = Math.max(0, subtotalCents(nextCartSnapshot) - nextDiscount);
+          const updatedOrder: Order = {
+            ...selectedOrder,
+            items: nextCartSnapshot,
+            discountCents: nextDiscount,
+            totalCents: nextTotal,
+            updatedAt: new Date().toISOString(),
+          };
+          void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
+            notify(`Error actualizando orden en Firestore: ${formatActionErr(err)}`);
+          });
+        } else if (firebaseUser) {
+          void fsRecordAudit(auditEntry, firebaseUser, authorizedEmails).catch((err) => {
+            notify(`Error registrando bitácora en Firestore: ${formatActionErr(err)}`);
+          });
         }
         notify('Producto cancelado y registrado en bitácora.');
       },
@@ -1059,7 +1135,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
     if (firebaseUser) {
       void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-        notify(`Error actualizando KDS en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+        notify(`Error actualizando KDS en Firestore: ${formatActionErr(err)}`);
       });
     }
     notify(`${targetItem.name} → ${targetStatus.toUpperCase()}`);
@@ -1108,58 +1184,49 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
     if (firebaseUser) {
       void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-        notify(`Error KDS Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+        notify(`Error KDS Firestore: ${formatActionErr(err)}`);
       });
     }
     notify(`Comanda avanzada a ${updatedOrder.status.toUpperCase()}.`);
   };
 
-  // Split Order
+  // Split Order (preserves duplicate keys with different modifiers by matching first/lineId only)
   const handleSplitOrder = () => {
     if (!selectedOrder || selectedOrder.items.length < 2) {
-      notify('Se requieren al menos 2 platillos distintos en una cuenta abierta para dividirla.');
+      notify('Se requieren al menos 2 platillos en una cuenta abierta para dividirla.');
       return;
     }
+    const itemsSummary = selectedOrder.items
+      .slice(0, 6)
+      .map((i) => `${i.key} (${i.name})`)
+      .join(', ');
     setPromptModal({
       title: 'Dividir comanda',
-      label: 'Ingresa la CLAVE del producto a separar en una nueva cuenta:',
+      label: `Ingresa la CLAVE del platillo a separar (${itemsSummary}):`,
       defaultValue: selectedOrder.items[0]?.key,
       onConfirm: (keyVal) => {
-        const item = selectedOrder.items.find((i) => i.key === keyVal.trim());
-        if (!item) {
-          notify('Clave no encontrada en esta comanda.');
-          return;
-        }
         const now = new Date().toISOString();
         const splitOrderNum = state.nextOrderNumber;
         const newSplitId = uid();
-
-        const splitOrder: Order = {
-          ...selectedOrder,
-          id: newSplitId,
-          number: splitOrderNum,
-          items: [{ ...item }],
-          totalCents: lineTotalCents(item),
-          discountCents: 0,
-          note: `Dividida de cuenta #${selectedOrder.number}`,
-          createdAt: now,
-          updatedAt: now,
-        };
-
-        const remainingItems = selectedOrder.items.filter((i) => i.key !== keyVal.trim());
-        const updatedOriginal: Order = {
-          ...selectedOrder,
-          items: remainingItems,
-          totalCents: Math.max(0, subtotalCents(remainingItems) - selectedOrder.discountCents),
-          updatedAt: now,
-        };
+        const splitResult = splitOrderItemByTarget(
+          selectedOrder,
+          keyVal,
+          splitOrderNum,
+          newSplitId,
+          now
+        );
+        if (!splitResult) {
+          notify('Clave no encontrada en esta comanda.');
+          return;
+        }
+        const { updatedOriginal, splitOrder, movedItem } = splitResult;
 
         const auditEntry: AuditLogEntry = {
           id: uid(),
           at: now,
           user: state.activeUser.name,
           action: 'Cuenta dividida',
-          detail: `Producto ${item.name} movido de Cuenta #${selectedOrder.number} a nueva Cuenta #${splitOrderNum}`,
+          detail: `Producto ${movedItem.name} movido de Cuenta #${selectedOrder.number} a nueva Cuenta #${splitOrderNum}`,
         };
 
         setState((prev) => ({
@@ -1181,13 +1248,12 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               }
             })
             .catch((err) => {
-              const rawMsg = err instanceof Error ? err.message : 'Sin permisos';
-              notify(`Error dividiendo cuenta en Firestore: ${rawMsg.replace(/^ORDER_CLOSED:/, '')}`);
+              notify(`Error dividiendo cuenta en Firestore: ${formatActionErr(err)}`);
             });
         }
 
         loadOrderIntoDraft(splitOrder);
-        notify(`Nueva Cuenta #${splitOrderNum} creada con ${item.name}.`);
+        notify(`Nueva Cuenta #${splitOrderNum} creada con ${movedItem.name}.`);
       },
     });
     setPromptValue(selectedOrder.items[0]?.key || '');
@@ -1237,7 +1303,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     }));
     if (firebaseUser) {
       void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-        notify(`Error cambiando mesa en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+        notify(`Error cambiando mesa en Firestore: ${formatActionErr(err)}`);
       });
     }
     setCurrentService(moveTargetService);
@@ -1247,37 +1313,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   };
 
   const handleConfirmMergeOrders = (targetOrder: Order) => {
-    if (!selectedOrder || !isFirebaseAdmin) return;
+    if (!selectedOrder) return;
     const now = new Date().toISOString();
-    const mergedMap = new Map<string, OrderItem>();
-    for (const it of [...targetOrder.items, ...selectedOrder.items]) {
-      const mergeKey = `${it.key}::${it.note || ''}::${it.itemStatus || 'pending'}`;
-      const existing = mergedMap.get(mergeKey);
-      if (existing) {
-        mergedMap.set(mergeKey, {
-          ...existing,
-          qty: existing.qty + it.qty,
-        });
-      } else {
-        mergedMap.set(mergeKey, { ...it, lineId: it.lineId || uid() });
-      }
-    }
-    const mergedItems = Array.from(mergedMap.values());
-    const mergedDiscount = (targetOrder.discountCents || 0) + (selectedOrder.discountCents || 0);
-    const mergedTotal = Math.max(0, subtotalCents(mergedItems) - mergedDiscount);
-    const mergedNote = [targetOrder.note, selectedOrder.note, `Unida con Cuenta #${selectedOrder.number}`]
-      .filter(Boolean)
-      .join(' · ')
-      .slice(0, 300);
-
-    const updatedTarget: Order = {
-      ...targetOrder,
-      items: mergedItems,
-      discountCents: mergedDiscount,
-      totalCents: mergedTotal,
-      note: mergedNote,
-      updatedAt: now,
-    };
+    const updatedTarget = mergeOrdersIntoTarget(targetOrder, selectedOrder, now);
 
     const auditEntry: AuditLogEntry = {
       id: uid(),
@@ -1297,7 +1335,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
     if (firebaseUser) {
       void fsMergeOrders(updatedTarget, selectedOrder.id, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-        notify(`Error uniendo cuentas en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+        notify(`Error uniendo cuentas en Firestore: ${formatActionErr(err)}`);
       });
     }
 
@@ -1320,26 +1358,31 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       title: `Cancelar Cuenta #${selectedOrder.number} completa`,
       onConfirm: (reason) => {
         const now = new Date().toISOString();
+        const canceledOrder = selectedOrder;
         const auditEntry: AuditLogEntry = {
           id: uid(),
           at: now,
           user: state.activeUser.name,
           action: 'Cuenta cancelada',
-          detail: `Cuenta #${selectedOrder.number} en ${locationLabel(selectedOrder.service, selectedOrder.location)} por $${(selectedOrder.totalCents / 100).toFixed(2)}`,
+          detail: `Cuenta #${canceledOrder.number} en ${locationLabel(canceledOrder.service, canceledOrder.location)} por $${(canceledOrder.totalCents / 100).toFixed(2)}`,
           reason,
         };
+        setCurrentOrderId(null);
+        setCart([]);
+        setGeneralNote('');
+        setPriority('normal');
+        setDeliveryData({ name: '', phone: '', address: '', reference: '' });
         setState((prev) => ({
           ...prev,
-          orders: prev.orders.filter((o) => o.id !== selectedOrder.id),
+          orders: prev.orders.filter((o) => o.id !== canceledOrder.id),
           audit: [...prev.audit, auditEntry],
         }));
         if (firebaseUser) {
-          void fsCancelOrder(selectedOrder, isFirebaseAdmin, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-            notify(`Error cancelando cuenta en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+          void fsCancelOrder(canceledOrder, isFirebaseAdmin, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
+            notify(`Error cancelando cuenta en Firestore: ${formatActionErr(err)}`);
           });
         }
-        startNewAccount();
-        notify(`Cuenta #${selectedOrder.number} cancelada y registrada en bitácora.`);
+        notify(`Cuenta #${canceledOrder.number} cancelada y registrada en bitácora.`);
       },
     });
   };
@@ -1392,7 +1435,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
             }));
             if (firebaseUser) {
               void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-                notify(`Error aplicando descuento en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+                notify(`Error aplicando descuento en Firestore: ${formatActionErr(err)}`);
               });
             }
             notify(`Descuento de ${formatMoney(discountCents)} aplicado.`);
@@ -1450,6 +1493,11 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       });
 
       setState(nextState);
+      if (currentOrderId === workingOrder.id) {
+        setCurrentOrderId(null);
+        setCart([]);
+        setGeneralNote('');
+      }
       const closedOrder = nextState.orders.find((o) => o.id === workingOrder.id);
       const sale = nextState.sales[nextState.sales.length - 1];
       const latestAudit = nextState.audit[nextState.audit.length - 1];
@@ -1477,7 +1525,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
             if (rawMsg.startsWith('ALREADY_PAID:')) {
               notify(rawMsg.replace('ALREADY_PAID:', ''));
             } else {
-              notify(`Error guardando cobro en Firestore: ${rawMsg}`);
+              notify(`Error guardando cobro en Firestore: ${formatActionErr(err)}`);
             }
           });
       }
@@ -1565,7 +1613,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
     if (firebaseUser) {
       void fsCloseShift(shift, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-        notify(`Error cerrando turno en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+        notify(`Error cerrando turno en Firestore: ${formatActionErr(err)}`);
       });
     }
 
@@ -1601,13 +1649,13 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     setOpeningCashInput('0');
     if (firebaseUser) {
       void fsOpenNewShift(newShift, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-        notify(`Error abriendo turno en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+        notify(`Error abriendo turno en Firestore: ${formatActionErr(err)}`);
       });
     }
     notify(`Nuevo turno abierto (${newShift.id}) con fondo ${formatMoney(initialCents)}.`);
   };
 
-  // Record Cash Drawer Movement (Ingreso / Retiro de efectivo)
+  // Record Cash Drawer Movement (Ingreso / Retiro de efectivo via transactional delta)
   const handleSaveDrawerMovement = (e: React.FormEvent) => {
     e.preventDefault();
     if (!canCashCut) {
@@ -1629,13 +1677,14 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       notify('El retiro no puede superar el efectivo esperado en cajón.');
       return;
     }
-    const reason = drawerReason.trim() || (drawerModalType === 'deposito' ? 'Ingreso de cambio a caja' : 'Retiro parcial de caja');
+    const movementType = drawerModalType;
+    const reason = drawerReason.trim() || (movementType === 'deposito' ? 'Ingreso de cambio a caja' : 'Retiro parcial de caja');
     const updatedShift = {
       ...state.shift,
-      depositosCents: (state.shift.depositosCents || 0) + (drawerModalType === 'deposito' ? cents : 0),
-      retirosCents: (state.shift.retirosCents || 0) + (drawerModalType === 'retiro' ? cents : 0),
+      depositosCents: (state.shift.depositosCents || 0) + (movementType === 'deposito' ? cents : 0),
+      retirosCents: (state.shift.retirosCents || 0) + (movementType === 'retiro' ? cents : 0),
       expectedCashCents:
-        drawerModalType === 'deposito'
+        movementType === 'deposito'
           ? state.shift.expectedCashCents + cents
           : Math.max(0, state.shift.expectedCashCents - cents),
     };
@@ -1643,8 +1692,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       id: uid(),
       at: new Date().toISOString(),
       user: state.activeUser.name,
-      action: drawerModalType === 'deposito' ? 'Ingreso de efectivo' : 'Retiro de efectivo',
-      detail: `${drawerModalType === 'deposito' ? '+' : '-'}${formatMoney(cents)} · Nuevo esperado: ${formatMoney(updatedShift.expectedCashCents)}`,
+      action: movementType === 'deposito' ? 'Ingreso de efectivo' : 'Retiro de efectivo',
+      detail: `${movementType === 'deposito' ? '+' : '-'}${formatMoney(cents)} · Nuevo esperado: ${formatMoney(updatedShift.expectedCashCents)}`,
       reason,
     };
 
@@ -1655,15 +1704,29 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     }));
 
     if (firebaseUser) {
-      void fsRecordCashDrawerMovement(updatedShift, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-        notify(`Error registrando movimiento de caja: ${err instanceof Error ? err.message : 'Sin permisos'}`);
-      });
+      void fsRecordCashDrawerMovement(
+        { shiftId: state.shift.id, type: movementType, amountCents: cents },
+        firebaseUser,
+        authorizedEmails,
+        auditEntry
+      )
+        .then(({ expectedCashCents }) => {
+          if (typeof expectedCashCents === 'number') {
+            setState((prev) => ({
+              ...prev,
+              shift: { ...prev.shift, expectedCashCents },
+            }));
+          }
+        })
+        .catch((err) => {
+          notify(`Error registrando movimiento de caja: ${formatActionErr(err)}`);
+        });
     }
 
     setDrawerModalType(null);
     setDrawerAmount('');
     setDrawerReason('');
-    notify(`${drawerModalType === 'deposito' ? 'Ingreso' : 'Retiro'} de ${formatMoney(cents)} registrado.`);
+    notify(`${movementType === 'deposito' ? 'Ingreso' : 'Retiro'} de ${formatMoney(cents)} registrado.`);
   };
 
   // Reopen Last Sale
@@ -1790,6 +1853,113 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   };
 
   // Inventory Stock Adjustment or Intake or MinStock change
+  const commitInlineInventoryMovement = (
+    payload: {
+      clave: number;
+      descripcion: string;
+      type: 'entrada' | 'ajuste' | 'merma';
+      qtyNum: number;
+      costNum: number;
+      reasonText: string;
+    },
+    authorizingAdminName?: string
+  ) => {
+    const now = new Date().toISOString();
+    const currentItem = state.inventory[payload.clave] || {
+      clave: payload.clave,
+      descripcion: payload.descripcion,
+      unidad: 'PZA',
+      categoria: 'GENERAL',
+      costo: payload.costNum,
+      stock: 0,
+      minStock: 5,
+    };
+
+    let newStock = currentItem.stock;
+    if (payload.type === 'entrada') {
+      newStock += payload.qtyNum;
+    } else if (payload.type === 'merma') {
+      newStock = Math.max(0, currentItem.stock - payload.qtyNum);
+    } else {
+      newStock = payload.qtyNum;
+    }
+
+    const updatedItem: InventoryItem = {
+      ...currentItem,
+      stock: Math.max(0, newStock),
+      costo: payload.costNum > 0 ? payload.costNum : currentItem.costo,
+    };
+
+    const baseReason =
+      payload.reasonText.trim() || (payload.type === 'merma' ? 'Merma / Desperdicio' : 'Ajuste operativo');
+    const finalReason = authorizingAdminName
+      ? `${baseReason} (Autorizado por Admin: ${authorizingAdminName})`
+      : baseReason;
+
+    const mov = {
+      id: uid(),
+      at: now,
+      clave: payload.clave,
+      descripcion: payload.descripcion,
+      type: payload.type,
+      qty: payload.qtyNum,
+      costUnit: payload.costNum > 0 ? payload.costNum : currentItem.costo,
+      reason: finalReason,
+      user: state.activeUser.name,
+    };
+
+    const auditEntry: AuditLogEntry = {
+      id: uid(),
+      at: now,
+      user: state.activeUser.name,
+      action: `Inventario: ${payload.type.toUpperCase()}`,
+      detail: `${payload.descripcion} (${currentItem.unidad}) · ${
+        payload.type === 'entrada'
+          ? `+${payload.qtyNum}`
+          : payload.type === 'merma'
+          ? `-${payload.qtyNum} (Merma)`
+          : `fijado a ${payload.qtyNum}`
+      } · Nuevo stock: ${updatedItem.stock}${authorizingAdminName ? ` · Autorizó: ${authorizingAdminName}` : ''}`,
+      reason: finalReason,
+    };
+
+    setState((prev) => ({
+      ...prev,
+      inventory: {
+        ...prev.inventory,
+        [payload.clave]: updatedItem,
+      },
+      inventoryMovements: [...prev.inventoryMovements, mov],
+      audit: [...prev.audit, auditEntry],
+    }));
+
+    if (firebaseUser) {
+      const costChanged = isFirebaseAdmin && payload.costNum > 0 && payload.costNum !== currentItem.costo;
+      void fsSaveInventoryMovement(updatedItem, mov, firebaseUser, authorizedEmails, auditEntry, {
+        updateCost: costChanged,
+      })
+        .then((committedStock) => {
+          setState((prev) => {
+            const target = prev.inventory[payload.clave];
+            if (!target || target.stock === committedStock) return prev;
+            return {
+              ...prev,
+              inventory: { ...prev.inventory, [payload.clave]: { ...target, stock: committedStock } },
+            };
+          });
+        })
+        .catch((err) => {
+          notify(`Error guardando inventario en Firestore: ${formatActionErr(err)}`);
+        });
+    }
+
+    setInventoryModal(null);
+    setInvQty('');
+    setInvCost('');
+    setInvReason('');
+    notify(`Inventario actualizado: ${payload.descripcion} ahora tiene ${updatedItem.stock} ${updatedItem.unidad}.`);
+  };
+
   const handleSaveInventoryMovement = () => {
     if (!inventoryModal) return;
     const qtyNum = Number(invQty);
@@ -1832,7 +2002,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       }));
       if (firebaseUser) {
         void fsSaveInventoryMovement(updatedItem, null, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-          notify(`Error actualizando umbral en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+          notify(`Error actualizando umbral en Firestore: ${formatActionErr(err)}`);
         });
       }
       setInventoryModal(null);
@@ -1846,66 +2016,29 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       return;
     }
 
-    let newStock = currentItem.stock;
-    if (inventoryModal.type === 'entrada') {
-      newStock += qtyNum;
-    } else if (inventoryModal.type === 'merma') {
-      newStock = Math.max(0, currentItem.stock - qtyNum);
-    } else {
-      newStock = qtyNum; // Ajuste directo al stock contado
-    }
-
-    const updatedItem: InventoryItem = {
-      ...currentItem,
-      stock: Math.max(0, newStock),
-      costo: costNum > 0 ? costNum : currentItem.costo,
-    };
-
-    const mov = {
-      id: uid(),
-      at: now,
-      clave: inventoryModal.clave,
-      descripcion: inventoryModal.descripcion,
-      type: inventoryModal.type,
-      qty: qtyNum,
-      costUnit: costNum > 0 ? costNum : currentItem.costo,
-      reason: invReason.trim() || (inventoryModal.type === 'merma' ? 'Merma / Desperdicio' : 'Ajuste operativo'),
-      user: state.activeUser.name,
-    };
-
-    const auditEntry: AuditLogEntry = {
-      id: uid(),
-      at: now,
-      user: state.activeUser.name,
-      action: `Inventario: ${inventoryModal.type.toUpperCase()}`,
-      detail: `${inventoryModal.descripcion} (${currentItem.unidad}) · ${inventoryModal.type === 'entrada' ? `+${qtyNum}` : inventoryModal.type === 'merma' ? `-${qtyNum} (Merma)` : `fijado a ${qtyNum}`} · Nuevo stock: ${updatedItem.stock}`,
-      reason: invReason,
-    };
-
-    setState((prev) => ({
-      ...prev,
-      inventory: {
-        ...prev.inventory,
-        [inventoryModal.clave]: updatedItem,
-      },
-      inventoryMovements: [...prev.inventoryMovements, mov],
-      audit: [...prev.audit, auditEntry],
-    }));
-
-    if (firebaseUser) {
-      const costChanged = isFirebaseAdmin && costNum > 0 && costNum !== currentItem.costo;
-      void fsSaveInventoryMovement(updatedItem, mov, firebaseUser, authorizedEmails, auditEntry, {
-        updateCost: costChanged,
-      }).catch((err) => {
-        notify(`Error guardando inventario en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+    if ((inventoryModal.type === 'merma' || inventoryModal.type === 'ajuste') && state.activeUser.role !== 'admin') {
+      setPendingInvMermaAuth({
+        clave: inventoryModal.clave,
+        descripcion: inventoryModal.descripcion,
+        type: inventoryModal.type,
+        qtyNum,
+        costNum,
+        reasonText: invReason.trim(),
       });
+      return;
     }
 
-    setInventoryModal(null);
-    setInvQty('');
-    setInvCost('');
-    setInvReason('');
-    notify(`Inventario actualizado: ${inventoryModal.descripcion} ahora tiene ${updatedItem.stock} ${updatedItem.unidad}.`);
+    commitInlineInventoryMovement(
+      {
+        clave: inventoryModal.clave,
+        descripcion: inventoryModal.descripcion,
+        type: inventoryModal.type,
+        qtyNum,
+        costNum,
+        reasonText: invReason.trim(),
+      },
+      inventoryModal.type === 'merma' || inventoryModal.type === 'ajuste' ? state.activeUser.name : undefined
+    );
   };
 
   // Advanced POS Features Handlers (Split Bill, Transfer, Merge, Device Station & Sync)
@@ -1943,7 +2076,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           online: isOnline,
         },
         firebaseUser,
-        authorizedEmails
+        authorizedEmails,
+        { force: true }
       );
     }
     notify(`Estación configurada: ${stationName} (${station.toUpperCase()})`);
@@ -1962,7 +2096,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         online: isOnline,
       },
       firebaseUser,
-      authorizedEmails
+      authorizedEmails,
+      { force: true }
     );
     setLastSyncMs(Date.now());
   };
@@ -1989,7 +2124,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           online: false,
         },
         firebaseUser,
-        authorizedEmails
+        authorizedEmails,
+        { force: true }
       ).catch(() => undefined);
     }
     await signOutFirebase();
@@ -2876,9 +3012,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                 {/* 1-Tap Clickable Locations Grid for Selected Service */}
                 <div className="flex items-center gap-2 overflow-x-auto pt-1 pb-0.5 scrollbar-none">
                   {locationOptions(currentService).map((opt) => {
-                    const locOrders = state.orders.filter(
-                      (o) => o.status !== 'closed' && o.service === currentService && String(o.location) === opt.value
-                    );
+                    const locOrders = openOrdersByLocation.get(`${currentService}::${opt.value}`) || [];
                     const isSelectedLoc = String(currentTable) === opt.value;
                     const locSum = locOrders.reduce((s, o) => s + o.totalCents, 0);
                     return (
@@ -3605,9 +3739,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                   if (tableZoneFilter !== 'todas' && t.service !== tableZoneFilter) return false;
                   if (t.section !== sec) return false;
 
-                  const ordersAtLoc = state.orders.filter(
-                    (o) => o.status !== 'closed' && o.service === t.service && String(o.location) === t.loc
-                  );
+                  const ordersAtLoc = openOrdersByLocation.get(`${t.service}::${t.loc}`) || [];
                   const isBusy = ordersAtLoc.length > 0;
                   const hasReady = ordersAtLoc.some((o) => o.status === 'ready');
 
@@ -3634,9 +3766,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                     <h4 className="text-xs uppercase tracking-[0.08em] font-bold text-[rgba(240,230,211,0.58)] px-1">{sec}</h4>
                     <div className="table-map-grid">
                       {locs.map((loc) => {
-                        const ordersAtLoc = state.orders.filter(
-                          (o) => o.status !== 'closed' && o.service === loc.service && String(o.location) === loc.loc
-                        );
+                        const ordersAtLoc = openOrdersByLocation.get(`${loc.service}::${loc.loc}`) || [];
                         const isBusy = ordersAtLoc.length > 0;
                         const hasReady = ordersAtLoc.some((o) => o.status === 'ready');
                         const totalLoc = ordersAtLoc.reduce((sum, o) => sum + o.totalCents, 0);
@@ -3648,7 +3778,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                         const tileStateClass = hasReady ? 'ready' : isBusy ? 'busy' : 'free';
 
                         return (
-                          <div
+                          <button
+                            type="button"
                             key={`${loc.service}-${loc.loc}`}
                             onClick={() => {
                               if (isBusy) {
@@ -3664,7 +3795,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                 notify('Esta ubicación está disponible.');
                               }
                             }}
-                            className={`table-tile ${tileStateClass}`}
+                            className={`table-tile ${tileStateClass} w-full text-left`}
                           >
                             <div className="space-y-1">
                               <div className="flex items-center justify-between gap-2">
@@ -3708,7 +3839,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                 <span className="text-xs font-bold text-white/80">Gestionar →</span>
                               )}
                             </div>
-                          </div>
+                          </button>
                         );
                       })}
                     </div>
@@ -4925,15 +5056,13 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                       <span className="text-white tabular-nums">
                         Cuenta #{targetOrd.number} · {formatMoney(targetOrd.totalCents)}
                       </span>
-                      {isFirebaseAdmin && (
-                        <button
-                          type="button"
-                          onClick={() => handleConfirmMergeOrders(targetOrd)}
-                          className="min-h-[38px] px-3 py-1 rounded-xl bg-[#c8a84b] text-[#0a0a0b] font-bold inline-flex items-center gap-1"
-                        >
-                          <Merge className="w-3.5 h-3.5" /> Unir cuentas
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleConfirmMergeOrders(targetOrd)}
+                        className="min-h-[38px] px-3 py-1 rounded-xl bg-[#c8a84b] text-[#0a0a0b] font-bold inline-flex items-center gap-1"
+                      >
+                        <Merge className="w-3.5 h-3.5" /> Unir cuentas
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -5428,6 +5557,37 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           setPinPadMode(null);
           setView('admin');
           notify(`Acceso administrativo autorizado (${res.user.name}).`);
+          return true;
+        }}
+      />
+
+      {/* Tactile iOS PIN Pad Modal for Inline Inventory Merma/Ajuste Admin Authorization */}
+      <IosPinPadModal
+        open={Boolean(pendingInvMermaAuth)}
+        title="Autorización de Administrador — Merma"
+        subtitle={`El movimiento de ${pendingInvMermaAuth?.type === 'merma' ? 'merma' : 'ajuste'} en "${pendingInvMermaAuth?.descripcion || ''}" requiere PIN de Administrador.`}
+        rateLimitScope="inventory-merma-pos"
+        allowCancel={true}
+        onCancel={() => setPendingInvMermaAuth(null)}
+        onValidatePin={async (enteredPin) => {
+          if (!pendingInvMermaAuth) return false;
+          let adminName: string | null = null;
+          if (firebaseUser) {
+            const res = await fsVerifyAnyAdminPinFromFirestore(enteredPin, firebaseUser, authorizedEmails);
+            if (res.ok && res.user) adminName = res.user.name;
+          } else {
+            for (const u of (state.users || []).filter((usr) => usr.role === 'admin')) {
+              const ok = await verifyPinSecret(enteredPin, u.pinHash, u.pin);
+              if (ok) {
+                adminName = u.name;
+                break;
+              }
+            }
+          }
+          if (!adminName) return false;
+          const pending = pendingInvMermaAuth;
+          setPendingInvMermaAuth(null);
+          commitInlineInventoryMovement(pending, adminName);
           return true;
         }}
       />

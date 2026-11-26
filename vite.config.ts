@@ -81,54 +81,20 @@ export default defineConfig({
     whatsappProxyPlugin(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.ico', 'icon.svg', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
-      manifest: {
-        id: '/',
-        name: 'Barbachu Restaurante Bar & POS',
-        short_name: 'Barbachu',
-        description: 'Menú digital y punto de venta para Barbachu Restaurante Bar con modo offline.',
-        start_url: '/',
-        scope: '/',
-        display: 'standalone',
-        orientation: 'any',
-        background_color: '#0a0a0b',
-        theme_color: '#0a0a0b',
-        lang: 'es-MX',
-        categories: ['food', 'business', 'productivity'],
-        icons: [
-          {
-            src: '/pwa-192x192.png',
-            sizes: '192x192',
-            type: 'image/png',
-            purpose: 'any',
-          },
-          {
-            src: '/pwa-512x512.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'any',
-          },
-          {
-            src: '/pwa-maskable-512x512.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'maskable',
-          },
-          {
-            src: '/icon.svg',
-            sizes: 'any',
-            type: 'image/svg+xml',
-            purpose: 'any',
-          },
-          {
-            src: '/favicon.ico',
-            sizes: '64x64 32x32 24x24 16x16',
-            type: 'image/x-icon',
-          },
-        ],
-      },
+      injectRegister: false,
+      manifest: false,
+      includeAssets: [
+        'manifest.json',
+        'favicon.ico',
+        'icon.svg',
+        'apple-touch-icon.png',
+        'pwa-192x192.png',
+        'pwa-512x512.png',
+        'pwa-maskable-512x512.png',
+      ],
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,webp}'],
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,webp,json}'],
+        navigateFallbackDenylist: [/^\/api\//],
         runtimeCaching: [
           {
             urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,

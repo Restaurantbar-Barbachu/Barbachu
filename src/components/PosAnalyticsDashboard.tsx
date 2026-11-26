@@ -17,7 +17,7 @@ import {
 import { BarChart3, Clock, CreditCard, TrendingUp, UtensilsCrossed } from 'lucide-react';
 import { FullPosState } from '../types';
 import { formatMoney } from '../storage';
-import { buildSalesTrend, toLocalDateKey } from '../utils/dashboardMetrics';
+import { buildSalesPerformanceMetrics, buildSalesTrend, toLocalDateKey } from '../utils/dashboardMetrics';
 
 interface PosAnalyticsDashboardProps {
   state: FullPosState;
@@ -127,36 +127,11 @@ export const PosAnalyticsDashboard: React.FC<PosAnalyticsDashboardProps> = ({ st
     }));
   }, [filteredSales]);
 
-  // Real Top Selling Products (zero default samples)
-  const topProductsData = useMemo(() => {
-    const productStats = new Map<string, { name: string; category: string; units: number; revenueCents: number }>();
-
-    filteredSales.forEach((sale) => {
-      sale.items.forEach((item) => {
-        const prod = state.products.find((p) => p.key === item.key);
-        const curr = productStats.get(item.key) || {
-          name: item.name,
-          category: prod?.category || 'GENERAL',
-          units: 0,
-          revenueCents: 0,
-        };
-        curr.units += item.qty;
-        curr.revenueCents += item.priceCents * item.qty;
-        productStats.set(item.key, curr);
-      });
-    });
-
-    return Array.from(productStats.values())
-      .sort((a, b) => (productMetric === 'revenue' ? b.revenueCents - a.revenueCents : b.units - a.units))
-      .slice(0, 7)
-      .map((p) => ({
-        name: p.name.length > 18 ? p.name.slice(0, 16) + '...' : p.name,
-        fullName: p.name,
-        unidades: p.units,
-        ingresos: Math.round((p.revenueCents / 100) * 100) / 100,
-        categoria: p.category,
-      }));
-  }, [filteredSales, state.products, productMetric]);
+  // Real Top Selling Products & Category Sales (O(N), modifier & discount aware)
+  const { topProducts: topProductsData, categorySales: categorySalesData } = useMemo(
+    () => buildSalesPerformanceMetrics(filteredSales, state.products, productMetric),
+    [filteredSales, state.products, productMetric]
+  );
 
   // Real Payment Methods Breakdown (zero mock percentages)
   const paymentBreakdownData = useMemo(() => {
@@ -182,27 +157,6 @@ export const PosAnalyticsDashboard: React.FC<PosAnalyticsDashboardProps> = ({ st
       { name: 'Mixto', value: Math.round((mixed / total) * 100), amountCents: mixed, key: 'mixto' },
     ].filter((d) => d.amountCents > 0);
   }, [filteredSales]);
-
-  // Real Sales by Category (zero mock category bars)
-  const categorySalesData = useMemo(() => {
-    const catMap = new Map<string, number>();
-
-    filteredSales.forEach((s) => {
-      s.items.forEach((item) => {
-        const prod = state.products.find((p) => p.key === item.key);
-        const cat = prod?.category || 'PLATILLOS';
-        catMap.set(cat, (catMap.get(cat) || 0) + item.priceCents * item.qty);
-      });
-    });
-
-    return Array.from(catMap.entries())
-      .map(([cat, totalCents]) => ({
-        categoria: cat,
-        ventas: Math.round((totalCents / 100) * 100) / 100,
-      }))
-      .sort((a, b) => b.ventas - a.ventas)
-      .slice(0, 6);
-  }, [filteredSales, state.products]);
 
   const topCategory = categorySalesData[0];
 

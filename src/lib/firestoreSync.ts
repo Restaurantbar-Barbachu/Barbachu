@@ -1940,6 +1940,59 @@ export async function fsSaveInventoryMovement(
   }
 }
 
+export async function fsBatchMergeInventoryItems(
+  items: InventoryItem[],
+  user: User,
+  auditEntry: AuditLogEntry,
+  authorizedEmails: string[],
+  workspaceOwnerUid: string
+): Promise<void> {
+  if (items.length === 0) return;
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+  const emails = ensureEmailList(authorizedEmails);
+  const chunkSize = 150;
+
+  try {
+    for (let i = 0; i < items.length; i += chunkSize) {
+      const slice = items.slice(i, i + chunkSize);
+      const isLastChunk = i + chunkSize >= items.length;
+      await runTransaction(db, async (tx) => {
+        const refs = slice.map((item) =>
+          doc(db, 'inventory', sanitizeFirestoreId(String(item.clave), 'inv'))
+        );
+        const snaps = await Promise.all(refs.map((ref) => tx.get(ref)));
+
+        slice.forEach((item, idx) => {
+          const ref = refs[idx];
+          const snap = snaps[idx];
+          const ownerUid = snap.exists()
+            ? String(snap.data().ownerUid || workspaceOwnerUid || user.uid)
+            : sanitizeFirestoreId(user.uid, 'usr');
+
+          tx.set(ref, {
+            clave: Math.round(Number(item.clave) || 0),
+            descripcion: boundStr(item.descripcion, 140, 'Insumo'),
+            unidad: boundStr(item.unidad, 20, 'PZA'),
+            categoria: boundStr(item.categoria, 80, 'GENERAL'),
+            costo: Math.max(0, Number(item.costo) || 0),
+            stock: Math.max(0, Number(item.stock) || 0),
+            minStock: Math.max(0, Number(item.minStock) || 0),
+            ownerUid,
+            authorizedEmails: emails,
+            updatedAt: serverTimestamp(),
+          });
+        });
+
+        if (isLastChunk) {
+          tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, emails));
+        }
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'inventory');
+  }
+}
+
 export async function fsSaveStaffUser(
   staffUser: PosUser,
   user: User,

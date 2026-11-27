@@ -15,13 +15,13 @@ import {
   uid,
 } from '../core';
 import {
-  fsCancelOrder,
-  fsMergeOrders,
-  fsRecordAudit,
-  fsSaveOrder,
-  fsSplitOrder,
-  fsUpdateOrder,
-} from '../lib/firestoreSync';
+  createInitialSecurePosState,
+  securePosApi,
+  type OrderToastEvent,
+  type SecurePosMutationOptions,
+  type SecurePosState,
+  type ToastVariant,
+} from '../lib/securePosApi';
 import { formatMoney } from '../storage';
 import type {
   AuditLogEntry,
@@ -40,14 +40,6 @@ import type {
 } from '../types';
 import type { PosViewRoute } from '../components/EmployeePinAuthPanel';
 
-function formatOrderError(err: unknown, fallback = 'Sin permisos'): string {
-  const raw = err instanceof Error ? err.message : fallback;
-  return raw.replace(
-    /^(ORDER_CLOSED|ALREADY_PAID|SHIFT_CLOSED|SHIFT_ALREADY_CLOSED|SHIFT_ALREADY_OPEN|SHIFT_NOT_FOUND|INSUFFICIENT_CASH|ITEM_EXISTS|ITEM_NOT_FOUND):/,
-    ''
-  );
-}
-
 interface UseOrderManagerParams {
   state: FullPosState;
   setState: React.Dispatch<React.SetStateAction<FullPosState>>;
@@ -60,7 +52,8 @@ interface UseOrderManagerParams {
   firebaseUser: User | null;
   isFirebaseAdmin: boolean;
   authorizedEmails: string[];
-  notify: (msg: string) => void;
+  notify: (msg: string, variant?: ToastVariant, detail?: string) => void;
+  onConfirmedToast?: (toast: OrderToastEvent) => void;
   setView: React.Dispatch<React.SetStateAction<PosViewRoute>>;
   setModalReason: React.Dispatch<
     React.SetStateAction<{ title: string; onConfirm: (reason: string) => void } | null>
@@ -94,6 +87,7 @@ export function useOrderManager({
   isFirebaseAdmin,
   authorizedEmails,
   notify,
+  onConfirmedToast,
   setView,
   setModalReason,
   setPromptModal,
@@ -116,6 +110,12 @@ export function useOrderManager({
     reference: '',
   });
 
+  // Server transaction status tracked strictly via securePosApi ('idle' | 'pending' | 'confirmed' | 'error')
+  const [orderSyncState, setOrderSyncState] = useState<SecurePosState>(
+    createInitialSecurePosState
+  );
+  const isOrderMutating = orderSyncState.status === 'pending';
+
   // Transfer / Merge Modal State
   const [moveTableModalOpen, setMoveTableModalOpen] = useState<boolean>(false);
   const [moveTargetService, setMoveTargetService] = useState<ServiceType>('mesa');
@@ -123,6 +123,19 @@ export function useOrderManager({
 
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  const isMutatingRef = useRef(isOrderMutating);
+  isMutatingRef.current = isOrderMutating;
+
+  const secureApiOptions = useMemo<SecurePosMutationOptions>(
+    () => ({
+      firebaseUser,
+      authorizedEmails,
+      onStatusChange: setOrderSyncState,
+      onConfirmedToast,
+    }),
+    [authorizedEmails, firebaseUser, onConfirmedToast]
+  );
 
   // Keep waiter synced when active user switches (unless editing an open loaded order)
   useEffect(() => {
@@ -139,7 +152,7 @@ export function useOrderManager({
       setCurrentOrderId(null);
       setCart([]);
       setGeneralNote('');
-      notify('La cuenta cargada fue cobrada o cerrada en otra terminal.');
+      notify('La cuenta cargada fue cobrada o cerrada en otra terminal.', 'info');
     }
   }, [state.orders, currentOrderId, notify]);
 
@@ -183,7 +196,7 @@ export function useOrderManager({
   }, [openOrders]);
 
   const loadOrderIntoDraft = useCallback(
-    (order: Order) => {
+    (order: Order, silent = false) => {
       setCurrentOrderId(order.id);
       setCurrentService(order.service);
       setCurrentTable(order.location);
@@ -193,7 +206,9 @@ export function useOrderManager({
       setPriority(order.priority || 'normal');
       if (order.customer) setDeliveryData(order.customer);
       setView('pos');
-      notify(`Cuenta #${order.number} cargada en ${locationLabel(order.service, order.location)}.`);
+      if (!silent) {
+        notify(`Cuenta #${order.number} cargada en ${locationLabel(order.service, order.location)}.`, 'info');
+      }
     },
     [notify, setView]
   );
@@ -205,7 +220,7 @@ export function useOrderManager({
     setGeneralNote('');
     setPriority('normal');
     setDeliveryData({ name: '', phone: '', address: '', reference: '' });
-    notify(`Nueva cuenta preparada en ${locationLabel(currentService, currentTable)}.`);
+    notify(`Nueva cuenta preparada en ${locationLabel(currentService, currentTable)}.`, 'info');
   }, [currentService, currentTable, notify]);
 
   const openLocationDraft = useCallback(
@@ -221,7 +236,8 @@ export function useOrderManager({
       notify(
         isExtraAccount
           ? `Nueva cuenta independiente en ${label}.`
-          : `${label} lista para tomar comanda.`
+          : `${label} lista para tomar comanda.`,
+        'info'
       );
     },
     [notify, setView]
@@ -230,11 +246,11 @@ export function useOrderManager({
   const handleAddProduct = useCallback(
     (prod: SoftProduct) => {
       if (!activePerms?.canTakeOrders && !isAdminRole) {
-        notify(`Tu rol (${activeRole.toUpperCase()}) no tiene permiso para tomar comandas.`);
+        notify(`Tu rol (${activeRole.toUpperCase()}) no tiene permiso para tomar comandas.`, 'error');
         return;
       }
       if (!prod.saleEnabled) {
-        notify(`El producto "${prod.name}" tiene precio pendiente.`);
+        notify(`El producto "${prod.name}" tiene precio pendiente.`, 'error');
         return;
       }
       const station = prod.station || classifyProductStation(prod.category);
@@ -267,7 +283,7 @@ export function useOrderManager({
           },
         ];
       });
-      notify(`+1 ${prod.name}`);
+      notify(`+1 ${prod.name}`, 'info');
     },
     [activePerms?.canTakeOrders, activeRole, isAdminRole, notify]
   );
@@ -289,7 +305,7 @@ export function useOrderManager({
           modifiers: modsArray,
         },
       ]);
-      notify(`+1 ${prod.name} (${modsArray.length} modificadores)`);
+      notify(`+1 ${prod.name} (${modsArray.length} modificadores)`, 'info');
     },
     [notify]
   );
@@ -299,12 +315,13 @@ export function useOrderManager({
       const item = cart.find((i) => (i.lineId || i.key) === targetId);
       if (!item) return;
       if (!canCancelOrders) {
-        notify('Tu rol no tiene permiso para cancelar productos.');
+        notify('Tu rol no tiene permiso para cancelar productos.', 'error');
         return;
       }
       if (selectedOrder && cart.length <= 1) {
         notify(
-          'Es el último producto de una cuenta abierta. Usa "Cancelar Cuenta" para cerrarla con bitácora.'
+          'Es el último producto de una cuenta abierta. Usa "Cancelar Cuenta" para cerrarla con bitácora.',
+          'error'
         );
         return;
       }
@@ -312,59 +329,81 @@ export function useOrderManager({
       setModalReason({
         title: `Cancelar producto: ${item.name}`,
         onConfirm: (reason) => {
-          const latest = stateRef.current;
-          let nextCartSnapshot: OrderItem[] = [];
-          setCart((prev) => {
-            nextCartSnapshot = prev.filter((i) => (i.lineId || i.key) !== targetId);
-            return nextCartSnapshot;
-          });
-          const auditEntry: AuditLogEntry = {
-            id: uid(),
-            at: new Date().toISOString(),
-            user: latest.activeUser.name,
-            action: 'Producto cancelado',
-            detail: `${item.qty} × ${item.name} de ${locationLabel(currentService, currentTable)}`,
-            reason,
-          };
-          setState((prev) => ({
-            ...prev,
-            audit: [...prev.audit, auditEntry],
-          }));
-          if (firebaseUser && selectedOrder && nextCartSnapshot.length > 0) {
-            const nextDiscount = Math.min(
-              selectedOrder.discountCents || 0,
-              subtotalCents(nextCartSnapshot)
-            );
-            const nextTotal = Math.max(0, subtotalCents(nextCartSnapshot) - nextDiscount);
-            const updatedOrder: Order = {
-              ...selectedOrder,
-              items: nextCartSnapshot,
-              discountCents: nextDiscount,
-              totalCents: nextTotal,
-              updatedAt: new Date().toISOString(),
+          void (async () => {
+            if (isMutatingRef.current) return;
+            const latest = stateRef.current;
+            const nextCartSnapshot = cart.filter((i) => (i.lineId || i.key) !== targetId);
+            const auditEntry: AuditLogEntry = {
+              id: uid(),
+              at: new Date().toISOString(),
+              user: latest.activeUser.name,
+              action: 'Producto cancelado',
+              detail: `${item.qty} × ${item.name} de ${locationLabel(currentService, currentTable)}`,
+              reason,
             };
-            void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch(
-              (err) => {
-                notify(`Error actualizando orden en Firestore: ${formatOrderError(err)}`);
+
+            if (selectedOrder && nextCartSnapshot.length > 0) {
+              const nextDiscount = Math.min(
+                selectedOrder.discountCents || 0,
+                subtotalCents(nextCartSnapshot)
+              );
+              const nextTotal = Math.max(0, subtotalCents(nextCartSnapshot) - nextDiscount);
+              const updatedOrder: Order = {
+                ...selectedOrder,
+                items: nextCartSnapshot,
+                discountCents: nextDiscount,
+                totalCents: nextTotal,
+                updatedAt: new Date().toISOString(),
+              };
+
+              const res = await securePosApi.updateOrder(
+                updatedOrder,
+                auditEntry,
+                secureApiOptions,
+                {
+                  title: 'Producto cancelado y confirmado',
+                  detail: `${item.name} eliminado de Cuenta #${selectedOrder.number}`,
+                }
+              );
+
+              if (res.status !== 'confirmed') {
+                notify(res.error || 'Error cancelando producto en Firestore.', 'error');
+                return;
               }
-            );
-          } else if (firebaseUser) {
-            void fsRecordAudit(auditEntry, firebaseUser, authorizedEmails).catch((err) => {
-              notify(`Error registrando bitácora en Firestore: ${formatOrderError(err)}`);
+
+              setCart(nextCartSnapshot);
+              setState((prev) => ({
+                ...prev,
+                orders: prev.orders.map((o) => (o.id === selectedOrder.id ? updatedOrder : o)),
+                audit: [...prev.audit, auditEntry],
+              }));
+              return;
+            }
+
+            const auditRes = await securePosApi.recordAudit(auditEntry, secureApiOptions, {
+              title: 'Producto cancelado',
+              detail: `${item.name} registrado en bitácora`,
             });
-          }
-          notify('Producto cancelado y registrado en bitácora.');
+            if (auditRes.status !== 'confirmed') {
+              notify(auditRes.error || 'Error registrando cancelación en Firestore.', 'error');
+              return;
+            }
+            setCart(nextCartSnapshot);
+            setState((prev) => ({
+              ...prev,
+              audit: [...prev.audit, auditEntry],
+            }));
+          })();
         },
       });
     },
     [
-      authorizedEmails,
       canCancelOrders,
       cart,
       currentService,
       currentTable,
-      firebaseUser,
       notify,
+      secureApiOptions,
       selectedOrder,
       setModalReason,
       setState,
@@ -436,16 +475,17 @@ export function useOrderManager({
     [setItemNoteValue]
   );
 
-  const handleSendOrder = useCallback(() => {
+  const handleSendOrder = useCallback(async () => {
+    if (isMutatingRef.current) return;
     if (cart.length === 0) {
-      notify('Agrega al menos un producto a la cuenta antes de enviar.');
+      notify('Agrega al menos un producto a la cuenta antes de enviar.', 'error');
       return;
     }
     if (
       currentService === 'domicilio' &&
       (!deliveryData.name || !deliveryData.phone || !deliveryData.address)
     ) {
-      notify('Para servicio a domicilio se requiere Nombre, Teléfono y Dirección.');
+      notify('Para servicio a domicilio se requiere Nombre, Teléfono y Dirección.', 'error');
       return;
     }
 
@@ -461,46 +501,59 @@ export function useOrderManager({
       priority,
     });
 
-    setState(nextState);
-    setCurrentOrderId(orderId);
-
     const savedOrder = nextState.orders.find((o) => o.id === orderId);
-    const latestAudit = nextState.audit[nextState.audit.length - 1];
-    if (firebaseUser && savedOrder && latestAudit) {
-      void fsSaveOrder(savedOrder, isNew, firebaseUser, authorizedEmails, latestAudit)
-        .then((assignedNum) => {
-          if (isNew && assignedNum !== savedOrder.number) {
-            setState((prev) => ({
-              ...prev,
-              orders: prev.orders.map((o) =>
-                o.id === orderId ? { ...o, number: assignedNum } : o
-              ),
-              nextOrderNumber: Math.max(prev.nextOrderNumber, assignedNum + 1),
-            }));
-          }
-        })
-        .catch((err) => {
-          notify(`Error guardando comanda en Firestore: ${formatOrderError(err)}`);
-        });
+    const latestAudit: AuditLogEntry =
+      nextState.audit[nextState.audit.length - 1] || {
+        id: uid(),
+        at: new Date().toISOString(),
+        user: stateRef.current.activeUser.name,
+        action: isNew ? 'Comanda creada' : 'Comanda actualizada',
+        detail: `Cuenta #${savedOrder?.number ?? ''} en ${locationLabel(currentService, currentTable)}`,
+      };
+    if (!savedOrder) return;
+
+    const res = await securePosApi.saveOrder(
+      savedOrder,
+      isNew,
+      latestAudit,
+      secureApiOptions
+    );
+
+    if (res.status !== 'confirmed') {
+      notify(res.error || 'Error confirmando comanda en Firestore.', 'error');
+      return;
     }
-    notify('Comanda guardada y enviada a cocina/barra exitosamente.');
+
+    const assignedNum = typeof res.data === 'number' ? res.data : savedOrder.number;
+    setCurrentOrderId(orderId);
+    setState((prev) => {
+      const mergedOrders = prev.orders.some((o) => o.id === orderId)
+        ? prev.orders.map((o) => (o.id === orderId ? { ...savedOrder, number: assignedNum } : o))
+        : [...prev.orders, { ...savedOrder, number: assignedNum }];
+      return {
+        ...prev,
+        orders: mergedOrders,
+        nextOrderNumber: Math.max(prev.nextOrderNumber, assignedNum + 1),
+        audit: latestAudit ? [...prev.audit, latestAudit] : prev.audit,
+      };
+    });
   }, [
-    authorizedEmails,
     cart,
     currentOrderId,
     currentService,
     currentTable,
     deliveryData,
-    firebaseUser,
     generalNote,
     notify,
     priority,
+    secureApiOptions,
     setState,
     waiter,
   ]);
 
   const handleAdvanceItemStatus = useCallback(
-    (orderId: string, itemTargetId: string, targetStatus: ItemStatus) => {
+    async (orderId: string, itemTargetId: string, targetStatus: ItemStatus) => {
+      if (isMutatingRef.current) return;
       const latest = stateRef.current;
       const order = latest.orders.find((o) => o.id === orderId);
       if (!order) return;
@@ -511,7 +564,7 @@ export function useOrderManager({
       const itemStation = targetItem.station || 'cocina';
 
       if (!canTransitionItemStatus(currentItemStatus, targetStatus)) {
-        notify(`Transición inválida: ${currentItemStatus} → ${targetStatus}.`);
+        notify(`Transición inválida: ${currentItemStatus} → ${targetStatus}.`, 'error');
         return;
       }
       if (
@@ -523,7 +576,8 @@ export function useOrderManager({
         )
       ) {
         notify(
-          `El rol ${latest.activeUser.role.toUpperCase()} / estación ${latest.deviceConfig?.station} no puede marcar "${targetStatus}" en ${itemStation.toUpperCase()}.`
+          `El rol ${latest.activeUser.role.toUpperCase()} / estación ${latest.deviceConfig?.station} no puede marcar "${targetStatus}" en ${itemStation.toUpperCase()}.`,
+          'error'
         );
         return;
       }
@@ -547,24 +601,28 @@ export function useOrderManager({
         detail: `Cuenta #${order.number} · ${targetItem.qty}× ${targetItem.name} (${itemStation}) → ${targetStatus.toUpperCase()}`,
       };
 
+      const res = await securePosApi.updateOrder(updatedOrder, auditEntry, secureApiOptions, {
+        title: `${targetItem.name} → ${targetStatus.toUpperCase()}`,
+        detail: `Cuenta #${order.number} confirmada en KDS`,
+      });
+
+      if (res.status !== 'confirmed') {
+        notify(res.error || 'Error actualizando KDS en Firestore.', 'error');
+        return;
+      }
+
       setState((prev) => ({
         ...prev,
         orders: prev.orders.map((o) => (o.id === orderId ? updatedOrder : o)),
         audit: [...prev.audit, auditEntry],
       }));
-
-      if (firebaseUser) {
-        void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-          notify(`Error actualizando KDS en Firestore: ${formatOrderError(err)}`);
-        });
-      }
-      notify(`${targetItem.name} → ${targetStatus.toUpperCase()}`);
     },
-    [authorizedEmails, firebaseUser, notify, setState]
+    [notify, secureApiOptions, setState]
   );
 
   const handleAdvanceOrderStatus = useCallback(
-    (orderId: string, currentStatus: OrderStatus) => {
+    async (orderId: string, currentStatus: OrderStatus) => {
+      if (isMutatingRef.current) return;
       const latest = stateRef.current;
       const order = latest.orders.find((o) => o.id === orderId);
       if (!order) return;
@@ -600,25 +658,28 @@ export function useOrderManager({
         detail: `Cuenta #${order.number} (${locationLabel(order.service, order.location)}) pasó a ${updatedOrder.status.toUpperCase()}`,
       };
 
+      const res = await securePosApi.updateOrder(updatedOrder, auditEntry, secureApiOptions, {
+        title: `Comanda #${order.number} → ${updatedOrder.status.toUpperCase()}`,
+        detail: `${locationLabel(order.service, order.location)} confirmada`,
+      });
+
+      if (res.status !== 'confirmed') {
+        notify(res.error || 'Error avanzando estado en Firestore.', 'error');
+        return;
+      }
+
       setState((prev) => ({
         ...prev,
         orders: prev.orders.map((o) => (o.id === orderId ? updatedOrder : o)),
         audit: [...prev.audit, auditEntry],
       }));
-
-      if (firebaseUser) {
-        void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-          notify(`Error KDS Firestore: ${formatOrderError(err)}`);
-        });
-      }
-      notify(`Comanda avanzada a ${updatedOrder.status.toUpperCase()}.`);
     },
-    [authorizedEmails, firebaseUser, kitchenStation, notify, setState]
+    [kitchenStation, notify, secureApiOptions, setState]
   );
 
   const handleSplitOrder = useCallback(() => {
     if (!selectedOrder || selectedOrder.items.length < 2) {
-      notify('Se requieren al menos 2 platillos en una cuenta abierta para dividirla.');
+      notify('Se requieren al menos 2 platillos en una cuenta abierta para dividirla.', 'error');
       return;
     }
     const itemsSummary = selectedOrder.items
@@ -630,70 +691,68 @@ export function useOrderManager({
       label: `Ingresa la CLAVE del platillo a separar (${itemsSummary}):`,
       defaultValue: selectedOrder.items[0]?.key,
       onConfirm: (keyVal) => {
-        const latest = stateRef.current;
-        const now = new Date().toISOString();
-        const splitOrderNum = latest.nextOrderNumber;
-        const newSplitId = uid();
-        const splitResult = splitOrderItemByTarget(
-          selectedOrder,
-          keyVal,
-          splitOrderNum,
-          newSplitId,
-          now
-        );
-        if (!splitResult) {
-          notify('Clave no encontrada en esta comanda.');
-          return;
-        }
-        const { updatedOriginal, splitOrder, movedItem } = splitResult;
+        void (async () => {
+          if (isMutatingRef.current) return;
+          const latest = stateRef.current;
+          const now = new Date().toISOString();
+          const splitOrderNum = latest.nextOrderNumber;
+          const newSplitId = uid();
+          const splitResult = splitOrderItemByTarget(
+            selectedOrder,
+            keyVal,
+            splitOrderNum,
+            newSplitId,
+            now
+          );
+          if (!splitResult) {
+            notify('Clave no encontrada en esta comanda.', 'error');
+            return;
+          }
+          const { updatedOriginal, splitOrder, movedItem } = splitResult;
 
-        const auditEntry: AuditLogEntry = {
-          id: uid(),
-          at: now,
-          user: latest.activeUser.name,
-          action: 'Cuenta dividida',
-          detail: `Producto ${movedItem.name} movido de Cuenta #${selectedOrder.number} a nueva Cuenta #${splitOrderNum}`,
-        };
+          const auditEntry: AuditLogEntry = {
+            id: uid(),
+            at: now,
+            user: latest.activeUser.name,
+            action: 'Cuenta dividida',
+            detail: `Producto ${movedItem.name} movido de Cuenta #${selectedOrder.number} a nueva Cuenta #${splitOrderNum}`,
+          };
 
-        setState((prev) => ({
-          ...prev,
-          orders: [
-            ...prev.orders.filter((o) => o.id !== selectedOrder.id),
+          const res = await securePosApi.splitOrder(
             updatedOriginal,
             splitOrder,
-          ],
-          nextOrderNumber: splitOrderNum + 1,
-          audit: [...prev.audit, auditEntry],
-        }));
+            auditEntry,
+            secureApiOptions
+          );
 
-        if (firebaseUser) {
-          void fsSplitOrder(updatedOriginal, splitOrder, firebaseUser, authorizedEmails, auditEntry)
-            .then((assignedNum) => {
-              if (assignedNum !== splitOrder.number) {
-                setState((prev) => ({
-                  ...prev,
-                  orders: prev.orders.map((o) =>
-                    o.id === newSplitId ? { ...o, number: assignedNum } : o
-                  ),
-                  nextOrderNumber: Math.max(prev.nextOrderNumber, assignedNum + 1),
-                }));
-              }
-            })
-            .catch((err) => {
-              notify(`Error dividiendo cuenta en Firestore: ${formatOrderError(err)}`);
-            });
-        }
+          if (res.status !== 'confirmed') {
+            notify(res.error || 'Error dividiendo cuenta en Firestore.', 'error');
+            return;
+          }
 
-        loadOrderIntoDraft(splitOrder);
-        notify(`Nueva Cuenta #${splitOrderNum} creada con ${movedItem.name}.`);
+          const assignedNum = typeof res.data === 'number' ? res.data : splitOrder.number;
+          const confirmedSplit: Order = { ...splitOrder, number: assignedNum };
+
+          setState((prev) => ({
+            ...prev,
+            orders: [
+              ...prev.orders.filter((o) => o.id !== selectedOrder.id),
+              updatedOriginal,
+              confirmedSplit,
+            ],
+            nextOrderNumber: Math.max(prev.nextOrderNumber, assignedNum + 1),
+            audit: [...prev.audit, auditEntry],
+          }));
+
+          loadOrderIntoDraft(confirmedSplit, true);
+        })();
       },
     });
     setPromptValue(selectedOrder.items[0]?.key || '');
   }, [
-    authorizedEmails,
-    firebaseUser,
     loadOrderIntoDraft,
     notify,
+    secureApiOptions,
     selectedOrder,
     setPromptModal,
     setPromptValue,
@@ -702,7 +761,7 @@ export function useOrderManager({
 
   const handleMoveTable = useCallback(() => {
     if (!selectedOrder) {
-      notify('Selecciona o guarda una cuenta antes de cambiar o unir mesa.');
+      notify('Selecciona o guarda una cuenta antes de cambiar o unir mesa.', 'error');
       return;
     }
     setMoveTargetService(selectedOrder.service);
@@ -713,15 +772,15 @@ export function useOrderManager({
     setMoveTableModalOpen(true);
   }, [notify, selectedOrder]);
 
-  const handleConfirmMoveTable = useCallback(() => {
-    if (!selectedOrder) return;
+  const handleConfirmMoveTable = useCallback(async () => {
+    if (!selectedOrder || isMutatingRef.current) return;
     const currentLoc = locationLabel(selectedOrder.service, selectedOrder.location);
     const targetLocLabel = locationLabel(moveTargetService, moveTargetLocation);
     if (
       selectedOrder.service === moveTargetService &&
       String(selectedOrder.location) === String(moveTargetLocation)
     ) {
-      notify('Elige una ubicación diferente a la actual.');
+      notify('Elige una ubicación diferente a la actual.', 'error');
       return;
     }
 
@@ -741,33 +800,37 @@ export function useOrderManager({
       action: 'Mesa cambiada',
       detail: `Cuenta #${selectedOrder.number}: ${currentLoc} → ${targetLocLabel}`,
     };
+
+    const res = await securePosApi.updateOrder(updatedOrder, auditEntry, secureApiOptions, {
+      title: `Cuenta #${selectedOrder.number} movida`,
+      detail: `${currentLoc} → ${targetLocLabel}`,
+    });
+
+    if (res.status !== 'confirmed') {
+      notify(res.error || 'Error cambiando mesa en Firestore.', 'error');
+      return;
+    }
+
     setState((prev) => ({
       ...prev,
       orders: prev.orders.map((o) => (o.id === selectedOrder.id ? updatedOrder : o)),
       audit: [...prev.audit, auditEntry],
     }));
-    if (firebaseUser) {
-      void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
-        notify(`Error cambiando mesa en Firestore: ${formatOrderError(err)}`);
-      });
-    }
     setCurrentService(moveTargetService);
     setCurrentTable(moveTargetLocation);
     setMoveTableModalOpen(false);
-    notify(`Cuenta #${selectedOrder.number} movida a ${targetLocLabel}.`);
   }, [
-    authorizedEmails,
-    firebaseUser,
     moveTargetLocation,
     moveTargetService,
     notify,
+    secureApiOptions,
     selectedOrder,
     setState,
   ]);
 
   const handleConfirmMergeOrders = useCallback(
-    (targetOrder: Order) => {
-      if (!selectedOrder) return;
+    async (targetOrder: Order) => {
+      if (!selectedOrder || isMutatingRef.current) return;
       const latest = stateRef.current;
       const now = new Date().toISOString();
       const updatedTarget = mergeOrdersIntoTarget(targetOrder, selectedOrder, now);
@@ -780,6 +843,18 @@ export function useOrderManager({
         detail: `Cuenta #${selectedOrder.number} unida dentro de Cuenta #${targetOrder.number} (${locationLabel(targetOrder.service, targetOrder.location)})`,
       };
 
+      const res = await securePosApi.mergeOrders(
+        updatedTarget,
+        selectedOrder.id,
+        auditEntry,
+        secureApiOptions
+      );
+
+      if (res.status !== 'confirmed') {
+        notify(res.error || 'Error uniendo cuentas en Firestore.', 'error');
+        return;
+      }
+
       setState((prev) => ({
         ...prev,
         orders: prev.orders
@@ -788,78 +863,68 @@ export function useOrderManager({
         audit: [...prev.audit, auditEntry],
       }));
 
-      if (firebaseUser) {
-        void fsMergeOrders(
-          updatedTarget,
-          selectedOrder.id,
-          firebaseUser,
-          authorizedEmails,
-          auditEntry
-        ).catch((err) => {
-          notify(`Error uniendo cuentas en Firestore: ${formatOrderError(err)}`);
-        });
-      }
-
       setMoveTableModalOpen(false);
-      loadOrderIntoDraft(updatedTarget);
-      notify(`Cuenta #${selectedOrder.number} unida a Cuenta #${targetOrder.number}.`);
+      loadOrderIntoDraft(updatedTarget, true);
     },
-    [authorizedEmails, firebaseUser, loadOrderIntoDraft, notify, selectedOrder, setState]
+    [loadOrderIntoDraft, notify, secureApiOptions, selectedOrder, setState]
   );
 
   const handleCancelAccount = useCallback(() => {
     if (!canCancelOrders) {
-      notify('Tu rol no tiene autorización para cancelar cuentas completas.');
+      notify('Tu rol no tiene autorización para cancelar cuentas completas.', 'error');
       return;
     }
     if (!selectedOrder) {
-      notify('No hay una cuenta activa para cancelar.');
+      notify('No hay una cuenta activa para cancelar.', 'error');
       return;
     }
     setModalReason({
       title: `Cancelar Cuenta #${selectedOrder.number} completa`,
       onConfirm: (reason) => {
-        const latest = stateRef.current;
-        const now = new Date().toISOString();
-        const canceledOrder = selectedOrder;
-        const auditEntry: AuditLogEntry = {
-          id: uid(),
-          at: now,
-          user: latest.activeUser.name,
-          action: 'Cuenta cancelada',
-          detail: `Cuenta #${canceledOrder.number} en ${locationLabel(canceledOrder.service, canceledOrder.location)} por $${(canceledOrder.totalCents / 100).toFixed(2)}`,
-          reason,
-        };
-        setCurrentOrderId(null);
-        setCart([]);
-        setGeneralNote('');
-        setPriority('normal');
-        setDeliveryData({ name: '', phone: '', address: '', reference: '' });
-        setState((prev) => ({
-          ...prev,
-          orders: prev.orders.filter((o) => o.id !== canceledOrder.id),
-          audit: [...prev.audit, auditEntry],
-        }));
-        if (firebaseUser) {
-          void fsCancelOrder(
+        void (async () => {
+          if (isMutatingRef.current) return;
+          const latest = stateRef.current;
+          const now = new Date().toISOString();
+          const canceledOrder = selectedOrder;
+          const auditEntry: AuditLogEntry = {
+            id: uid(),
+            at: now,
+            user: latest.activeUser.name,
+            action: 'Cuenta cancelada',
+            detail: `Cuenta #${canceledOrder.number} en ${locationLabel(canceledOrder.service, canceledOrder.location)} por $${(canceledOrder.totalCents / 100).toFixed(2)}`,
+            reason,
+          };
+
+          const res = await securePosApi.cancelOrder(
             canceledOrder,
             isFirebaseAdmin,
-            firebaseUser,
-            authorizedEmails,
-            auditEntry
-          ).catch((err) => {
-            notify(`Error cancelando cuenta en Firestore: ${formatOrderError(err)}`);
-          });
-        }
-        notify(`Cuenta #${canceledOrder.number} cancelada y registrada en bitácora.`);
+            auditEntry,
+            secureApiOptions
+          );
+
+          if (res.status !== 'confirmed') {
+            notify(res.error || 'Error cancelando cuenta en Firestore.', 'error');
+            return;
+          }
+
+          setCurrentOrderId(null);
+          setCart([]);
+          setGeneralNote('');
+          setPriority('normal');
+          setDeliveryData({ name: '', phone: '', address: '', reference: '' });
+          setState((prev) => ({
+            ...prev,
+            orders: prev.orders.filter((o) => o.id !== canceledOrder.id),
+            audit: [...prev.audit, auditEntry],
+          }));
+        })();
       },
     });
   }, [
-    authorizedEmails,
     canCancelOrders,
-    firebaseUser,
     isFirebaseAdmin,
     notify,
+    secureApiOptions,
     selectedOrder,
     setModalReason,
     setState,
@@ -867,11 +932,11 @@ export function useOrderManager({
 
   const handleApplyDiscount = useCallback(() => {
     if (!canApplyDiscount) {
-      notify('Tu rol no tiene autorización para aplicar descuentos.');
+      notify('Tu rol no tiene autorización para aplicar descuentos.', 'error');
       return;
     }
     if (!selectedOrder) {
-      notify('Primero guarda o selecciona una comanda abierta.');
+      notify('Primero guarda o selecciona una comanda abierta.', 'error');
       return;
     }
     setPromptModal({
@@ -881,54 +946,64 @@ export function useOrderManager({
       onConfirm: (val) => {
         const amountPesos = Number(val);
         if (!Number.isFinite(amountPesos) || amountPesos <= 0) {
-          notify('Monto de descuento no válido.');
+          notify('Monto de descuento no válido.', 'error');
           return;
         }
         const discountCents = Math.round(amountPesos * 100);
         setModalReason({
           title: `Autorizar descuento de ${formatMoney(discountCents)}`,
           onConfirm: (reason) => {
-            const latest = stateRef.current;
-            const now = new Date().toISOString();
-            const sub = subtotalCents(selectedOrder.items);
-            const nextTotal = Math.max(0, sub - discountCents);
-            const updatedOrder: Order = {
-              ...selectedOrder,
-              discountCents,
-              totalCents: nextTotal,
-              updatedAt: now,
-            };
-            const auditEntry: AuditLogEntry = {
-              id: uid(),
-              at: now,
-              user: latest.activeUser.name,
-              action: 'Descuento autorizado',
-              detail: `Descuento de ${formatMoney(discountCents)} aplicado a Cuenta #${selectedOrder.number}`,
-              reason,
-            };
-            setState((prev) => ({
-              ...prev,
-              orders: prev.orders.map((o) => (o.id === selectedOrder.id ? updatedOrder : o)),
-              audit: [...prev.audit, auditEntry],
-            }));
-            if (firebaseUser) {
-              void fsUpdateOrder(updatedOrder, firebaseUser, authorizedEmails, auditEntry).catch(
-                (err) => {
-                  notify(`Error aplicando descuento en Firestore: ${formatOrderError(err)}`);
+            void (async () => {
+              if (isMutatingRef.current) return;
+              const latest = stateRef.current;
+              const now = new Date().toISOString();
+              const sub = subtotalCents(selectedOrder.items);
+              const nextTotal = Math.max(0, sub - discountCents);
+              const updatedOrder: Order = {
+                ...selectedOrder,
+                discountCents,
+                totalCents: nextTotal,
+                updatedAt: now,
+              };
+              const auditEntry: AuditLogEntry = {
+                id: uid(),
+                at: now,
+                user: latest.activeUser.name,
+                action: 'Descuento autorizado',
+                detail: `Descuento de ${formatMoney(discountCents)} aplicado a Cuenta #${selectedOrder.number}`,
+                reason,
+              };
+
+              const res = await securePosApi.updateOrder(
+                updatedOrder,
+                auditEntry,
+                secureApiOptions,
+                {
+                  title: `Descuento ${formatMoney(discountCents)} confirmado`,
+                  detail: `Aplicado a Cuenta #${selectedOrder.number}`,
                 }
               );
-            }
-            notify(`Descuento de ${formatMoney(discountCents)} aplicado.`);
+
+              if (res.status !== 'confirmed') {
+                notify(res.error || 'Error aplicando descuento en Firestore.', 'error');
+                return;
+              }
+
+              setState((prev) => ({
+                ...prev,
+                orders: prev.orders.map((o) => (o.id === selectedOrder.id ? updatedOrder : o)),
+                audit: [...prev.audit, auditEntry],
+              }));
+            })();
           },
         });
       },
     });
     setPromptValue('50');
   }, [
-    authorizedEmails,
     canApplyDiscount,
-    firebaseUser,
     notify,
+    secureApiOptions,
     selectedOrder,
     setModalReason,
     setPromptModal,
@@ -940,75 +1015,78 @@ export function useOrderManager({
     const latest = stateRef.current;
     const lastSale = latest.sales[latest.sales.length - 1];
     if (!lastSale) {
-      notify('No hay ventas registradas para reabrir.');
+      notify('No hay ventas registradas para reabrir.', 'error');
       return;
     }
 
     setModalReason({
       title: `Reabrir venta ${lastSale.receipt}`,
       onConfirm: (reason) => {
-        const cur = stateRef.current;
-        const now = new Date().toISOString();
-        const reopenedNum = cur.nextOrderNumber;
-        const newOrderId = uid();
+        void (async () => {
+          if (isMutatingRef.current) return;
+          const cur = stateRef.current;
+          const now = new Date().toISOString();
+          const reopenedNum = cur.nextOrderNumber;
+          const newOrderId = uid();
 
-        const reopenedOrder: Order = {
-          id: newOrderId,
-          number: reopenedNum,
-          service: lastSale.service,
-          location: lastSale.location,
-          table: lastSale.location,
-          waiter: lastSale.waiter,
-          note: `Reapertura derivada de ${lastSale.receipt}`,
-          items: lastSale.items.map((i) => ({ ...i, itemStatus: i.itemStatus || 'pending' })),
-          totalCents: lastSale.totalCents,
-          discountCents: 0,
-          priority: 'normal',
-          status: 'sent',
-          paid: false,
-          createdAt: now,
-          updatedAt: now,
-        };
+          const reopenedOrder: Order = {
+            id: newOrderId,
+            number: reopenedNum,
+            service: lastSale.service,
+            location: lastSale.location,
+            table: lastSale.location,
+            waiter: lastSale.waiter,
+            note: `Reapertura derivada de ${lastSale.receipt}`,
+            items: lastSale.items.map((i) => ({ ...i, itemStatus: i.itemStatus || 'pending' })),
+            totalCents: lastSale.totalCents,
+            discountCents: 0,
+            priority: 'normal',
+            status: 'sent',
+            paid: false,
+            createdAt: now,
+            updatedAt: now,
+          };
 
-        const auditEntry: AuditLogEntry = {
-          id: uid(),
-          at: now,
-          user: cur.activeUser.name,
-          action: 'Venta reabierta',
-          detail: `Nueva cuenta #${reopenedNum} creada a partir de venta ${lastSale.receipt}`,
-          reason,
-        };
+          const auditEntry: AuditLogEntry = {
+            id: uid(),
+            at: now,
+            user: cur.activeUser.name,
+            action: 'Venta reabierta',
+            detail: `Nueva cuenta #${reopenedNum} creada a partir de venta ${lastSale.receipt}`,
+            reason,
+          };
 
-        setState((prev) => ({
-          ...prev,
-          orders: [...prev.orders, reopenedOrder],
-          nextOrderNumber: reopenedNum + 1,
-          audit: [...prev.audit, auditEntry],
-        }));
+          const res = await securePosApi.saveOrder(
+            reopenedOrder,
+            true,
+            auditEntry,
+            secureApiOptions,
+            {
+              title: `Venta ${lastSale.receipt} reabierta`,
+              detail: `Asignada como Cuenta #${reopenedNum}`,
+            }
+          );
 
-        if (firebaseUser) {
-          void fsSaveOrder(reopenedOrder, true, firebaseUser, authorizedEmails, auditEntry)
-            .then((assignedNum) => {
-              if (assignedNum !== reopenedOrder.number) {
-                setState((prev) => ({
-                  ...prev,
-                  orders: prev.orders.map((o) =>
-                    o.id === newOrderId ? { ...o, number: assignedNum } : o
-                  ),
-                  nextOrderNumber: Math.max(prev.nextOrderNumber, assignedNum + 1),
-                }));
-              }
-            })
-            .catch((err) => {
-              notify(`Error reabriendo venta en Firestore: ${formatOrderError(err)}`);
-            });
-        }
+          if (res.status !== 'confirmed') {
+            notify(res.error || 'Error reabriendo venta en Firestore.', 'error');
+            return;
+          }
 
-        loadOrderIntoDraft(reopenedOrder);
-        notify(`Venta reabierta como Cuenta #${reopenedNum}.`);
+          const assignedNum = typeof res.data === 'number' ? res.data : reopenedOrder.number;
+          const confirmedOrder: Order = { ...reopenedOrder, number: assignedNum };
+
+          setState((prev) => ({
+            ...prev,
+            orders: [...prev.orders, confirmedOrder],
+            nextOrderNumber: Math.max(prev.nextOrderNumber, assignedNum + 1),
+            audit: [...prev.audit, auditEntry],
+          }));
+
+          loadOrderIntoDraft(confirmedOrder, true);
+        })();
       },
     });
-  }, [authorizedEmails, firebaseUser, loadOrderIntoDraft, notify, setModalReason, setState]);
+  }, [loadOrderIntoDraft, notify, secureApiOptions, setModalReason, setState]);
 
   const handleOpenDraftPreCheck = useCallback(() => {
     if (selectedOrder) {
@@ -1016,7 +1094,7 @@ export function useOrderManager({
       return;
     }
     if (cart.length === 0) {
-      notify('Agrega productos antes de emitir una pre-cuenta.');
+      notify('Agrega productos antes de emitir una pre-cuenta.', 'error');
       return;
     }
     const now = new Date().toISOString();
@@ -1072,6 +1150,8 @@ export function useOrderManager({
     setMoveTargetService,
     moveTargetLocation,
     setMoveTargetLocation,
+    orderSyncState,
+    isOrderMutating,
     openOrders,
     openOrdersByLocation,
     currentLocOrders,

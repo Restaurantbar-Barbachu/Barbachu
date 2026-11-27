@@ -1,45 +1,5 @@
 export type ServiceType = 'mesa' | 'barra_exterior' | 'barra_interior' | 'para_llevar' | 'domicilio';
 
-export interface Product {
-  id: string;
-  name: string;
-  category: string;
-  priceCents: number;
-}
-
-export interface Ingredient {
-  id: string;
-  name: string;
-  unit: string;
-  initialQuantity: number;
-}
-
-export interface Recipe {
-  productId: string;
-  ingredientId: string;
-  quantityPerUnit: number;
-}
-
-export interface Catalog {
-  products: Product[];
-  ingredients: Ingredient[];
-  recipes: Recipe[];
-}
-
-export interface AppState {
-  schemaVersion: number;
-  orders: any[];
-  sales: any[];
-  stock: Record<string, number>;
-  nextOrderNumber: number;
-}
-
-export interface LocationOption {
-  value: string;
-  label: string;
-  service: ServiceType;
-}
-
 export type OrderStatus = 'sent' | 'preparing' | 'ready' | 'served' | 'closed' | 'delivered';
 export type Priority = 'normal' | 'alta';
 export type PaymentMethod = 'efectivo' | 'tarjeta' | 'transferencia' | 'mixto';

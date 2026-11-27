@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildDailySalesSummary,
   buildHourlySalesTrend,
   buildInventoryLevels,
   buildSalesPerformanceMetrics,
@@ -153,3 +154,34 @@ test('buildSalesPerformanceMetrics includes modifier pricing and weights discoun
   assert.equal(categorySales[1].categoria, 'CERVEZA');
   assert.equal(categorySales[1].ventas, 72);
 });
+
+test('buildDailySalesSummary computes today revenue, tickets, average ticket, and top product', () => {
+  const ref = new Date(2026, 10, 26, 18, 0, 0);
+  const products: SoftProduct[] = [
+    { key: '701', name: 'ORDEN ALITAS', group: '01', category: 'ALAS', sourcePrice: 150, priceCents: 15000, saleEnabled: true },
+  ];
+  const todaySale: Sale = {
+    id: 's-today',
+    receipt: 'BC-10',
+    service: 'mesa',
+    location: '1',
+    table: '1',
+    waiter: 'Mesero',
+    items: [{ key: '701', name: 'ORDEN ALITAS', priceCents: 15000, qty: 2, note: '' }],
+    subtotalCents: 30000,
+    discountCents: 0,
+    totalCents: 30000,
+    paymentMethod: 'tarjeta',
+    paidAt: new Date(2026, 10, 26, 14, 0, 0).toISOString(),
+  };
+  const oldSale = makeSale('old', new Date(2026, 10, 20, 12, 0, 0).toISOString(), 99900);
+
+  const summary = buildDailySalesSummary([todaySale, oldSale], products, ref);
+  assert.equal(summary.todayRevenueCents, 30000);
+  assert.equal(summary.todayTickets, 1);
+  assert.equal(summary.todayUnits, 2);
+  assert.equal(summary.averageTicketCents, 30000);
+  assert.equal(summary.topProductName, 'ORDEN ALITAS');
+  assert.equal(summary.topProductUnits, 2);
+});
+

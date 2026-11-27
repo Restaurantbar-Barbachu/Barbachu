@@ -13,6 +13,7 @@ import {
   EyeOff,
   FileSpreadsheet,
   FolderArchive,
+  FolderSync,
   History,
   Lock,
   Plus,
@@ -59,6 +60,7 @@ import {
   sanitizeFirestoreId,
 } from '../lib/firestoreSync';
 import { BarbachuLogo } from './BarbachuLogo';
+import { GoogleDriveMergePanel } from './GoogleDriveMergePanel';
 import { IosPinPadModal } from './IosPinPadModal';
 import { downloadCsvFile } from '../utils/csv';
 import { hashPin, isValidFourDigitPin, isWeakDefaultPin, verifyPinSecret } from '../utils/pinSecurity';
@@ -1076,7 +1078,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       icon: <Clock className="w-3.5 h-3.5" />,
     },
     { id: 'configuracion', label: 'Ajustes & Limpieza', icon: <Settings className="w-3.5 h-3.5" /> },
-    { id: 'archivos', label: 'Respaldos', icon: <FolderArchive className="w-3.5 h-3.5" /> },
+    { id: 'archivos', label: 'Drive & Respaldos', icon: <FolderArchive className="w-3.5 h-3.5" /> },
   ];
 
   return (
@@ -1164,14 +1166,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 Edita precios en línea o agrega nuevos platillos al menú digital y comandero.
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => setShowAddModal(true)}
-              className="min-h-[44px] px-4 py-2.5 rounded-2xl bg-[#25d366] hover:bg-[#20b858] text-[#0a0a0b] font-bold text-xs shadow-md whitespace-nowrap inline-flex items-center gap-2"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Agregar Producto</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setActiveTab('archivos')}
+                className="min-h-[44px] px-4 py-2.5 rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-[#e8d090] font-semibold text-xs whitespace-nowrap inline-flex items-center gap-2 transition-all"
+              >
+                <FolderSync className="w-4 h-4" />
+                <span>Fusionar desde Drive</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAddModal(true)}
+                className="min-h-[44px] px-4 py-2.5 rounded-2xl bg-[#25d366] hover:bg-[#20b858] text-[#0a0a0b] font-bold text-xs shadow-md whitespace-nowrap inline-flex items-center gap-2"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Agregar Producto</span>
+              </button>
+            </div>
           </div>
 
           <div className="p-4 rounded-[22px] bg-[#161618]/80 backdrop-blur-xl border border-white/10 space-y-3">
@@ -2181,9 +2193,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* TAB 8: ARCHIVOS Y RESPALDOS */}
+      {/* TAB 8: DRIVE, ARCHIVOS Y RESPALDOS */}
       {activeTab === 'archivos' && (
         <div className="space-y-4">
+          <GoogleDriveMergePanel
+            state={state}
+            setState={setState}
+            firebaseUser={firebaseUser}
+            authorizedEmails={authorizedEmails}
+            workspaceOwnerUid={workspaceOwnerUid}
+            actingAdminName={actingAdminName}
+            notify={notify}
+          />
+
           <div className="p-5 bg-[#161618]/80 backdrop-blur-xl rounded-[22px] border border-white/10 space-y-1">
             <h3 className="font-serif font-bold text-lg text-white">Exportaciones y Respaldos Locales</h3>
             <p className="text-xs text-[rgba(240,230,211,0.68)]">

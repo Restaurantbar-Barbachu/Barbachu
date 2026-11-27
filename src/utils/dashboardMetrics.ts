@@ -276,3 +276,51 @@ export function buildSalesPerformanceMetrics(
 
   return { topProducts, categorySales };
 }
+
+export interface DailySalesSummary {
+  todayRevenueCents: number;
+  todayTickets: number;
+  todayUnits: number;
+  averageTicketCents: number;
+  topProductName: string | null;
+  topProductUnits: number;
+}
+
+export function buildDailySalesSummary(
+  sales: Sale[],
+  products: SoftProduct[],
+  referenceDate: Date = new Date()
+): DailySalesSummary {
+  const todayKey = toLocalDateKey(referenceDate);
+  const todaySales = sales.filter((s) => toLocalDateKey(s.paidAt) === todayKey);
+
+  let todayRevenueCents = 0;
+  let todayUnits = 0;
+
+  for (const sale of todaySales) {
+    todayRevenueCents += sale.totalCents;
+    for (const item of sale.items) {
+      todayUnits += item.qty;
+    }
+  }
+
+  const todayTickets = todaySales.length;
+  const averageTicketCents = todayTickets > 0 ? Math.round(todayRevenueCents / todayTickets) : 0;
+
+  const { topProducts } = buildSalesPerformanceMetrics(
+    todaySales.length > 0 ? todaySales : sales,
+    products,
+    'units'
+  );
+  const leader = topProducts[0] || null;
+
+  return {
+    todayRevenueCents,
+    todayTickets,
+    todayUnits,
+    averageTicketCents,
+    topProductName: leader ? leader.fullName : null,
+    topProductUnits: leader ? leader.unidades : 0,
+  };
+}
+

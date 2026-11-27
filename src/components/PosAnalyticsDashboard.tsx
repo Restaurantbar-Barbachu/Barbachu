@@ -17,7 +17,12 @@ import {
 import { BarChart3, Clock, CreditCard, TrendingUp, UtensilsCrossed } from 'lucide-react';
 import { FullPosState } from '../types';
 import { formatMoney } from '../storage';
-import { buildSalesPerformanceMetrics, buildSalesTrend, toLocalDateKey } from '../utils/dashboardMetrics';
+import {
+  buildHourlySalesTrend,
+  buildSalesPerformanceMetrics,
+  buildSalesTrend,
+  toLocalDateKey,
+} from '../utils/dashboardMetrics';
 
 interface PosAnalyticsDashboardProps {
   state: FullPosState;
@@ -102,30 +107,13 @@ export const PosAnalyticsDashboard: React.FC<PosAnalyticsDashboardProps> = ({ st
     return new Set(tableOrders.map((o) => o.location)).size;
   }, [state.orders]);
 
-  // Real 7-day daily sales history (zero fake baselines)
+  // Real 7-day daily sales history & hourly breakdown via shared dashboardMetrics helpers
   const dailySalesData = useMemo(() => buildSalesTrend(state.sales, 7), [state.sales]);
-
-  // Real hourly sales data (zero mock curves)
-  const hourlySalesData = useMemo(() => {
-    const hours = Array.from({ length: 14 }, (_, idx) => `${String((idx + 10) % 24).padStart(2, '0')}:00`);
-    const hourMap: Record<string, number> = {};
-    hours.forEach((h) => {
-      hourMap[h] = 0;
-    });
-
-    filteredSales.forEach((s) => {
-      const hour = new Date(s.paidAt).getHours();
-      const hourStr = `${String(hour).padStart(2, '0')}:00`;
-      if (hourMap[hourStr] !== undefined) {
-        hourMap[hourStr] += s.totalCents / 100;
-      }
-    });
-
-    return hours.map((h) => ({
-      hora: h,
-      ventas: Math.round(hourMap[h] * 100) / 100,
-    }));
-  }, [filteredSales]);
+  const hourlySalesData = useMemo(() => buildHourlySalesTrend(state.sales), [state.sales]);
+  const hasChartSales =
+    salesChartType === 'daily'
+      ? dailySalesData.some((d) => d.ventas > 0)
+      : hourlySalesData.some((h) => h.ventas > 0);
 
   // Real Top Selling Products & Category Sales (O(N), modifier & discount aware)
   const { topProducts: topProductsData, categorySales: categorySalesData } = useMemo(
@@ -300,7 +288,7 @@ export const PosAnalyticsDashboard: React.FC<PosAnalyticsDashboardProps> = ({ st
           </div>
 
           <div className="h-72 w-full pt-2">
-            {state.sales.length === 0 ? (
+            {!hasChartSales ? (
               <div className="h-full flex flex-col items-center justify-center text-center px-6 rounded-2xl bg-white/[0.02] border border-dashed border-white/10">
                 <p className="text-sm font-semibold text-white">Sin ventas registradas aún en este periodo</p>
                 <p className="text-xs text-[rgba(240,230,211,0.6)] mt-1 max-w-sm">

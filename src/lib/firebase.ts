@@ -2,6 +2,7 @@ import { initializeApp } from 'firebase/app';
 import {
   getAuth,
   GoogleAuthProvider,
+  onAuthStateChanged,
   signInWithPopup,
   signOut,
   type User,
@@ -43,6 +44,10 @@ function readPersistedCacheMode(): FirestoreCacheMode {
   }
 }
 
+const configuredDatabaseId =
+  (firebaseConfig as { firestoreDatabaseId?: string }).firestoreDatabaseId ||
+  'ai-studio-barbachu-d5d9c18a-3e30-4f57-83ae-eb37592edf0c';
+
 let activeCacheMode: FirestoreCacheMode = readPersistedCacheMode();
 
 function createResilientFirestore(): Firestore {
@@ -50,7 +55,7 @@ function createResilientFirestore(): Firestore {
     return initializeFirestore(
       app,
       { localCache: memoryLocalCache() },
-      firebaseConfig.firestoreDatabaseId
+      configuredDatabaseId
     );
   }
   try {
@@ -61,7 +66,7 @@ function createResilientFirestore(): Firestore {
           tabManager: persistentSingleTabManager({ forceOwnership: true }),
         }),
       },
-      firebaseConfig.firestoreDatabaseId
+      configuredDatabaseId
     );
   } catch (err) {
     console.warn('Persistent Firestore cache unavailable; falling back to memory cache.', err);
@@ -69,7 +74,7 @@ function createResilientFirestore(): Firestore {
     return initializeFirestore(
       app,
       { localCache: memoryLocalCache() },
-      firebaseConfig.firestoreDatabaseId
+      configuredDatabaseId
     );
   }
 }
@@ -165,7 +170,7 @@ export async function purgeFirestorePersistenceCache(options?: { forceMemoryMode
   ]);
 
   const dbNames = new Set<string>(
-    buildFirestoreIndexedDbNames(firebaseConfig.projectId, firebaseConfig.firestoreDatabaseId)
+    buildFirestoreIndexedDbNames(firebaseConfig.projectId, configuredDatabaseId)
   );
   if (typeof window !== 'undefined' && typeof window.indexedDB?.databases === 'function') {
     try {
@@ -255,8 +260,60 @@ if (typeof window !== 'undefined') {
 
 export const auth = getAuth(app);
 
+export const SCOPES = [
+  'https://www.googleapis.com/auth/drive',
+  'https://www.googleapis.com/auth/drive.activity',
+  'https://www.googleapis.com/auth/drive.activity.readonly',
+  'https://www.googleapis.com/auth/drive.appdata',
+  'https://www.googleapis.com/auth/drive.apps.readonly',
+  'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/drive.install',
+  'https://www.googleapis.com/auth/drive.meet.readonly',
+  'https://www.googleapis.com/auth/drive.metadata',
+  'https://www.googleapis.com/auth/drive.metadata.readonly',
+  'https://www.googleapis.com/auth/drive.photos.readonly',
+  'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/drive.scripts',
+] as const;
+
 export const googleProvider = new GoogleAuthProvider();
+for (const scope of SCOPES) {
+  googleProvider.addScope(scope);
+}
 googleProvider.setCustomParameters({ prompt: 'select_account' });
+
+// Strictly in-memory OAuth access token cache (never stored in localStorage/sessionStorage)
+let cachedDriveAccessToken: string | null = null;
+const driveTokenSubscribers = new Set<(token: string | null) => void>();
+
+function setCachedDriveAccessToken(token: string | null): void {
+  cachedDriveAccessToken = token;
+  for (const listener of driveTokenSubscribers) {
+    listener(token);
+  }
+}
+
+onAuthStateChanged(auth, (user) => {
+  if (!user) {
+    setCachedDriveAccessToken(null);
+  }
+});
+
+export function getDriveAccessToken(): string | null {
+  return cachedDriveAccessToken;
+}
+
+export function clearDriveAccessToken(): void {
+  setCachedDriveAccessToken(null);
+}
+
+export function subscribeDriveAccessToken(listener: (token: string | null) => void): () => void {
+  driveTokenSubscribers.add(listener);
+  listener(cachedDriveAccessToken);
+  return () => {
+    driveTokenSubscribers.delete(listener);
+  };
+}
 
 export enum OperationType {
   CREATE = 'create',
@@ -346,9 +403,24 @@ export async function measureCloudLatencyMs(): Promise<number | null> {
 
 export async function signInWithGoogle(): Promise<User> {
   const result = await signInWithPopup(auth, googleProvider);
+  const credential = GoogleAuthProvider.credentialFromResult(result);
+  if (credential?.accessToken) {
+    setCachedDriveAccessToken(credential.accessToken);
+  }
   return result.user;
 }
 
+export async function connectGoogleDriveWithPopup(): Promise<{ user: User; accessToken: string }> {
+  const result = await signInWithPopup(auth, googleProvider);
+  const credential = GoogleAuthProvider.credentialFromResult(result);
+  if (!credential?.accessToken) {
+    throw new Error('No se recibió el token de acceso de Google Drive. Intenta autorizar de nuevo.');
+  }
+  setCachedDriveAccessToken(credential.accessToken);
+  return { user: result.user, accessToken: credential.accessToken };
+}
+
 export async function signOutFirebase(): Promise<void> {
+  setCachedDriveAccessToken(null);
   await signOut(auth);
 }

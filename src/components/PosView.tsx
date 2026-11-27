@@ -73,7 +73,10 @@ import { KitchenView } from './KitchenView';
 import { CashierView } from './CashierView';
 const PosAnalyticsDashboard = lazy(() => import('./PosAnalyticsDashboard').then(m => ({ default: m.PosAnalyticsDashboard })));
 const PosDashboardPanel = lazy(() => import('./PosDashboardPanel').then(m => ({ default: m.PosDashboardPanel })));
+const SalesDashboard = lazy(() => import('./SalesDashboard').then(m => ({ default: m.SalesDashboard })));
 const InventoryManagementView = lazy(() => import('./InventoryManagementView').then(m => ({ default: m.InventoryManagementView })));
+import { ToastNotification } from './ToastNotification';
+import type { OrderToastEvent, ToastVariant } from '../lib/securePosApi';
 import {
   auth,
   BOOTSTRAPPED_ADMIN_EMAIL,
@@ -211,7 +214,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [promptValue, setPromptValue] = useState<string>('');
   const [itemNoteModal, setItemNoteModal] = useState<{ targetId: string; name: string } | null>(null);
   const [itemNoteValue, setItemNoteValue] = useState<string>('');
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [activeToast, setActiveToast] = useState<OrderToastEvent | null>(null);
 
   // Employee PIN Auth & Session Lock State (verified against Firestore staff_users)
   const [employeeAuthenticated, setEmployeeAuthenticated] = useState<boolean>(false);
@@ -335,7 +338,12 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         }
 
         if (res.seeded) {
-          setToastMessage('Base de datos Cloud Firestore inicializada con catálogo e inventario.');
+          setActiveToast({
+            id: `seeded-${Date.now()}`,
+            variant: 'confirmed',
+            title: 'Base de datos Cloud Firestore inicializada',
+            detail: 'Catálogo e inventario sincronizados.',
+          });
         }
 
         unsubWorkspace = subscribePosWorkspace(activeUser, res.isAdmin, {
@@ -479,15 +487,27 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     authorizedEmailsKey,
   ]);
 
-  const notify = useCallback((msg: string) => {
-    setToastMessage(msg);
+  const notify = useCallback(
+    (msg: string, variant: ToastVariant = 'info', detail?: string) => {
+      setActiveToast({
+        id: `toast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        variant,
+        title: msg,
+        detail,
+      });
+    },
+    []
+  );
+
+  const handleConfirmedToast = useCallback((toast: OrderToastEvent) => {
+    setActiveToast(toast);
   }, []);
 
   useEffect(() => {
-    if (!toastMessage) return;
-    const t = setTimeout(() => setToastMessage(null), 3000);
-    return () => clearTimeout(t);
-  }, [toastMessage]);
+    if (!activeToast || activeToast.variant === 'pending') return;
+    const t = window.setTimeout(() => setActiveToast(null), 3500);
+    return () => window.clearTimeout(t);
+  }, [activeToast]);
 
   // Role-specific capabilities computed from live permissions matrix
   const activeRole = state.activeUser?.role || 'mesero';
@@ -533,6 +553,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     setMoveTargetService,
     moveTargetLocation,
     setMoveTargetLocation,
+    isOrderMutating,
     openOrders,
     openOrdersByLocation,
     currentLocOrders,
@@ -573,6 +594,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     isFirebaseAdmin,
     authorizedEmails,
     notify,
+    onConfirmedToast: handleConfirmedToast,
     setView,
     setModalReason,
     setPromptModal,
@@ -951,11 +973,6 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const handleOpenPreCheck = useCallback((order: Order) => {
     setActivePreCheckOrder(order);
   }, []);
-
-  // Total sales calculated
-  const totalSalesCents = useMemo(() => {
-    return state.sales.reduce((sum, s) => sum + s.totalCents, 0);
-  }, [state.sales]);
 
   const todaySalesCount = useMemo(() => {
     const todayStr = toLocalDateKey(new Date());
@@ -1478,12 +1495,14 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               {/* Stat Cards */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 tabular-nums">
                 <div className="p-5 ios-glass-card">
-                  <div className="text-xs uppercase tracking-[0.08em] text-[rgba(240,230,211,0.58)] font-semibold mb-1.5">Ventas del Día</div>
+                  <div className="text-xs uppercase tracking-[0.08em] text-[rgba(240,230,211,0.58)] font-semibold mb-1.5">Ticket Promedio Hoy</div>
                   <div className="text-2xl lg:text-3xl font-mono font-bold text-[#e8d090]">
-                    {canViewCash || canViewReports ? formatMoney(totalSalesCents) : `${state.sales.length} cobros`}
+                    {canViewCash || canViewReports
+                      ? formatMoney(todaySalesCount > 0 ? Math.round(todaySalesCents / todaySalesCount) : 0)
+                      : `${todaySalesCount} cobros`}
                   </div>
                   <div className="text-xs text-[rgba(240,230,211,0.58)] mt-1">
-                    {canViewCash || canViewReports ? `${state.sales.length} cobros registrados` : 'Resumen de turno'}
+                    {canViewCash || canViewReports ? `${todaySalesCount} cobros hoy` : 'Resumen de turno'}
                   </div>
                 </div>
                 <div className="p-5 ios-glass-card">
@@ -1676,6 +1695,20 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                   )}
                 </div>
               </div>
+
+              {/* Real-time Admin Sales Analytics Dashboard (Daily Sales Volume & Top Products) */}
+              {canViewReports && (
+                <div className="pt-2">
+                  <Suspense fallback={<div className="p-8 text-center text-[#d4af37]">Cargando analítica de ventas...</div>}>
+                    <SalesDashboard
+                      state={state}
+                      isLiveCloud={isOnline && Boolean(firebaseUser)}
+                      onOpenReports={() => setView('reports')}
+                      onOpenPos={canViewPos ? () => setView('pos') : undefined}
+                    />
+                  </Suspense>
+                </div>
+              )}
 
               {/* POS Operations Dashboard: Inventory Levels & Sales Trends (Recharts) */}
               <div className="pt-2">
@@ -2298,12 +2331,16 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                   {/* Primary Action Button: Send to kitchen */}
                   <button
                     type="button"
-                    disabled={cart.length === 0}
-                    onClick={handleSendOrder}
+                    disabled={cart.length === 0 || isOrderMutating}
+                    onClick={() => void handleSendOrder()}
                     className="w-full min-h-[48px] py-3.5 rounded-2xl bg-[#173c34] hover:bg-[#28584c] active:scale-[0.98] text-white font-bold text-sm shadow-lg disabled:opacity-40 disabled:cursor-not-allowed transition-all border border-[#c8a84b]/45 flex items-center justify-center gap-2"
                   >
                     <Flame className="w-4 h-4 text-[#e8d090]" />
-                    {currentOrderId ? 'Actualizar Comanda en Cocina/Barra' : 'Enviar Comanda a Cocina/Barra'}
+                    {isOrderMutating
+                      ? 'Confirmando pedido en servidor...'
+                      : currentOrderId
+                      ? 'Actualizar Comanda en Cocina/Barra'
+                      : 'Enviar Comanda a Cocina/Barra'}
                   </button>
 
                   {/* Secondary management actions (role-gated) */}
@@ -2396,10 +2433,11 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                     </button>
                     <button
                       type="button"
-                      onClick={handleSendOrder}
-                      className="min-h-[40px] px-4 py-1.5 rounded-2xl bg-[#25d366] text-[#0a0a0b] text-xs font-bold"
+                      disabled={isOrderMutating}
+                      onClick={() => void handleSendOrder()}
+                      className="min-h-[40px] px-4 py-1.5 rounded-2xl bg-[#25d366] text-[#0a0a0b] text-xs font-bold disabled:opacity-50"
                     >
-                      Enviar
+                      {isOrderMutating ? 'Confirmando...' : 'Enviar'}
                     </button>
                   </div>
                 </div>
@@ -3391,302 +3429,185 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         onRemoveTerminal={handleRemoveTerminal}
       />
 
-      {/* Product Modifiers Modal (Add with modifiers via useModifiers) */}
-      {modifierModalProduct && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
-          <div className="ios-glass-modal w-full max-w-md rounded-[28px] p-6 space-y-4 text-left max-h-[90dvh] overflow-y-auto">
-            <div className="flex items-start justify-between gap-3 pb-3 border-b border-white/10">
-              <div>
-                <h3 className="font-serif font-bold text-xl text-white tracking-[-0.02em]">
-                  Modificar: {modifierModalProduct.name}
-                </h3>
-                <p className="text-xs text-[rgba(240,230,211,0.68)] mt-0.5 tabular-nums">
-                  Base: {formatMoney(modifierModalProduct.priceCents)} · Extras: +{formatMoney(calculateModifierTotal(selectedModifiers))} ·{' '}
-                  <strong className="text-[#e8d090]">
-                    Total: {formatMoney(modifierModalProduct.priceCents + calculateModifierTotal(selectedModifiers))}
-                  </strong>
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setModifierModalProduct(null)}
-                aria-label="Cerrar modal de modificadores"
-                className="w-10 h-10 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-[rgba(240,230,211,0.72)] hover:text-white transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+      {/* Unified Product / Cart Item Modifiers Modal */}
+      {(() => {
+        const isEditingItem = editingCartItemIndex !== null && Boolean(cart[editingCartItemIndex]);
+        const activeProduct = modifierModalProduct;
+        if (!activeProduct && !isEditingItem) return null;
 
-            <div className="space-y-3">
-              <label className="block text-xs font-bold text-[#c8a84b] uppercase tracking-wider">
-                Modificadores e Ingredientes
-              </label>
-              <div className="grid grid-cols-1 gap-2 max-h-56 overflow-y-auto pr-1">
-                {modifiers.map((mod) => {
-                  const isSelected = !!selectedModifiers[mod.id];
-                  return (
-                    <button
-                      key={mod.id}
-                      type="button"
-                      onClick={() => setSelectedModifiers((prev) => ({ ...prev, [mod.id]: !prev[mod.id] }))}
-                      className={`w-full min-h-[42px] px-3.5 py-2 rounded-2xl border text-xs font-semibold flex items-center justify-between transition-all ${
-                        isSelected
-                          ? 'bg-[#c8a84b]/20 border-[#c8a84b] text-white font-bold'
-                          : 'bg-white/[0.04] border-white/10 text-[rgba(240,230,211,0.78)] hover:bg-white/[0.08]'
-                      }`}
-                    >
-                      <span className="flex items-center gap-2">
-                        <span className={`w-4 h-4 rounded-md border flex items-center justify-center text-[10px] ${isSelected ? 'bg-[#c8a84b] border-[#c8a84b] text-[#0a0a0b] font-bold' : 'border-white/30'}`}>
-                          {isSelected ? '✓' : ''}
+        const editingItem = isEditingItem && editingCartItemIndex !== null ? cart[editingCartItemIndex] : null;
+        const baseProd = editingItem ? state.products.find((p) => p.key === editingItem.key) : null;
+        const basePrice = activeProduct
+          ? activeProduct.priceCents
+          : baseProd
+          ? baseProd.priceCents
+          : editingItem?.priceCents || 0;
+        const activeSelection = activeProduct ? selectedModifiers : editingItemModifiers;
+        const setActiveSelection = activeProduct ? setSelectedModifiers : setEditingItemModifiers;
+        const extraCents = calculateModifierTotal(activeSelection);
+        const modalTitle = activeProduct
+          ? `Modificar: ${activeProduct.name}`
+          : `Modificar ítem: ${editingItem?.name || ''}`;
+
+        const closeModal = () => {
+          setModifierModalProduct(null);
+          setSelectedModifiers({});
+          setEditingCartItemIndex(null);
+        };
+
+        return (
+          <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
+            <div className="ios-glass-modal w-full max-w-md rounded-[28px] p-6 space-y-4 text-left max-h-[90dvh] overflow-y-auto">
+              <div className="flex items-start justify-between gap-3 pb-3 border-b border-white/10">
+                <div>
+                  <h3 className="font-serif font-bold text-xl text-white tracking-[-0.02em]">
+                    {modalTitle}
+                  </h3>
+                  <p className="text-xs text-[rgba(240,230,211,0.68)] mt-0.5 tabular-nums">
+                    Base: {formatMoney(basePrice)} · Extras: +{formatMoney(extraCents)} ·{' '}
+                    <strong className="text-[#e8d090]">
+                      Total{editingItem ? ' unitario' : ''}: {formatMoney(basePrice + extraCents)}
+                    </strong>
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeModal}
+                  aria-label="Cerrar modal de modificadores"
+                  className="w-10 h-10 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-[rgba(240,230,211,0.72)] hover:text-white transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                <label className="block text-xs font-bold text-[#c8a84b] uppercase tracking-wider">
+                  Modificadores e Ingredientes
+                </label>
+                <div className="grid grid-cols-1 gap-2 max-h-56 overflow-y-auto pr-1">
+                  {modifiers.map((mod) => {
+                    const isSelected = !!activeSelection[mod.id];
+                    return (
+                      <button
+                        key={mod.id}
+                        type="button"
+                        onClick={() => setActiveSelection((prev) => ({ ...prev, [mod.id]: !prev[mod.id] }))}
+                        className={`w-full min-h-[42px] px-3.5 py-2 rounded-2xl border text-xs font-semibold flex items-center justify-between transition-all ${
+                          isSelected
+                            ? 'bg-[#c8a84b]/20 border-[#c8a84b] text-white font-bold'
+                            : 'bg-white/[0.04] border-white/10 text-[rgba(240,230,211,0.78)] hover:bg-white/[0.08]'
+                        }`}
+                      >
+                        <span className="flex items-center gap-2">
+                          <span className={`w-4 h-4 rounded-md border flex items-center justify-center text-[10px] ${isSelected ? 'bg-[#c8a84b] border-[#c8a84b] text-[#0a0a0b] font-bold' : 'border-white/30'}`}>
+                            {isSelected ? '✓' : ''}
+                          </span>
+                          {mod.name}
                         </span>
-                        {mod.name}
-                      </span>
-                      <span className="font-mono text-[#e8d090] tabular-nums">
-                        {mod.priceCents > 0 ? `+ ${formatMoney(mod.priceCents)}` : 'Incluido'}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Define custom modifier inline */}
-              <div className="p-3 rounded-2xl bg-[#0a0a0b]/55 border border-white/10 space-y-2">
-                <div className="text-[11px] font-bold uppercase tracking-wider text-[rgba(240,230,211,0.7)]">
-                  Definir extra personalizado
+                        <span className="font-mono text-[#e8d090] tabular-nums">
+                          {mod.priceCents > 0 ? `+ ${formatMoney(mod.priceCents)}` : 'Incluido'}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={customModName}
-                    onChange={(e) => {
-                      setCustomModName(e.target.value);
-                      setCustomModError('');
-                    }}
-                    placeholder="Ej. Extra aderezo"
-                    aria-label="Nombre del extra personalizado"
-                    className="flex-1 min-w-0 min-h-[38px] px-3 py-1.5 rounded-xl bg-[#161618] border border-white/10 text-xs text-white focus:outline-none focus:border-[#c8a84b]"
-                  />
-                  <input
-                    type="number"
-                    min="0"
-                    step="1"
-                    value={customModPrice}
-                    onChange={(e) => setCustomModPrice(e.target.value)}
-                    placeholder="$0"
-                    aria-label="Costo extra en pesos"
-                    className="w-20 min-h-[38px] px-2.5 py-1.5 rounded-xl bg-[#161618] border border-white/10 text-xs text-white font-mono text-right focus:outline-none focus:border-[#c8a84b]"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const res = addCustomModifier(customModName, Number(customModPrice) || 0);
-                      if (res.error) {
-                        setCustomModError(res.error);
-                        return;
-                      }
-                      setSelectedModifiers((prev) => ({ ...prev, [res.id]: true }));
-                      setCustomModName('');
-                      setCustomModPrice('0');
-                      setCustomModError('');
-                    }}
-                    className="min-h-[38px] px-3 rounded-xl bg-[#173c34] hover:bg-[#28584c] text-[#25d366] font-bold text-xs shrink-0"
-                  >
-                    + Crear
-                  </button>
-                </div>
-                {customModError && (
-                  <p className="text-[11px] text-[#e05252] font-semibold">{customModError}</p>
-                )}
-              </div>
-            </div>
 
-            <div className="flex gap-3 pt-1">
-              <button
-                type="button"
-                onClick={() => {
-                  setModifierModalProduct(null);
-                  setSelectedModifiers({});
-                }}
-                className="flex-1 min-h-[44px] rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] text-white font-bold text-xs"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const modsArray = getModifiersArray(selectedModifiers);
-                  handleAddProductWithModifiers(modifierModalProduct, modsArray);
-                  setModifierModalProduct(null);
-                  setSelectedModifiers({});
-                }}
-                className="flex-1 min-h-[44px] rounded-2xl bg-[#c8a84b] hover:bg-[#e8d090] text-[#0a0a0b] font-bold text-xs uppercase tracking-wider"
-              >
-                Añadir con Modificadores
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Cart Item Modifiers Modal */}
-      {editingCartItemIndex !== null && cart[editingCartItemIndex] && (
-        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
-          <div className="ios-glass-modal w-full max-w-md rounded-[28px] p-6 space-y-4 text-left max-h-[90dvh] overflow-y-auto">
-            {(() => {
-              const currentItem = cart[editingCartItemIndex];
-              const baseProd = state.products.find((p) => p.key === currentItem.key);
-              const basePrice = baseProd ? baseProd.priceCents : currentItem.priceCents;
-              const extraCents = calculateModifierTotal(editingItemModifiers);
-              return (
-                <>
-                  <div className="flex items-start justify-between gap-3 pb-3 border-b border-white/10">
-                    <div>
-                      <h3 className="font-serif font-bold text-xl text-white tracking-[-0.02em]">
-                        Modificar ítem: {currentItem.name}
-                      </h3>
-                      <p className="text-xs text-[rgba(240,230,211,0.68)] mt-0.5 tabular-nums">
-                        Base: {formatMoney(basePrice)} · Extras: +{formatMoney(extraCents)} ·{' '}
-                        <strong className="text-[#e8d090]">Total unitario: {formatMoney(basePrice + extraCents)}</strong>
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setEditingCartItemIndex(null)}
-                      aria-label="Cerrar modal de modificadores de ítem"
-                      className="w-10 h-10 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-[rgba(240,230,211,0.72)] hover:text-white transition-colors"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
+                {/* Define custom modifier inline */}
+                <div className="p-3 rounded-2xl bg-[#0a0a0b]/55 border border-white/10 space-y-2">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-[rgba(240,230,211,0.7)]">
+                    Definir extra personalizado
                   </div>
-
-                  <div className="space-y-3">
-                    <label className="block text-xs font-bold text-[#c8a84b] uppercase tracking-wider">
-                      Modificadores e Ingredientes
-                    </label>
-                    <div className="grid grid-cols-1 gap-2 max-h-56 overflow-y-auto pr-1">
-                      {modifiers.map((mod) => {
-                        const isSelected = !!editingItemModifiers[mod.id];
-                        return (
-                          <button
-                            key={mod.id}
-                            type="button"
-                            onClick={() => setEditingItemModifiers((prev) => ({ ...prev, [mod.id]: !prev[mod.id] }))}
-                            className={`w-full min-h-[42px] px-3.5 py-2 rounded-2xl border text-xs font-semibold flex items-center justify-between transition-all ${
-                              isSelected
-                                ? 'bg-[#c8a84b]/20 border-[#c8a84b] text-white font-bold'
-                                : 'bg-white/[0.04] border-white/10 text-[rgba(240,230,211,0.78)] hover:bg-white/[0.08]'
-                            }`}
-                          >
-                            <span className="flex items-center gap-2">
-                              <span className={`w-4 h-4 rounded-md border flex items-center justify-center text-[10px] ${isSelected ? 'bg-[#c8a84b] border-[#c8a84b] text-[#0a0a0b] font-bold' : 'border-white/30'}`}>
-                                {isSelected ? '✓' : ''}
-                              </span>
-                              {mod.name}
-                            </span>
-                            <span className="font-mono text-[#e8d090] tabular-nums">
-                              {mod.priceCents > 0 ? `+ ${formatMoney(mod.priceCents)}` : 'Incluido'}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    {/* Define custom modifier inline */}
-                    <div className="p-3 rounded-2xl bg-[#0a0a0b]/55 border border-white/10 space-y-2">
-                      <div className="text-[11px] font-bold uppercase tracking-wider text-[rgba(240,230,211,0.7)]">
-                        Definir extra personalizado
-                      </div>
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={customModName}
-                          onChange={(e) => {
-                            setCustomModName(e.target.value);
-                            setCustomModError('');
-                          }}
-                          placeholder="Ej. Extra aderezo"
-                          aria-label="Nombre del extra personalizado"
-                          className="flex-1 min-w-0 min-h-[38px] px-3 py-1.5 rounded-xl bg-[#161618] border border-white/10 text-xs text-white focus:outline-none focus:border-[#c8a84b]"
-                        />
-                        <input
-                          type="number"
-                          min="0"
-                          step="1"
-                          value={customModPrice}
-                          onChange={(e) => setCustomModPrice(e.target.value)}
-                          placeholder="$0"
-                          aria-label="Costo extra en pesos"
-                          className="w-20 min-h-[38px] px-2.5 py-1.5 rounded-xl bg-[#161618] border border-white/10 text-xs text-white font-mono text-right focus:outline-none focus:border-[#c8a84b]"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const res = addCustomModifier(customModName, Number(customModPrice) || 0);
-                            if (res.error) {
-                              setCustomModError(res.error);
-                              return;
-                            }
-                            setEditingItemModifiers((prev) => ({ ...prev, [res.id]: true }));
-                            setCustomModName('');
-                            setCustomModPrice('0');
-                            setCustomModError('');
-                          }}
-                          className="min-h-[38px] px-3 rounded-xl bg-[#173c34] hover:bg-[#28584c] text-[#25d366] font-bold text-xs shrink-0"
-                        >
-                          + Crear
-                        </button>
-                      </div>
-                      {customModError && (
-                        <p className="text-[11px] text-[#e05252] font-semibold">{customModError}</p>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="flex gap-3 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setEditingCartItemIndex(null)}
-                      className="flex-1 min-h-[44px] rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] text-white font-bold text-xs"
-                    >
-                      Cancelar
-                    </button>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={customModName}
+                      onChange={(e) => {
+                        setCustomModName(e.target.value);
+                        setCustomModError('');
+                      }}
+                      placeholder="Ej. Extra aderezo"
+                      aria-label="Nombre del extra personalizado"
+                      className="flex-1 min-w-0 min-h-[38px] px-3 py-1.5 rounded-xl bg-[#161618] border border-white/10 text-xs text-white focus:outline-none focus:border-[#c8a84b]"
+                    />
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={customModPrice}
+                      onChange={(e) => setCustomModPrice(e.target.value)}
+                      placeholder="$0"
+                      aria-label="Costo extra en pesos"
+                      className="w-20 min-h-[38px] px-2.5 py-1.5 rounded-xl bg-[#161618] border border-white/10 text-xs text-white font-mono text-right focus:outline-none focus:border-[#c8a84b]"
+                    />
                     <button
                       type="button"
                       onClick={() => {
-                        const modsArray = getModifiersArray(editingItemModifiers);
-                        setCart((prev) => {
-                          const copy = [...prev];
-                          const updatedItem: OrderItem = {
-                            ...currentItem,
-                            priceCents: basePrice,
-                            modifiers: modsArray,
-                          };
-                          delete updatedItem.modificadores;
-                          copy[editingCartItemIndex] = updatedItem;
-                          return copy;
-                        });
-
-                        notify(`Modificadores actualizados para ${currentItem.name}`);
-                        setEditingCartItemIndex(null);
+                        const res = addCustomModifier(customModName, Number(customModPrice) || 0);
+                        if (res.error) {
+                          setCustomModError(res.error);
+                          return;
+                        }
+                        setActiveSelection((prev) => ({ ...prev, [res.id]: true }));
+                        setCustomModName('');
+                        setCustomModPrice('0');
+                        setCustomModError('');
                       }}
-                      className="flex-1 min-h-[44px] rounded-2xl bg-[#c8a84b] hover:bg-[#e8d090] text-[#0a0a0b] font-bold text-xs uppercase tracking-wider"
+                      className="min-h-[38px] px-3 rounded-xl bg-[#173c34] hover:bg-[#28584c] text-[#25d366] font-bold text-xs shrink-0"
                     >
-                      Guardar Modificadores
+                      + Crear
                     </button>
                   </div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
+                  {customModError && (
+                    <p className="text-[11px] text-[#e05252] font-semibold">{customModError}</p>
+                  )}
+                </div>
+              </div>
 
-      {/* Floating Toast */}
-      {toastMessage && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl bg-[#173c34]/95 backdrop-blur-xl text-white border border-[#25d366]/40 text-xs font-bold shadow-2xl">
-          {toastMessage}
-        </div>
-      )}
+              <div className="flex gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={closeModal}
+                  className="flex-1 min-h-[44px] rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] text-white font-bold text-xs"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const modsArray = getModifiersArray(activeSelection);
+                    if (activeProduct) {
+                      handleAddProductWithModifiers(activeProduct, modsArray);
+                    } else if (editingItem && editingCartItemIndex !== null) {
+                      setCart((prev) => {
+                        const copy = [...prev];
+                        const updatedItem: OrderItem = {
+                          ...editingItem,
+                          priceCents: basePrice,
+                          modifiers: modsArray,
+                        };
+                        delete updatedItem.modificadores;
+                        copy[editingCartItemIndex] = updatedItem;
+                        return copy;
+                      });
+                      notify(`Modificadores actualizados para ${editingItem.name}`, 'info');
+                    }
+                    closeModal();
+                  }}
+                  className="flex-1 min-h-[44px] rounded-2xl bg-[#c8a84b] hover:bg-[#e8d090] text-[#0a0a0b] font-bold text-xs uppercase tracking-wider"
+                >
+                  {activeProduct ? 'Añadir con Modificadores' : 'Guardar Modificadores'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Non-intrusive Animated Toast Notification */}
+      <ToastNotification
+        toast={activeToast}
+        onDismiss={() => setActiveToast(null)}
+      />
     </div>
   );
 };

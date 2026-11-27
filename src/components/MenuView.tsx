@@ -102,7 +102,7 @@ export const MenuView: React.FC<MenuViewProps> = ({ onSwitchToPos }) => {
     }).filter((sec) => sec.items.length > 0 || (sec.subcategories?.length ?? 0) > 0);
 
     const customProducts = liveProducts.filter(
-      (p) => p.saleEnabled && !DEFAULT_PRODUCT_KEYS.has(p.key)
+      (p) => p.saleEnabled && p.category !== 'MODIFICADORES' && !DEFAULT_PRODUCT_KEYS.has(p.key)
     );
 
     if (customProducts.length > 0) {

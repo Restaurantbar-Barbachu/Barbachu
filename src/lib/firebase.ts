@@ -1,14 +1,15 @@
 import { initializeApp } from 'firebase/app';
 import {
+  connectAuthEmulator,
   getAuth,
   GoogleAuthProvider,
-  onAuthStateChanged,
   signInWithPopup,
   signOut,
   type User,
 } from 'firebase/auth';
 import {
   clearIndexedDbPersistence,
+  connectFirestoreEmulator,
   doc,
   getDocFromServer,
   initializeFirestore,
@@ -33,8 +34,20 @@ export const FIREBASE_CONFIG = firebaseConfig;
 
 const app = initializeApp(firebaseConfig);
 
+function getViteEnv(key: string): string | undefined {
+  return (import.meta as { env?: Record<string, string | undefined> }).env?.[key];
+}
+
+const isLocalhostBrowser =
+  typeof window !== 'undefined' &&
+  (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
+export const isFirebaseEmulatorActive =
+  isLocalhostBrowser && getViteEnv('VITE_USE_FIREBASE_EMULATOR') === 'true';
+
 function readPersistedCacheMode(): FirestoreCacheMode {
   if (typeof window === 'undefined') return 'persistent';
+  if (isFirebaseEmulatorActive) return 'memory';
   try {
     return window.sessionStorage.getItem(FIRESTORE_CACHE_MODE_KEY) === 'memory'
       ? 'memory'
@@ -260,60 +273,16 @@ if (typeof window !== 'undefined') {
 
 export const auth = getAuth(app);
 
-export const SCOPES = [
-  'https://www.googleapis.com/auth/drive',
-  'https://www.googleapis.com/auth/drive.activity',
-  'https://www.googleapis.com/auth/drive.activity.readonly',
-  'https://www.googleapis.com/auth/drive.appdata',
-  'https://www.googleapis.com/auth/drive.apps.readonly',
-  'https://www.googleapis.com/auth/drive.file',
-  'https://www.googleapis.com/auth/drive.install',
-  'https://www.googleapis.com/auth/drive.meet.readonly',
-  'https://www.googleapis.com/auth/drive.metadata',
-  'https://www.googleapis.com/auth/drive.metadata.readonly',
-  'https://www.googleapis.com/auth/drive.photos.readonly',
-  'https://www.googleapis.com/auth/drive.readonly',
-  'https://www.googleapis.com/auth/drive.scripts',
-] as const;
+if (isFirebaseEmulatorActive) {
+  const authUrl = getViteEnv('VITE_FIREBASE_AUTH_EMULATOR_URL') || 'http://127.0.0.1:9099';
+  const fsHost = getViteEnv('VITE_FIRESTORE_EMULATOR_HOST') || '127.0.0.1';
+  const fsPortRaw = Number(getViteEnv('VITE_FIRESTORE_EMULATOR_PORT') || 8080);
+  connectAuthEmulator(auth, authUrl, { disableWarnings: true });
+  connectFirestoreEmulator(db, fsHost, Number.isFinite(fsPortRaw) ? fsPortRaw : 8080);
+}
 
 export const googleProvider = new GoogleAuthProvider();
-for (const scope of SCOPES) {
-  googleProvider.addScope(scope);
-}
 googleProvider.setCustomParameters({ prompt: 'select_account' });
-
-// Strictly in-memory OAuth access token cache (never stored in localStorage/sessionStorage)
-let cachedDriveAccessToken: string | null = null;
-const driveTokenSubscribers = new Set<(token: string | null) => void>();
-
-function setCachedDriveAccessToken(token: string | null): void {
-  cachedDriveAccessToken = token;
-  for (const listener of driveTokenSubscribers) {
-    listener(token);
-  }
-}
-
-onAuthStateChanged(auth, (user) => {
-  if (!user) {
-    setCachedDriveAccessToken(null);
-  }
-});
-
-export function getDriveAccessToken(): string | null {
-  return cachedDriveAccessToken;
-}
-
-export function clearDriveAccessToken(): void {
-  setCachedDriveAccessToken(null);
-}
-
-export function subscribeDriveAccessToken(listener: (token: string | null) => void): () => void {
-  driveTokenSubscribers.add(listener);
-  listener(cachedDriveAccessToken);
-  return () => {
-    driveTokenSubscribers.delete(listener);
-  };
-}
 
 export enum OperationType {
   CREATE = 'create',
@@ -403,24 +372,9 @@ export async function measureCloudLatencyMs(): Promise<number | null> {
 
 export async function signInWithGoogle(): Promise<User> {
   const result = await signInWithPopup(auth, googleProvider);
-  const credential = GoogleAuthProvider.credentialFromResult(result);
-  if (credential?.accessToken) {
-    setCachedDriveAccessToken(credential.accessToken);
-  }
   return result.user;
 }
 
-export async function connectGoogleDriveWithPopup(): Promise<{ user: User; accessToken: string }> {
-  const result = await signInWithPopup(auth, googleProvider);
-  const credential = GoogleAuthProvider.credentialFromResult(result);
-  if (!credential?.accessToken) {
-    throw new Error('No se recibió el token de acceso de Google Drive. Intenta autorizar de nuevo.');
-  }
-  setCachedDriveAccessToken(credential.accessToken);
-  return { user: result.user, accessToken: credential.accessToken };
-}
-
 export async function signOutFirebase(): Promise<void> {
-  setCachedDriveAccessToken(null);
   await signOut(auth);
 }

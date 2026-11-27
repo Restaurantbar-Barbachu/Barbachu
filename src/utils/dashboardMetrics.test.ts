@@ -183,5 +183,20 @@ test('buildDailySalesSummary computes today revenue, tickets, average ticket, an
   assert.equal(summary.averageTicketCents, 30000);
   assert.equal(summary.topProductName, 'ORDEN ALITAS');
   assert.equal(summary.topProductUnits, 2);
+
+  // Tie in units sold (1 each): higher revenue item should lead
+  const tieSale: Sale = {
+    ...todaySale,
+    id: 's-tie',
+    items: [
+      { key: '729', name: 'ALAS CONVINADAS', priceCents: 9500, qty: 1, note: '' },
+      { key: '722', name: 'BONELES BARBACHU', priceCents: 13000, qty: 1, note: '' },
+    ],
+    subtotalCents: 22500,
+    totalCents: 22500,
+  };
+  const tieSummary = buildDailySalesSummary([tieSale], products, ref);
+  assert.equal(tieSummary.topProductName, 'BONELES BARBACHU');
+  assert.equal(tieSummary.topProductUnits, 1);
 });
 

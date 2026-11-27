@@ -51,6 +51,13 @@ service cloud.firestore {
       return listVal is list && listVal.size() >= 1 && listVal.size() <= 20 && listVal[0] is string;
     }
 
+    function isWorkspaceMember() {
+      return isVerified() && (
+        existing().ownerUid == request.auth.uid ||
+        (existing().authorizedEmails is list && userEmail() in existing().authorizedEmails)
+      );
+    }
+
     function canReadWorkspaceDoc() {
       return isVerified() && (
         isAdmin() ||
@@ -71,8 +78,8 @@ service cloud.firestore {
 
     function isValidOrderItemModifier(m) {
       return m is map &&
-        m.keys().hasAll(['name', 'priceCents']) &&
         m.keys().hasOnly(['name', 'priceCents']) &&
+        m.size() == 2 &&
         m.name is string && m.name.size() >= 1 && m.name.size() <= 60 &&
         m.priceCents is int && m.priceCents >= 0 && m.priceCents <= 1000000;
     }
@@ -82,8 +89,7 @@ service cloud.firestore {
         mods.size() <= 15 &&
         (mods.size() == 0 || (
           isValidOrderItemModifier(mods[0]) &&
-          (mods.size() < 2 || isValidOrderItemModifier(mods[1])) &&
-          isValidOrderItemModifier(mods[mods.size() - 1])
+          (mods.size() == 1 || isValidOrderItemModifier(mods[mods.size() - 1]))
         ));
     }
 
@@ -107,10 +113,7 @@ service cloud.firestore {
         items.size() >= 1 &&
         items.size() <= 100 &&
         isValidOrderItem(items[0]) &&
-        (items.size() < 2 || isValidOrderItem(items[1])) &&
-        (items.size() < 3 || isValidOrderItem(items[2])) &&
-        (items.size() < 4 || isValidOrderItem(items[3])) &&
-        isValidOrderItem(items[items.size() - 1]);
+        (items.size() == 1 || isValidOrderItem(items[items.size() - 1]));
     }
 
     // -------------------------------------------------------------------------
@@ -392,7 +395,7 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         (
           isAdmin() ||
-          (canReadWorkspaceDoc() &&
+          (isWorkspaceMember() &&
            incoming().diff(existing()).affectedKeys().hasOnly(['nextOrderNumber', 'nextReceiptNumber', 'updatedAt']))
         );
       allow delete: if false;
@@ -432,7 +435,7 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         (
           isAdmin() ||
-          (canReadWorkspaceDoc() &&
+          (isWorkspaceMember() &&
            existing().paid == false &&
            existing().status != 'closed' &&
            incoming().diff(existing()).affectedKeys().hasOnly([
@@ -475,7 +478,7 @@ service cloud.firestore {
         incoming().openedAt == existing().openedAt &&
         (
           isAdmin() ||
-          (canReadWorkspaceDoc() &&
+          (isWorkspaceMember() &&
            existing().isOpen == true &&
            incoming().totalSalesCents >= existing().totalSalesCents &&
            incoming().diff(existing()).affectedKeys().hasOnly([
@@ -503,7 +506,7 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         (
           isAdmin() ||
-          (canReadWorkspaceDoc() &&
+          (isWorkspaceMember() &&
            incoming().diff(existing()).affectedKeys().hasOnly(['stock', 'minStock', 'updatedAt']))
         );
       allow delete: if isValidId(itemId) && isAdmin();
@@ -550,7 +553,7 @@ service cloud.firestore {
         incoming().clockIn == existing().clockIn &&
         (
           isAdmin() ||
-          (canReadWorkspaceDoc() &&
+          (isWorkspaceMember() &&
            existing().status == 'activo' &&
            (!('clockOut' in incoming()) || incoming().clockOut == request.time) &&
            incoming().diff(existing()).affectedKeys().hasOnly(['clockOut', 'status']))

@@ -23,6 +23,13 @@ import {
   type ToastVariant,
 } from '../lib/securePosApi';
 import { formatMoney } from '../storage';
+import {
+  duplicateOrderItemInList,
+  normalizeModifierName,
+  removeModifierFromItem,
+  replaceOrderItemInList,
+  updateModifierOnItem,
+} from '../utils/modifiers';
 import type {
   AuditLogEntry,
   CustomerDelivery,
@@ -195,6 +202,42 @@ export function useOrderManager({
     return locs.size;
   }, [openOrders]);
 
+  const hasUnsavedOrderChanges = useMemo(() => {
+    if (!selectedOrder) return cart.length > 0;
+    if (
+      (selectedOrder.note || '') !== generalNote ||
+      selectedOrder.waiter !== waiter ||
+      (selectedOrder.priority || 'normal') !== priority ||
+      selectedOrder.items.length !== cart.length
+    ) {
+      return true;
+    }
+    for (let idx = 0; idx < cart.length; idx += 1) {
+      const a = selectedOrder.items[idx];
+      const b = cart[idx];
+      if (!a || !b) return true;
+      if (
+        (a.lineId || a.key) !== (b.lineId || b.key) ||
+        a.name !== b.name ||
+        a.priceCents !== b.priceCents ||
+        a.qty !== b.qty ||
+        (a.note || '') !== (b.note || '') ||
+        (a.station || 'cocina') !== (b.station || 'cocina')
+      ) {
+        return true;
+      }
+      const modsA = a.modifiers || a.modificadores || [];
+      const modsB = b.modifiers || b.modificadores || [];
+      if (modsA.length !== modsB.length) return true;
+      for (let m = 0; m < modsA.length; m += 1) {
+        if (modsA[m].name !== modsB[m].name || modsA[m].priceCents !== modsB[m].priceCents) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }, [cart, generalNote, priority, selectedOrder, waiter]);
+
   const loadOrderIntoDraft = useCallback(
     (order: Order, silent = false) => {
       setCurrentOrderId(order.id);
@@ -308,6 +351,120 @@ export function useOrderManager({
       notify(`+1 ${prod.name} (${modsArray.length} modificadores)`, 'info');
     },
     [notify]
+  );
+
+  const handleAddManualItem = useCallback(
+    (payload: {
+      name: string;
+      pricePesos: number;
+      station: 'cocina' | 'barra';
+      qty?: number;
+      note?: string;
+    }): boolean => {
+      if (!activePerms?.canTakeOrders && !isAdminRole) {
+        notify(`Tu rol (${activeRole.toUpperCase()}) no tiene permiso para tomar comandas.`, 'error');
+        return false;
+      }
+      const cleanName = normalizeModifierName(payload.name).slice(0, 80);
+      if (!cleanName) {
+        notify('Ingresa el nombre del artículo manual.', 'error');
+        return false;
+      }
+      const safePesos = Number(payload.pricePesos);
+      if (!Number.isFinite(safePesos) || safePesos < 0) {
+        notify('Ingresa un precio válido ($0.00 o mayor).', 'error');
+        return false;
+      }
+      const safeQty = Math.min(99, Math.max(1, Math.round(Number(payload.qty) || 1)));
+      const priceCents = Math.round(safePesos * 100);
+      const lineId = uid();
+
+      setCart((prev) => [
+        ...prev,
+        {
+          lineId,
+          key: `manual_${lineId.slice(0, 8)}`,
+          name: cleanName,
+          priceCents,
+          qty: safeQty,
+          note: (payload.note || '').trim().slice(0, 120),
+          station: payload.station,
+          itemStatus: 'pending',
+        },
+      ]);
+      notify(`+${safeQty} ${cleanName} agregado a la comanda`, 'info');
+      return true;
+    },
+    [activePerms?.canTakeOrders, activeRole, isAdminRole, notify]
+  );
+
+  const handleRemoveModifierFromCartItem = useCallback(
+    (targetId: string, modIndex: number) => {
+      const targetItem = cart.find((i) => (i.lineId || i.key) === targetId);
+      const removedMod = (targetItem?.modifiers || targetItem?.modificadores || [])[modIndex];
+      setCart((prev) =>
+        replaceOrderItemInList(prev, targetId, (item) => removeModifierFromItem(item, modIndex))
+      );
+      if (removedMod) {
+        notify(`Modificador "${removedMod.name}" eliminado de ${targetItem?.name || 'ítem'}.`, 'info');
+      }
+    },
+    [cart, notify]
+  );
+
+  const handleUpdateModifierOnCartItem = useCallback(
+    (targetId: string, modIndex: number, nextMod: OrderItemModifier) => {
+      setCart((prev) =>
+        replaceOrderItemInList(prev, targetId, (item) =>
+          updateModifierOnItem(item, modIndex, nextMod)
+        )
+      );
+      notify(`Modificador "${nextMod.name}" actualizado.`, 'info');
+    },
+    [notify]
+  );
+
+  const handleEditCartItemFields = useCallback(
+    (
+      targetId: string,
+      fields: { pricePesos?: number; qty?: number; station?: 'cocina' | 'barra' }
+    ): boolean => {
+      if (fields.pricePesos !== undefined) {
+        if (!Number.isFinite(fields.pricePesos) || fields.pricePesos < 0) {
+          notify('El precio unitario debe ser $0.00 o mayor.', 'error');
+          return false;
+        }
+      }
+      if (fields.qty !== undefined) {
+        if (!Number.isFinite(fields.qty) || fields.qty < 1 || fields.qty > 99) {
+          notify('La cantidad debe estar entre 1 y 99.', 'error');
+          return false;
+        }
+      }
+      setCart((prev) =>
+        replaceOrderItemInList(prev, targetId, (item) => ({
+          ...item,
+          priceCents:
+            fields.pricePesos !== undefined ? Math.round(fields.pricePesos * 100) : item.priceCents,
+          qty: fields.qty !== undefined ? Math.round(fields.qty) : item.qty,
+          station: fields.station ?? item.station,
+        }))
+      );
+      notify('Línea de comanda actualizada.', 'info');
+      return true;
+    },
+    [notify]
+  );
+
+  const handleDuplicateCartItem = useCallback(
+    (targetId: string) => {
+      const source = cart.find((i) => (i.lineId || i.key) === targetId);
+      setCart((prev) => duplicateOrderItemInList(prev, targetId, uid()));
+      if (source) {
+        notify(`Línea "${source.name}" duplicada.`, 'info');
+      }
+    },
+    [cart, notify]
   );
 
   const handleCancelItem = useCallback(
@@ -1011,6 +1168,48 @@ export function useOrderManager({
     setState,
   ]);
 
+  const handleClearDiscount = useCallback(async () => {
+    if (!canApplyDiscount) {
+      notify('Tu rol no tiene autorización para modificar descuentos.', 'error');
+      return;
+    }
+    if (!selectedOrder || !selectedOrder.discountCents || isMutatingRef.current) return;
+
+    const latest = stateRef.current;
+    const now = new Date().toISOString();
+    const prevDiscount = selectedOrder.discountCents;
+    const sub = subtotalCents(selectedOrder.items);
+    const updatedOrder: Order = {
+      ...selectedOrder,
+      discountCents: 0,
+      totalCents: sub,
+      updatedAt: now,
+    };
+    const auditEntry: AuditLogEntry = {
+      id: uid(),
+      at: now,
+      user: latest.activeUser.name,
+      action: 'Descuento eliminado',
+      detail: `Descuento de ${formatMoney(prevDiscount)} retirado de Cuenta #${selectedOrder.number}`,
+    };
+
+    const res = await securePosApi.updateOrder(updatedOrder, auditEntry, secureApiOptions, {
+      title: 'Descuento retirado',
+      detail: `Cuenta #${selectedOrder.number} restaurada a ${formatMoney(sub)}`,
+    });
+
+    if (res.status !== 'confirmed') {
+      notify(res.error || 'Error retirando descuento en Firestore.', 'error');
+      return;
+    }
+
+    setState((prev) => ({
+      ...prev,
+      orders: prev.orders.map((o) => (o.id === selectedOrder.id ? updatedOrder : o)),
+      audit: [...prev.audit, auditEntry],
+    }));
+  }, [canApplyDiscount, notify, secureApiOptions, selectedOrder, setState]);
+
   const handleReopenLastSale = useCallback(() => {
     const latest = stateRef.current;
     const lastSale = latest.sales[latest.sales.length - 1];
@@ -1158,15 +1357,21 @@ export function useOrderManager({
     selectedOrder,
     cartQtyMap,
     totalOccupiedTables,
+    hasUnsavedOrderChanges,
     loadOrderIntoDraft,
     startNewAccount,
     openLocationDraft,
     handleAddProduct,
     handleAddProductWithModifiers,
+    handleAddManualItem,
     handleUpdateQty,
     handleDecrementProductByKey,
     handleEditItemNote,
     handleToggleQuickModifier,
+    handleRemoveModifierFromCartItem,
+    handleUpdateModifierOnCartItem,
+    handleEditCartItemFields,
+    handleDuplicateCartItem,
     handleCancelItem,
     handleSendOrder,
     handleAdvanceItemStatus,
@@ -1177,6 +1382,7 @@ export function useOrderManager({
     handleConfirmMergeOrders,
     handleCancelAccount,
     handleApplyDiscount,
+    handleClearDiscount,
     handleReopenLastSale,
     handleOpenDraftPreCheck,
   };

@@ -4,6 +4,7 @@ import type { User } from 'firebase/auth';
 import {
   AlertTriangle,
   Download,
+  Edit3,
   Package,
   Plus,
   Search,
@@ -18,6 +19,7 @@ import {
   fsCreateInventoryItem,
   fsDeleteInventoryItem,
   fsSaveInventoryMovement,
+  fsUpdateInventoryItemMetadata,
   fsVerifyAnyAdminPinFromFirestore,
 } from '../lib/firestoreSync';
 import { downloadCsvFile } from '../utils/csv';
@@ -74,6 +76,25 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
   // Delete confirmation
   const [confirmDeleteClave, setConfirmDeleteClave] = useState<number | null>(null);
 
+  // Admin Edit Metadata Modal
+  const [editMetaItem, setEditMetaItem] = useState<InventoryItem | null>(null);
+  const [editDesc, setEditDesc] = useState<string>('');
+  const [editCategory, setEditCategory] = useState<string>('');
+  const [editUnit, setEditUnit] = useState<string>('');
+  const [editCost, setEditCost] = useState<string>('0');
+  const [editMinStock, setEditMinStock] = useState<string>('0');
+
+  const canEditInventoryMeta = isFirebaseAdmin || state.activeUser.role === 'admin';
+
+  const openEditMetaModal = (item: InventoryItem) => {
+    setEditMetaItem(item);
+    setEditDesc(item.descripcion);
+    setEditCategory(item.categoria);
+    setEditUnit(item.unidad);
+    setEditCost(String(item.costo));
+    setEditMinStock(String(item.minStock));
+  };
+
   const openActionModal = (item: InventoryItem, type: 'entrada' | 'ajuste' | 'merma' | 'minStock') => {
     setModalQty(type === 'minStock' ? String(item.minStock ?? 0) : type === 'ajuste' ? String(item.stock ?? 0) : '');
     setModalCost(item.costo > 0 ? String(item.costo) : '');
@@ -82,16 +103,17 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
   };
 
   useEffect(() => {
-    if (!modalAction && confirmDeleteClave === null) return;
+    if (!modalAction && confirmDeleteClave === null && !editMetaItem) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setModalAction(null);
         setConfirmDeleteClave(null);
+        setEditMetaItem(null);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [modalAction, confirmDeleteClave]);
+  }, [modalAction, confirmDeleteClave, editMetaItem]);
 
   const inventoryList = useMemo(() => Object.values(state.inventory || {}), [state.inventory]);
 
@@ -393,6 +415,63 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
     notify(`Insumo "${item.descripcion}" eliminado del inventario.`);
   };
 
+  const handleSaveEditMeta = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editMetaItem) return;
+    if (!canEditInventoryMeta) {
+      notify('Solo un Administrador puede editar la ficha del insumo.');
+      return;
+    }
+    const cleanDesc = editDesc.trim();
+    if (!cleanDesc) {
+      notify('La descripción del insumo es obligatoria.');
+      return;
+    }
+    const cleanCategory = editCategory.trim() || editMetaItem.categoria;
+    const cleanUnit = editUnit.trim() || editMetaItem.unidad;
+    const costNum = Number(editCost);
+    const minNum = Number(editMinStock);
+    if (!Number.isFinite(costNum) || costNum < 0) {
+      notify('Ingresa un costo válido ($0.00 o mayor).');
+      return;
+    }
+    if (!Number.isFinite(minNum) || minNum < 0) {
+      notify('Ingresa un stock mínimo válido.');
+      return;
+    }
+
+    const updatedItem: InventoryItem = {
+      ...editMetaItem,
+      descripcion: cleanDesc,
+      categoria: cleanCategory,
+      unidad: cleanUnit,
+      costo: costNum,
+      minStock: minNum,
+    };
+    const auditEntry: AuditLogEntry = {
+      id: uid(),
+      at: new Date().toISOString(),
+      user: state.activeUser.name,
+      action: 'Insumo editado',
+      detail: `Clave ${updatedItem.clave}: ${cleanDesc} (${cleanCategory} · ${cleanUnit}) · Costo $${costNum.toFixed(2)} · Mín ${minNum}`,
+    };
+
+    setState((prev) => ({
+      ...prev,
+      inventory: { ...prev.inventory, [updatedItem.clave]: updatedItem },
+      audit: [...prev.audit, auditEntry],
+    }));
+
+    if (firebaseUser) {
+      void fsUpdateInventoryItemMetadata(updatedItem, firebaseUser, authorizedEmails, auditEntry).catch((err) => {
+        notify(`Error actualizando insumo en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+      });
+    }
+
+    setEditMetaItem(null);
+    notify(`Insumo "${cleanDesc}" actualizado.`);
+  };
+
   const handleExportCsv = () => {
     const headers = ['Clave', 'Descripcion', 'Categoria', 'Unidad', 'Costo_Unitario', 'Stock_Actual', 'Stock_Minimo'];
     const rows = inventoryList.map((i) => [
@@ -624,6 +703,17 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
                         >
                           Ajustar
                         </button>
+                        {canEditInventoryMeta && (
+                          <button
+                            type="button"
+                            onClick={() => openEditMetaModal(item)}
+                            aria-label={`Editar ${item.descripcion}`}
+                            className="min-h-[34px] px-2 py-1 rounded-xl bg-white/[0.06] hover:bg-white/[0.14] text-[#e8d090] border border-white/15"
+                            title="Editar ficha de insumo"
+                          >
+                            <Edit3 className="w-3.5 h-3.5 inline" />
+                          </button>
+                        )}
                         {isFirebaseAdmin && (
                           <button
                             type="button"
@@ -968,6 +1058,102 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
                   Sí, Eliminar
                 </button>
               </div>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {/* ADMIN EDIT INVENTORY METADATA MODAL */}
+      {editMetaItem &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
+            <div className="ios-glass-modal max-w-md w-full p-6 space-y-4 text-left max-h-[90dvh] overflow-y-auto">
+              <div className="flex items-center justify-between pb-2 border-b border-white/10">
+                <div>
+                  <h3 className="font-serif font-bold text-base text-white">Editar Ficha de Insumo</h3>
+                  <p className="text-xs text-[rgba(240,230,211,0.58)] font-mono">Clave {editMetaItem.clave}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditMetaItem(null)}
+                  aria-label="Cerrar edición de insumo"
+                  className="w-9 h-9 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-white"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveEditMeta} className="space-y-3 text-xs">
+                <div>
+                  <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">Descripción *</label>
+                  <input
+                    required
+                    value={editDesc}
+                    onChange={(e) => setEditDesc(e.target.value)}
+                    className="w-full min-h-[42px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white font-semibold focus:outline-none focus:border-[#c8a84b]"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">Categoría *</label>
+                    <input
+                      required
+                      value={editCategory}
+                      onChange={(e) => setEditCategory(e.target.value)}
+                      className="w-full min-h-[42px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white focus:outline-none focus:border-[#c8a84b]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">Unidad *</label>
+                    <input
+                      required
+                      value={editUnit}
+                      onChange={(e) => setEditUnit(e.target.value)}
+                      className="w-full min-h-[42px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white focus:outline-none focus:border-[#c8a84b]"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">Costo Unitario ($)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={editCost}
+                      onChange={(e) => setEditCost(e.target.value)}
+                      className="w-full min-h-[42px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white font-mono tabular-nums focus:outline-none focus:border-[#c8a84b]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">Stock Mínimo</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={editMinStock}
+                      onChange={(e) => setEditMinStock(e.target.value)}
+                      className="w-full min-h-[42px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white font-mono tabular-nums focus:outline-none focus:border-[#c8a84b]"
+                    />
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditMetaItem(null)}
+                    className="min-h-[42px] px-4 py-2 rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] text-xs font-semibold text-white transition-colors"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    className="min-h-[42px] px-5 py-2 rounded-2xl text-xs font-bold bg-[#c8a84b] hover:bg-[#e8d090] text-[#0a0a0b] transition-colors"
+                  >
+                    Guardar Cambios
+                  </button>
+                </div>
+              </form>
             </div>
           </div>,
           document.body

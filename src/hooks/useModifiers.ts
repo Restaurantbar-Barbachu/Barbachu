@@ -1,5 +1,15 @@
-import { useCallback, useRef, useState } from 'react';
-import { OrderItem, OrderItemModifier } from '../types';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { OrderItem, OrderItemModifier, SoftProduct } from '../types';
+import {
+  buildCatalogModifierOptions,
+  calculateModifierSelectionTotal,
+  getSelectedModifiersArray,
+  matchItemModifiersToOptions,
+  normalizeModifierName,
+  type ModifierOption,
+} from '../utils/modifiers';
+
+export type { ModifierOption };
 
 export const QUICK_ITEM_MODIFIERS = [
   'Sin cebolla',
@@ -12,36 +22,20 @@ export const QUICK_ITEM_MODIFIERS = [
   'Para llevar',
 ];
 
-export interface ModifierOption {
-  id: string;
-  name: string;
-  priceCents: number;
-}
+export function useModifiers(catalogProducts: SoftProduct[] = []) {
+  const [customModifiers, setCustomModifiers] = useState<ModifierOption[]>([]);
 
-export const DEFAULT_MODIFIER_OPTIONS: ModifierOption[] = [
-  { id: 'sin_cebolla', name: 'Sin cebolla', priceCents: 0 },
-  { id: 'sin_tomate', name: 'Sin tomate', priceCents: 0 },
-  { id: 'sin_chile', name: 'Sin chile', priceCents: 0 },
-  { id: 'sin_mayonesa', name: 'Sin mayonesa', priceCents: 0 },
-  { id: 'salsa_aparte', name: 'Salsa aparte', priceCents: 0 },
-  { id: 'para_llevar', name: 'Para llevar', priceCents: 0 },
-  { id: 'extra_queso', name: 'Extra queso', priceCents: 1500 },
-  { id: 'tocino_extra', name: 'Tocino extra', priceCents: 2000 },
-  { id: 'aguacate_extra', name: 'Aguacate extra', priceCents: 2500 },
-  { id: 'carne_extra', name: 'Carne extra', priceCents: 3500 },
-  { id: 'termino_medio', name: 'Término: Medio', priceCents: 0 },
-  { id: 'termino_3_4', name: 'Término: Tres cuartos', priceCents: 0 },
-  { id: 'termino_bien', name: 'Término: Bien cocido', priceCents: 0 },
-];
+  const modifiers = useMemo(
+    () => buildCatalogModifierOptions(catalogProducts, customModifiers),
+    [catalogProducts, customModifiers]
+  );
 
-export function useModifiers(initialModifiers: ModifierOption[] = DEFAULT_MODIFIER_OPTIONS) {
-  const [modifiers, setModifiers] = useState<ModifierOption[]>(initialModifiers);
   const modifiersRef = useRef(modifiers);
   modifiersRef.current = modifiers;
 
   const addCustomModifier = useCallback(
     (rawName: string, pricePesos: number): { id: string; error?: string } => {
-      const cleanName = rawName.trim().slice(0, 50);
+      const cleanName = normalizeModifierName(rawName).slice(0, 60);
       if (!cleanName) {
         return { id: '', error: 'Escribe el nombre del modificador o extra.' };
       }
@@ -52,8 +46,8 @@ export function useModifiers(initialModifiers: ModifierOption[] = DEFAULT_MODIFI
         (m) => m.name.toLowerCase() === cleanName.toLowerCase()
       );
       if (existing) {
-        if (existing.priceCents !== priceCents) {
-          setModifiers((prev) =>
+        if (existing.source === 'custom' && existing.priceCents !== priceCents) {
+          setCustomModifiers((prev) =>
             prev.map((m) => (m.id === existing.id ? { ...m, priceCents } : m))
           );
         }
@@ -67,57 +61,72 @@ export function useModifiers(initialModifiers: ModifierOption[] = DEFAULT_MODIFI
         .replace(/[^a-z0-9]+/g, '_')
         .replace(/^_|_$/g, '');
       const id = `custom_${slug || 'extra'}_${Date.now().toString(36)}`;
-      setModifiers((prev) => [...prev, { id, name: cleanName, priceCents }]);
+      setCustomModifiers((prev) => [
+        ...prev,
+        { id, name: cleanName, priceCents, source: 'custom', saleEnabled: true },
+      ]);
       return { id };
     },
     []
   );
 
+  const updateCustomModifier = useCallback(
+    (id: string, rawName: string, pricePesos: number): { ok: boolean; error?: string } => {
+      const cleanName = normalizeModifierName(rawName).slice(0, 60);
+      if (!cleanName) {
+        return { ok: false, error: 'El nombre del modificador es obligatorio.' };
+      }
+      const safePesos = Number.isFinite(pricePesos) ? Math.max(0, pricePesos) : 0;
+      const priceCents = Math.round(safePesos * 100);
+
+      setCustomModifiers((prev) =>
+        prev.map((m) => (m.id === id ? { ...m, name: cleanName, priceCents } : m))
+      );
+      return { ok: true };
+    },
+    []
+  );
+
+  const removeCustomModifier = useCallback((id: string) => {
+    setCustomModifiers((prev) => prev.filter((m) => m.id !== id));
+  }, []);
+
   const calculateModifierTotal = useCallback(
     (selected: Record<string, boolean>): number => {
-      return modifiers
-        .filter((m) => selected[m.id])
-        .reduce((sum, m) => sum + m.priceCents, 0);
+      return calculateModifierSelectionTotal(modifiers, selected);
     },
     [modifiers]
   );
 
   const getModifiersArray = useCallback(
     (selected: Record<string, boolean>): OrderItemModifier[] => {
-      return modifiers
-        .filter((m) => selected[m.id])
-        .map((m) => ({ name: m.name, priceCents: m.priceCents }));
+      return getSelectedModifiersArray(modifiers, selected);
     },
     [modifiers]
   );
 
   const buildSelectionFromItem = useCallback((item: OrderItem): Record<string, boolean> => {
-    const itemMods = item.modifiers || item.modificadores || [];
-    const selectedMap: Record<string, boolean> = {};
-    const missingMods: ModifierOption[] = [];
-
-    for (const mod of itemMods) {
-      const existing = modifiersRef.current.find(
-        (m) => m.name.toLowerCase() === mod.name.toLowerCase()
-      );
-      if (existing) {
-        selectedMap[existing.id] = true;
-      } else {
-        const customId = `custom_loaded_${mod.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${missingMods.length}`;
-        missingMods.push({ id: customId, name: mod.name, priceCents: mod.priceCents || 0 });
-        selectedMap[customId] = true;
-      }
+    const { selected, unmatchedCustom } = matchItemModifiersToOptions(
+      item,
+      modifiersRef.current
+    );
+    if (unmatchedCustom.length > 0) {
+      setCustomModifiers((prev) => {
+        const existingNames = new Set(prev.map((m) => m.name.toLowerCase()));
+        const additions = unmatchedCustom.filter(
+          (m) => !existingNames.has(m.name.toLowerCase())
+        );
+        return additions.length > 0 ? [...prev, ...additions] : prev;
+      });
     }
-
-    if (missingMods.length > 0) {
-      setModifiers((prev) => [...prev, ...missingMods]);
-    }
-    return selectedMap;
+    return selected;
   }, []);
 
   return {
     modifiers,
     addCustomModifier,
+    updateCustomModifier,
+    removeCustomModifier,
     calculateModifierTotal,
     getModifiersArray,
     buildSelectionFromItem,

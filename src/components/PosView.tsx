@@ -12,7 +12,9 @@ import {
   ChefHat,
   Clock,
   Cloud,
+  Copy,
   DollarSign,
+  Edit3,
   FileText,
   Flame,
   LayoutDashboard,
@@ -25,12 +27,14 @@ import {
   Plus,
   Printer,
   Receipt,
+  RotateCcw,
   Scissors,
   Search,
   Server,
   Settings,
   Sparkles,
   Tag,
+  Trash2,
   UserCheck,
   UtensilsCrossed,
   WifiOff,
@@ -91,7 +95,9 @@ import {
   bootstrapWorkspace,
   deleteTerminalSession,
   ensureEmailList,
+  fsDeleteProduct,
   fsFetchSalesPage,
+  fsSaveProduct,
   fsUpdateStaffPin,
   fsVerifyAnyAdminPinFromFirestore,
   subscribeFirestoreSyncPulse,
@@ -130,6 +136,10 @@ import {
   filterCatalogProductsByHierarchy,
   MainCatalogCategory,
 } from '../utils/catalogHierarchy';
+import {
+  buildModifierProductKey,
+  normalizeModifierName,
+} from '../utils/modifiers';
 
 export { useModifiers };
 export type { ModifierOption };
@@ -182,14 +192,33 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [customModName, setCustomModName] = useState<string>('');
   const [customModPrice, setCustomModPrice] = useState<string>('0');
   const [customModError, setCustomModError] = useState<string>('');
+  const [modifierSearch, setModifierSearch] = useState<string>('');
+  const [editingModOptionId, setEditingModOptionId] = useState<string | null>(null);
+  const [editingModName, setEditingModName] = useState<string>('');
+  const [editingModPrice, setEditingModPrice] = useState<string>('0');
+  const [confirmDeleteModId, setConfirmDeleteModId] = useState<string | null>(null);
+
+  // Cart Inline Field Editor & Manual Item Modal State
+  const [editingCartItemFieldsId, setEditingCartItemFieldsId] = useState<string | null>(null);
+  const [editLinePrice, setEditLinePrice] = useState<string>('0');
+  const [editLineQty, setEditLineQty] = useState<string>('1');
+  const [editLineStation, setEditLineStation] = useState<'cocina' | 'barra'>('cocina');
+  const [manualItemModalOpen, setManualItemModalOpen] = useState<boolean>(false);
+  const [manualItemName, setManualItemName] = useState<string>('');
+  const [manualItemPrice, setManualItemPrice] = useState<string>('');
+  const [manualItemQty, setManualItemQty] = useState<string>('1');
+  const [manualItemStation, setManualItemStation] = useState<'cocina' | 'barra'>('cocina');
+  const [manualItemNote, setManualItemNote] = useState<string>('');
 
   const {
     modifiers,
     addCustomModifier,
+    updateCustomModifier,
+    removeCustomModifier,
     calculateModifierTotal,
     getModifiersArray,
     buildSelectionFromItem,
-  } = useModifiers();
+  } = useModifiers(state.products);
 
   // Hierarchical Filtering & Search (Categoría -> Subcategoría -> Grupo)
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -560,15 +589,20 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     selectedOrder,
     cartQtyMap,
     totalOccupiedTables,
+    hasUnsavedOrderChanges,
     loadOrderIntoDraft,
     startNewAccount,
     openLocationDraft,
     handleAddProduct,
     handleAddProductWithModifiers,
+    handleAddManualItem,
     handleUpdateQty,
     handleDecrementProductByKey,
     handleEditItemNote,
     handleToggleQuickModifier,
+    handleRemoveModifierFromCartItem,
+    handleEditCartItemFields,
+    handleDuplicateCartItem,
     handleCancelItem,
     handleSendOrder,
     handleAdvanceItemStatus,
@@ -579,6 +613,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     handleConfirmMergeOrders,
     handleCancelAccount,
     handleApplyDiscount,
+    handleClearDiscount,
     handleReopenLastSale,
     handleOpenDraftPreCheck,
   } = useOrderManager({
@@ -627,6 +662,10 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     notify,
   });
 
+  const canPersistCatalogModifiers = Boolean(
+    isAdminRole && (!firebaseUser || isFirebaseAdmin)
+  );
+
   const handleOpenNewProductModifiers = useCallback(
     (prod: SoftProduct) => {
       if (!activePerms?.canTakeOrders && !isAdminRole) {
@@ -641,6 +680,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       setCustomModName('');
       setCustomModPrice('0');
       setCustomModError('');
+      setModifierSearch('');
+      setEditingModOptionId(null);
+      setConfirmDeleteModId(null);
       setModifierModalProduct(prod);
     },
     [activePerms?.canTakeOrders, activeRole, isAdminRole, notify]
@@ -652,9 +694,295 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       setCustomModName('');
       setCustomModPrice('0');
       setCustomModError('');
+      setModifierSearch('');
+      setEditingModOptionId(null);
+      setConfirmDeleteModId(null);
       setEditingItemModifiers(buildSelectionFromItem(item));
     },
     [buildSelectionFromItem]
+  );
+
+  const handleCreateModifierInComandero = useCallback(
+    (
+      rawName: string,
+      pricePesos: number,
+      setActiveSelection: React.Dispatch<React.SetStateAction<Record<string, boolean>>>
+    ) => {
+      const cleanName = normalizeModifierName(rawName).slice(0, 60);
+      if (!cleanName) {
+        setCustomModError('Escribe el nombre del modificador o extra.');
+        return;
+      }
+      const safePesos = Number.isFinite(pricePesos) ? Math.max(0, pricePesos) : 0;
+      const existing = modifiers.find(
+        (m) => m.name.toLowerCase() === cleanName.toLowerCase()
+      );
+      if (existing) {
+        setActiveSelection((prev) => ({ ...prev, [existing.id]: true }));
+        setCustomModName('');
+        setCustomModPrice('0');
+        setCustomModError('');
+        notify(`Modificador "${existing.name}" seleccionado.`);
+        return;
+      }
+
+      if (canPersistCatalogModifiers) {
+        const newKey = buildModifierProductKey(
+          cleanName,
+          state.products.map((p) => p.key)
+        );
+        const priceCents = Math.round(safePesos * 100);
+        const newProd: SoftProduct = {
+          key: newKey,
+          name: cleanName,
+          group: '12',
+          category: 'MODIFICADORES',
+          station: 'cocina',
+          sourcePrice: safePesos,
+          priceCents,
+          saleEnabled: true,
+        };
+        const auditEntry: AuditLogEntry = {
+          id: uid(),
+          at: new Date().toISOString(),
+          user: state.activeUser.name,
+          action: 'Modificador creado en Comandero',
+          detail: `${cleanName} (${formatMoney(priceCents)}) sincronizado en catálogo`,
+        };
+        setState((prev) => ({
+          ...prev,
+          products: [newProd, ...prev.products],
+          audit: [...prev.audit, auditEntry],
+        }));
+        if (firebaseUser) {
+          void fsSaveProduct(
+            newProd,
+            firebaseUser,
+            auditEntry,
+            authorizedEmails,
+            workspaceOwnerUid
+          ).catch((err) => {
+            notify(
+              `Error guardando modificador en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`,
+              'error'
+            );
+          });
+        }
+        setActiveSelection((prev) => ({ ...prev, [`cat_${newKey}`]: true }));
+        setCustomModName('');
+        setCustomModPrice('0');
+        setCustomModError('');
+        notify(`Modificador "${cleanName}" agregado al catálogo y seleccionado.`, 'confirmed');
+        return;
+      }
+
+      const res = addCustomModifier(cleanName, safePesos);
+      if (res.error) {
+        setCustomModError(res.error);
+        return;
+      }
+      setActiveSelection((prev) => ({ ...prev, [res.id]: true }));
+      setCustomModName('');
+      setCustomModPrice('0');
+      setCustomModError('');
+      notify(`Extra temporal "${cleanName}" agregado a esta sesión.`);
+    },
+    [
+      addCustomModifier,
+      authorizedEmails,
+      canPersistCatalogModifiers,
+      firebaseUser,
+      modifiers,
+      notify,
+      state.activeUser.name,
+      state.products,
+      workspaceOwnerUid,
+    ]
+  );
+
+  const handleSaveEditModifierOption = useCallback(
+    (
+      mod: ModifierOption,
+      rawName: string,
+      pricePesos: number,
+      activeSelection: Record<string, boolean>,
+      setActiveSelection: React.Dispatch<React.SetStateAction<Record<string, boolean>>>
+    ) => {
+      const cleanName = normalizeModifierName(rawName).slice(0, 60);
+      if (!cleanName) {
+        setCustomModError('El nombre del modificador no puede quedar vacío.');
+        return;
+      }
+      const safePesos = Number.isFinite(pricePesos) ? Math.max(0, pricePesos) : 0;
+      const nextPriceCents = Math.round(safePesos * 100);
+
+      if (mod.source === 'custom') {
+        const res = updateCustomModifier(mod.id, cleanName, safePesos);
+        if (!res.ok) {
+          setCustomModError(res.error || 'Nombre inválido.');
+          return;
+        }
+        setCart((prev) =>
+          prev.map((item) => {
+            const mods = item.modifiers || item.modificadores;
+            if (!mods) return item;
+            const changed = mods.some(
+              (m) => m.name.toLowerCase() === mod.name.toLowerCase()
+            );
+            if (!changed) return item;
+            return {
+              ...item,
+              modifiers: mods.map((m) =>
+                m.name.toLowerCase() === mod.name.toLowerCase()
+                  ? { name: cleanName, priceCents: nextPriceCents }
+                  : m
+              ),
+            };
+          })
+        );
+        setEditingModOptionId(null);
+        setCustomModError('');
+        notify(`Extra "${cleanName}" actualizado.`, 'info');
+        return;
+      }
+
+      if (!canPersistCatalogModifiers) {
+        notify('Solo un Administrador puede editar modificadores globales del catálogo.', 'error');
+        return;
+      }
+
+      const targetProd = state.products.find((p) => p.key === mod.key);
+      if (!targetProd) return;
+      const updatedProd: SoftProduct = {
+        ...targetProd,
+        name: cleanName,
+        sourcePrice: safePesos,
+        priceCents: nextPriceCents,
+        saleEnabled: true,
+      };
+      const auditEntry: AuditLogEntry = {
+        id: uid(),
+        at: new Date().toISOString(),
+        user: state.activeUser.name,
+        action: 'Modificador editado en Comandero',
+        detail: `Clave ${updatedProd.key}: ${mod.name} → ${cleanName} (${formatMoney(nextPriceCents)})`,
+      };
+      setState((prev) => ({
+        ...prev,
+        products: prev.products.map((p) => (p.key === updatedProd.key ? updatedProd : p)),
+        audit: [...prev.audit, auditEntry],
+      }));
+      if (activeSelection[mod.id]) {
+        setCart((prev) =>
+          prev.map((item) => {
+            const mods = item.modifiers || item.modificadores;
+            if (!mods) return item;
+            const changed = mods.some(
+              (m) => m.name.toLowerCase() === mod.name.toLowerCase()
+            );
+            if (!changed) return item;
+            return {
+              ...item,
+              modifiers: mods.map((m) =>
+                m.name.toLowerCase() === mod.name.toLowerCase()
+                  ? { name: cleanName, priceCents: nextPriceCents }
+                  : m
+              ),
+            };
+          })
+        );
+      }
+      if (firebaseUser) {
+        void fsSaveProduct(
+          updatedProd,
+          firebaseUser,
+          auditEntry,
+          authorizedEmails,
+          workspaceOwnerUid
+        ).catch((err) => {
+          notify(
+            `Error actualizando modificador en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`,
+            'error'
+          );
+        });
+      }
+      setEditingModOptionId(null);
+      setCustomModError('');
+      if (activeSelection[mod.id]) {
+        setActiveSelection((prev) => ({ ...prev, [mod.id]: true }));
+      }
+      notify(`Modificador "${cleanName}" actualizado en catálogo y comandero.`, 'confirmed');
+    },
+    [
+      authorizedEmails,
+      canPersistCatalogModifiers,
+      firebaseUser,
+      notify,
+      setCart,
+      state.activeUser.name,
+      state.products,
+      updateCustomModifier,
+      workspaceOwnerUid,
+    ]
+  );
+
+  const handleDeleteModifierOption = useCallback(
+    (
+      mod: ModifierOption,
+      setActiveSelection: React.Dispatch<React.SetStateAction<Record<string, boolean>>>
+    ) => {
+      setActiveSelection((prev) => {
+        if (!prev[mod.id]) return prev;
+        const next = { ...prev };
+        delete next[mod.id];
+        return next;
+      });
+
+      if (mod.source === 'custom') {
+        removeCustomModifier(mod.id);
+        setConfirmDeleteModId(null);
+        notify(`Extra temporal "${mod.name}" eliminado.`, 'info');
+        return;
+      }
+
+      if (!canPersistCatalogModifiers) {
+        notify('Solo un Administrador puede eliminar modificadores globales del catálogo.', 'error');
+        setConfirmDeleteModId(null);
+        return;
+      }
+
+      if (!mod.key) return;
+      const auditEntry: AuditLogEntry = {
+        id: uid(),
+        at: new Date().toISOString(),
+        user: state.activeUser.name,
+        action: 'Modificador eliminado en Comandero',
+        detail: `Clave ${mod.key}: ${mod.name} eliminado del catálogo`,
+      };
+      setState((prev) => ({
+        ...prev,
+        products: prev.products.filter((p) => p.key !== mod.key),
+        audit: [...prev.audit, auditEntry],
+      }));
+      if (firebaseUser) {
+        void fsDeleteProduct(mod.key, firebaseUser, auditEntry, authorizedEmails).catch((err) => {
+          notify(
+            `Error eliminando modificador en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`,
+            'error'
+          );
+        });
+      }
+      setConfirmDeleteModId(null);
+      notify(`Modificador "${mod.name}" eliminado del catálogo.`, 'confirmed');
+    },
+    [
+      authorizedEmails,
+      canPersistCatalogModifiers,
+      firebaseUser,
+      notify,
+      removeCustomModifier,
+      state.activeUser.name,
+    ]
   );
 
   const handleClearActiveDraft = useCallback(() => {
@@ -728,9 +1056,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     canViewAdmin,
   ]);
 
-  const catalogModifiers = useMemo(
-    () => state.products.filter((p) => p.category === 'MODIFICADORES'),
-    [state.products]
+  const prepCatalogModifiers = useMemo(
+    () => modifiers.filter((m) => m.priceCents === 0),
+    [modifiers]
   );
 
   // Saleable products (excluding standalone MODIFICADORES catalog rows)
@@ -988,10 +1316,21 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
   const todayOrdersCount = useMemo(() => {
     const todayStr = toLocalDateKey(new Date());
-    return state.orders.filter(
-      (o) => toLocalDateKey(o.createdAt) === todayStr || toLocalDateKey(o.updatedAt) === todayStr
-    ).length;
-  }, [state.orders]);
+    const todayOpenIds = new Set<string>();
+    let count = 0;
+    for (const o of state.orders) {
+      if (toLocalDateKey(o.createdAt) === todayStr || toLocalDateKey(o.updatedAt) === todayStr) {
+        todayOpenIds.add(o.id);
+        count += 1;
+      }
+    }
+    for (const s of state.sales) {
+      if (toLocalDateKey(s.paidAt) === todayStr && (!s.orderId || !todayOpenIds.has(s.orderId))) {
+        count += 1;
+      }
+    }
+    return count;
+  }, [state.orders, state.sales]);
 
   // Tables map overview
   const tableLocations = useMemo(() => {
@@ -1850,9 +2189,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
                 {/* Product catalog column */}
                 <div className="xl:col-span-8 space-y-4 min-w-0">
-                  {/* Search Bar */}
-                  <div className="p-3.5 ios-glass-card">
-                    <div className="relative">
+                  {/* Search Bar + Manual Off-Menu Item Action */}
+                  <div className="p-3.5 ios-glass-card flex flex-col sm:flex-row gap-2.5">
+                    <div className="relative flex-1">
                       <input
                         type="text"
                         value={searchQuery}
@@ -1873,6 +2212,20 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                         </button>
                       )}
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setManualItemName('');
+                        setManualItemPrice('');
+                        setManualItemQty('1');
+                        setManualItemStation('cocina');
+                        setManualItemNote('');
+                        setManualItemModalOpen(true);
+                      }}
+                      className="min-h-[44px] px-4 py-2 rounded-2xl bg-[#c8a84b]/15 hover:bg-[#c8a84b] text-[#e8d090] hover:text-[#0a0a0b] border border-[#c8a84b]/45 text-xs font-bold inline-flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors"
+                    >
+                      <Plus className="w-4 h-4 shrink-0" /> Artículo Manual
+                    </button>
                   </div>
 
                   {/* Quick-Fire Favorites Strip ("Más Pedidos") */}
@@ -2075,9 +2428,16 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                 >
                   <div className="flex items-center justify-between pb-3 border-b border-white/10">
                     <div>
-                      <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">
-                        {currentOrderId ? `Cuenta #${selectedOrder?.number || ''}` : 'Nueva Comanda'}
-                      </h3>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">
+                          {currentOrderId ? `Cuenta #${selectedOrder?.number || ''}` : 'Nueva Comanda'}
+                        </h3>
+                        {currentOrderId && hasUnsavedOrderChanges && (
+                          <span className="px-2 py-0.5 rounded-full bg-[#e5a43b]/20 text-[#e8d090] border border-[#e5a43b]/40 text-[10px] font-bold uppercase tracking-wider">
+                            Cambios sin enviar
+                          </span>
+                        )}
+                      </div>
                       <p className="text-xs text-[#e8d090] font-medium">
                         {locationLabel(currentService, currentTable)}
                       </p>
@@ -2249,8 +2609,22 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                               {(item.modifiers || item.modificadores || []).length > 0 && (
                                 <div className="flex flex-wrap gap-1 mt-1">
                                   {(item.modifiers || item.modificadores || []).map((mod, mi) => (
-                                    <span key={mi} className="px-2 py-0.5 rounded-lg bg-[#c8a84b]/15 text-[#e8d090] text-[10px] font-semibold border border-[#c8a84b]/30">
-                                      {mod.name} {mod.priceCents > 0 ? `(+${formatMoney(mod.priceCents)})` : ''}
+                                    <span
+                                      key={`${mod.name}-${mi}`}
+                                      className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-lg bg-[#c8a84b]/15 text-[#e8d090] text-[10px] font-semibold border border-[#c8a84b]/30"
+                                    >
+                                      <span>
+                                        {mod.name} {mod.priceCents > 0 ? `(+${formatMoney(mod.priceCents)})` : ''}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRemoveModifierFromCartItem(targetId, mi)}
+                                        aria-label={`Quitar modificador ${mod.name}`}
+                                        title={`Quitar ${mod.name}`}
+                                        className="w-4 h-4 rounded-full hover:bg-[#e05252]/30 text-[#e8d090] hover:text-white flex items-center justify-center transition-colors"
+                                      >
+                                        <X className="w-2.5 h-2.5" />
+                                      </button>
                                     </span>
                                   ))}
                                 </div>
@@ -2262,31 +2636,126 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                 </div>
                               )}
 
-                              <div className="flex items-center justify-between pt-1 border-t border-white/10 text-xs">
-                                <div className="flex gap-3">
+                              {editingCartItemFieldsId === targetId && (
+                                <div className="p-2.5 rounded-xl bg-[#16191f] border border-[#c8a84b]/40 space-y-2 text-[11px]">
+                                  <div className="grid grid-cols-3 gap-2">
+                                    <div>
+                                      <label className="block text-[rgba(240,230,211,0.62)] mb-0.5 font-semibold">
+                                        Precio ($)
+                                      </label>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        step="0.5"
+                                        value={editLinePrice}
+                                        onChange={(e) => setEditLinePrice(e.target.value)}
+                                        className="w-full min-h-[34px] px-2 py-1 rounded-lg bg-[#0a0a0b] border border-white/15 text-white font-mono tabular-nums"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block text-[rgba(240,230,211,0.62)] mb-0.5 font-semibold">
+                                        Cantidad
+                                      </label>
+                                      <input
+                                        type="number"
+                                        min="1"
+                                        max="99"
+                                        value={editLineQty}
+                                        onChange={(e) => setEditLineQty(e.target.value)}
+                                        className="w-full min-h-[34px] px-2 py-1 rounded-lg bg-[#0a0a0b] border border-white/15 text-white font-mono tabular-nums"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block text-[rgba(240,230,211,0.62)] mb-0.5 font-semibold">
+                                        Estación
+                                      </label>
+                                      <select
+                                        value={editLineStation}
+                                        onChange={(e) => setEditLineStation(e.target.value as 'cocina' | 'barra')}
+                                        className="w-full min-h-[34px] px-2 py-1 rounded-lg bg-[#0a0a0b] border border-white/15 text-white font-semibold"
+                                      >
+                                        <option value="cocina">Cocina</option>
+                                        <option value="barra">Barra</option>
+                                      </select>
+                                    </div>
+                                  </div>
+                                  <div className="flex justify-end gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingCartItemFieldsId(null)}
+                                      className="px-2.5 py-1 rounded-lg bg-white/[0.06] text-white font-semibold"
+                                    >
+                                      Cerrar
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const ok = handleEditCartItemFields(targetId, {
+                                          pricePesos: Number(editLinePrice),
+                                          qty: Number(editLineQty),
+                                          station: editLineStation,
+                                        });
+                                        if (ok) setEditingCartItemFieldsId(null);
+                                      }}
+                                      className="px-3 py-1 rounded-lg bg-[#c8a84b] text-[#0a0a0b] font-bold"
+                                    >
+                                      Aplicar
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                              <div className="flex items-center justify-between pt-1.5 border-t border-white/10 text-[11px] gap-1.5">
+                                <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 min-w-0">
                                   <button
                                     type="button"
                                     onClick={() => handleOpenCartItemModifiers(item, idx)}
-                                    className="text-[#c8a84b] hover:underline font-semibold"
+                                    title="Modificar extras y preparación"
+                                    className="text-[#c8a84b] hover:underline font-semibold whitespace-nowrap"
                                   >
-                                    ⚙️ Modificar
+                                    ⚙️ Mods
                                   </button>
                                   <button
                                     type="button"
                                     onClick={() => handleEditItemNote(targetId)}
-                                    className="text-[rgba(240,230,211,0.68)] hover:text-[#e8d090] font-semibold"
+                                    className="text-[rgba(240,230,211,0.68)] hover:text-[#e8d090] font-semibold whitespace-nowrap"
                                   >
-                                    {item.note ? 'Editar nota' : '+ Nota'}
+                                    {item.note ? 'Nota' : '+ Nota'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (editingCartItemFieldsId === targetId) {
+                                        setEditingCartItemFieldsId(null);
+                                      } else {
+                                        setEditingCartItemFieldsId(targetId);
+                                        setEditLinePrice(String(item.priceCents / 100));
+                                        setEditLineQty(String(item.qty));
+                                        setEditLineStation(item.station || 'cocina');
+                                      }
+                                    }}
+                                    className="text-[rgba(240,230,211,0.68)] hover:text-white font-semibold inline-flex items-center gap-0.5 whitespace-nowrap"
+                                    title="Editar precio, cantidad o estación"
+                                  >
+                                    <Edit3 className="w-3 h-3" /> Editar
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDuplicateCartItem(targetId)}
+                                    className="text-[rgba(240,230,211,0.68)] hover:text-white font-semibold inline-flex items-center gap-0.5 whitespace-nowrap"
+                                    title="Duplicar línea en comanda"
+                                  >
+                                    <Copy className="w-3 h-3" />
                                   </button>
                                   <button
                                     type="button"
                                     onClick={() => handleCancelItem(targetId)}
-                                    className="text-[#e05252] hover:underline font-semibold"
+                                    className="text-[#e05252] hover:underline font-semibold whitespace-nowrap"
                                   >
                                     Cancelar
                                   </button>
                                 </div>
-                                <span className="font-mono font-bold text-white tabular-nums">
+                                <span className="font-mono text-xs font-bold text-white tabular-nums shrink-0">
                                   {formatMoney(lineTotalCents(item))}
                                 </span>
                               </div>
@@ -2315,8 +2784,28 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                       <span>{formatMoney(subtotalCents(cart))}</span>
                     </div>
                     {selectedOrder && selectedOrder.discountCents > 0 && (
-                      <div className="flex justify-between text-[#25d366] font-bold">
-                        <span>Descuento autorizado</span>
+                      <div className="flex items-center justify-between text-[#25d366] font-bold gap-2">
+                        <span className="flex items-center gap-2">
+                          <span>Descuento autorizado</span>
+                          {canApplyDiscount && (
+                            <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold">
+                              <button
+                                type="button"
+                                onClick={handleApplyDiscount}
+                                className="text-[#e8d090] hover:underline"
+                              >
+                                Editar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleClearDiscount()}
+                                className="text-[#e05252] hover:underline"
+                              >
+                                Quitar
+                              </button>
+                            </span>
+                          )}
+                        </span>
                         <span>- {formatMoney(selectedOrder.discountCents)}</span>
                       </div>
                     )}
@@ -2496,6 +2985,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               onExportSalesCsv={handleExportSalesCsv}
               onReopenLastSale={handleReopenLastSale}
               onOpenPreCheck={handleOpenPreCheck}
+              onEditOrder={canViewPos ? loadOrderIntoDraft : undefined}
               onOpenReceipt={setActiveReceiptSale}
               onNotify={notify}
             />
@@ -2794,20 +3284,20 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               })}
             </div>
 
-            {catalogModifiers.length > 0 && (
+            {prepCatalogModifiers.length > 0 && (
               <div className="space-y-1.5">
                 <span className="block text-xs uppercase tracking-[0.06em] text-[rgba(240,230,211,0.58)] font-semibold">
-                  Modificadores de carta
+                  Modificadores de carta ($0)
                 </span>
-                <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
-                  {catalogModifiers.map((mod) => {
+                <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
+                  {prepCatalogModifiers.map((mod) => {
                     const active = itemNoteValue
                       .split(',')
                       .map((s) => s.trim().toLowerCase())
                       .includes(mod.name.toLowerCase());
                     return (
                       <button
-                        key={mod.key}
+                        key={mod.id}
                         type="button"
                         onClick={() => handleToggleQuickModifier(mod.name)}
                         className={`min-h-[34px] px-3 py-1 rounded-full text-xs font-semibold border transition-colors ${
@@ -2825,9 +3315,36 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
             )}
 
             <div>
-              <label className="block text-xs uppercase tracking-[0.06em] text-[rgba(240,230,211,0.58)] font-semibold mb-1.5">
-                Nota personalizada
-              </label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs uppercase tracking-[0.06em] text-[rgba(240,230,211,0.58)] font-semibold">
+                  Nota personalizada
+                </label>
+                <div className="flex items-center gap-3 text-[11px]">
+                  {itemNoteValue && (
+                    <button
+                      type="button"
+                      onClick={() => setItemNoteValue('')}
+                      className="text-[#e05252] hover:underline font-semibold inline-flex items-center gap-1"
+                    >
+                      <RotateCcw className="w-3 h-3" /> Limpiar
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const idx = cart.findIndex((i) => (i.lineId || i.key) === itemNoteModal.targetId);
+                      if (idx >= 0) {
+                        const target = cart[idx];
+                        setItemNoteModal(null);
+                        handleOpenCartItemModifiers(target, idx);
+                      }
+                    }}
+                    className="text-[#c8a84b] hover:underline font-semibold"
+                  >
+                    Extras con precio →
+                  </button>
+                </div>
+              </div>
               <input
                 type="text"
                 value={itemNoteValue}
@@ -3448,23 +3965,32 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         const modalTitle = activeProduct
           ? `Modificar: ${activeProduct.name}`
           : `Modificar ítem: ${editingItem?.name || ''}`;
+        const modQuery = modifierSearch.trim().toLowerCase();
+        const visibleModifiers = modQuery
+          ? modifiers.filter((m) => m.name.toLowerCase().includes(modQuery))
+          : modifiers;
+        const appliedCount = Object.values(activeSelection).filter(Boolean).length;
 
         const closeModal = () => {
           setModifierModalProduct(null);
           setSelectedModifiers({});
           setEditingCartItemIndex(null);
+          setModifierSearch('');
+          setEditingModOptionId(null);
+          setConfirmDeleteModId(null);
+          setCustomModError('');
         };
 
         return (
           <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
-            <div className="ios-glass-modal w-full max-w-md rounded-[28px] p-6 space-y-4 text-left max-h-[90dvh] overflow-y-auto">
+            <div className="ios-glass-modal w-full max-w-lg rounded-[28px] p-6 space-y-4 text-left max-h-[90dvh] overflow-y-auto">
               <div className="flex items-start justify-between gap-3 pb-3 border-b border-white/10">
                 <div>
                   <h3 className="font-serif font-bold text-xl text-white tracking-[-0.02em]">
                     {modalTitle}
                   </h3>
                   <p className="text-xs text-[rgba(240,230,211,0.68)] mt-0.5 tabular-nums">
-                    Base: {formatMoney(basePrice)} · Extras: +{formatMoney(extraCents)} ·{' '}
+                    Base: {formatMoney(basePrice)} · Extras ({appliedCount}): +{formatMoney(extraCents)} ·{' '}
                     <strong className="text-[#e8d090]">
                       Total{editingItem ? ' unitario' : ''}: {formatMoney(basePrice + extraCents)}
                     </strong>
@@ -3480,42 +4006,259 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                 </button>
               </div>
 
-              <div className="space-y-3">
-                <label className="block text-xs font-bold text-[#c8a84b] uppercase tracking-wider">
-                  Modificadores e Ingredientes
-                </label>
-                <div className="grid grid-cols-1 gap-2 max-h-56 overflow-y-auto pr-1">
-                  {modifiers.map((mod) => {
-                    const isSelected = !!activeSelection[mod.id];
-                    return (
-                      <button
-                        key={mod.id}
-                        type="button"
-                        onClick={() => setActiveSelection((prev) => ({ ...prev, [mod.id]: !prev[mod.id] }))}
-                        className={`w-full min-h-[42px] px-3.5 py-2 rounded-2xl border text-xs font-semibold flex items-center justify-between transition-all ${
-                          isSelected
-                            ? 'bg-[#c8a84b]/20 border-[#c8a84b] text-white font-bold'
-                            : 'bg-white/[0.04] border-white/10 text-[rgba(240,230,211,0.78)] hover:bg-white/[0.08]'
-                        }`}
-                      >
-                        <span className="flex items-center gap-2">
-                          <span className={`w-4 h-4 rounded-md border flex items-center justify-center text-[10px] ${isSelected ? 'bg-[#c8a84b] border-[#c8a84b] text-[#0a0a0b] font-bold' : 'border-white/30'}`}>
-                            {isSelected ? '✓' : ''}
+              {/* Quick removable bar for currently applied modifiers */}
+              {appliedCount > 0 && (
+                <div className="p-2.5 rounded-2xl bg-[#173c34]/45 border border-[#c8a84b]/35 space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-bold text-[#e8d090] uppercase tracking-wider">
+                      Seleccionados ({appliedCount})
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveSelection({})}
+                      className="text-[#e05252] hover:underline font-semibold"
+                    >
+                      Quitar todos
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {modifiers
+                      .filter((m) => activeSelection[m.id])
+                      .map((m) => (
+                        <span
+                          key={`sel-${m.id}`}
+                          className="inline-flex items-center gap-1 pl-2.5 pr-1 py-0.5 rounded-full bg-[#c8a84b] text-[#0a0a0b] text-[11px] font-bold"
+                        >
+                          <span>
+                            {m.name} {m.priceCents > 0 ? `(+${formatMoney(m.priceCents)})` : ''}
                           </span>
-                          {mod.name}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setActiveSelection((prev) => ({ ...prev, [m.id]: false }))
+                            }
+                            aria-label={`Quitar ${m.name}`}
+                            className="w-4 h-4 rounded-full bg-black/15 hover:bg-black/30 flex items-center justify-center"
+                          >
+                            <X className="w-2.5 h-2.5" />
+                          </button>
                         </span>
-                        <span className="font-mono text-[#e8d090] tabular-nums">
-                          {mod.priceCents > 0 ? `+ ${formatMoney(mod.priceCents)}` : 'Incluido'}
-                        </span>
-                      </button>
-                    );
-                  })}
+                      ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="block text-xs font-bold text-[#c8a84b] uppercase tracking-wider">
+                    Catálogo de Modificadores ({visibleModifiers.length})
+                  </label>
+                  <span className="text-[11px] text-[rgba(240,230,211,0.55)]">
+                    Sincronizado con Administración
+                  </span>
                 </div>
 
-                {/* Define custom modifier inline */}
+                {/* Search modifiers */}
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={modifierSearch}
+                    onChange={(e) => setModifierSearch(e.target.value)}
+                    placeholder="Buscar modificador (ej. queso, salsa, término)..."
+                    aria-label="Buscar modificador"
+                    className="w-full min-h-[38px] pl-9 pr-8 py-1.5 rounded-xl bg-[#0a0a0b]/70 border border-white/10 text-xs text-white placeholder-[rgba(240,230,211,0.45)] focus:outline-none focus:border-[#c8a84b]"
+                  />
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-[rgba(240,230,211,0.5)]" />
+                  {modifierSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setModifierSearch('')}
+                      aria-label="Limpiar búsqueda de modificadores"
+                      className="absolute right-2 top-1.5 w-6 h-6 rounded-lg flex items-center justify-center text-[rgba(240,230,211,0.6)] hover:text-white"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 gap-2 max-h-60 overflow-y-auto pr-1">
+                  {visibleModifiers.length === 0 ? (
+                    <div className="py-6 text-center text-xs text-[rgba(240,230,211,0.5)]">
+                      No hay modificadores que coincidan con "{modifierSearch}".
+                    </div>
+                  ) : (
+                    visibleModifiers.map((mod) => {
+                      const isSelected = !!activeSelection[mod.id];
+                      const isRowEditing = editingModOptionId === mod.id;
+                      const isConfirmingDelete = confirmDeleteModId === mod.id;
+                      const canManageMod =
+                        mod.source === 'custom' || canPersistCatalogModifiers;
+
+                      if (isRowEditing) {
+                        return (
+                          <div
+                            key={mod.id}
+                            className="p-2.5 rounded-2xl bg-[#16191f] border border-[#c8a84b] space-y-2"
+                          >
+                            <div className="flex gap-2">
+                              <input
+                                type="text"
+                                value={editingModName}
+                                onChange={(e) => setEditingModName(e.target.value)}
+                                aria-label="Editar nombre del modificador"
+                                className="flex-1 min-w-0 min-h-[36px] px-2.5 py-1 rounded-xl bg-[#0a0a0b] border border-white/15 text-xs text-white focus:outline-none focus:border-[#c8a84b]"
+                              />
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.5"
+                                value={editingModPrice}
+                                onChange={(e) => setEditingModPrice(e.target.value)}
+                                aria-label="Editar precio del modificador"
+                                className="w-20 min-h-[36px] px-2 py-1 rounded-xl bg-[#0a0a0b] border border-white/15 text-xs text-white font-mono text-right focus:outline-none focus:border-[#c8a84b]"
+                              />
+                            </div>
+                            <div className="flex justify-end gap-1.5 text-[11px]">
+                              <button
+                                type="button"
+                                onClick={() => setEditingModOptionId(null)}
+                                className="px-3 py-1 rounded-lg bg-white/[0.06] text-white font-semibold"
+                              >
+                                Cancelar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleSaveEditModifierOption(
+                                    mod,
+                                    editingModName,
+                                    Number(editingModPrice) || 0,
+                                    activeSelection,
+                                    setActiveSelection
+                                  )
+                                }
+                                className="px-3 py-1 rounded-lg bg-[#25d366] text-[#0a0a0b] font-bold"
+                              >
+                                Guardar
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <div
+                          key={mod.id}
+                          className={`w-full min-h-[42px] px-3 py-1.5 rounded-2xl border text-xs flex items-center justify-between gap-2 transition-all ${
+                            isSelected
+                              ? 'bg-[#c8a84b]/20 border-[#c8a84b] text-white'
+                              : 'bg-white/[0.04] border-white/10 text-[rgba(240,230,211,0.82)] hover:bg-white/[0.08]'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setActiveSelection((prev) => ({ ...prev, [mod.id]: !prev[mod.id] }))
+                            }
+                            className="flex-1 min-w-0 flex items-center justify-between gap-2 text-left py-1"
+                          >
+                            <span className="flex items-center gap-2 min-w-0">
+                              <span
+                                className={`w-4 h-4 rounded-md border flex items-center justify-center text-[10px] shrink-0 ${
+                                  isSelected
+                                    ? 'bg-[#c8a84b] border-[#c8a84b] text-[#0a0a0b] font-bold'
+                                    : 'border-white/30'
+                                }`}
+                              >
+                                {isSelected ? '✓' : ''}
+                              </span>
+                              <span className="font-semibold truncate">{mod.name}</span>
+                              <span
+                                className={`px-1.5 py-0.5 rounded-md text-[9px] font-bold uppercase shrink-0 ${
+                                  mod.source === 'catalog'
+                                    ? 'bg-white/10 text-[#e8d090]'
+                                    : 'bg-[#25d366]/15 text-[#25d366]'
+                                }`}
+                              >
+                                {mod.source === 'catalog' ? 'Catálogo' : 'Sesión'}
+                              </span>
+                            </span>
+                            <span className="font-mono text-[#e8d090] tabular-nums shrink-0">
+                              {mod.priceCents > 0 ? `+ ${formatMoney(mod.priceCents)}` : 'Incluido'}
+                            </span>
+                          </button>
+
+                          {canManageMod && (
+                            <div className="flex items-center gap-1 shrink-0 pl-1 border-l border-white/10">
+                              {isConfirmingDelete ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleDeleteModifierOption(mod, setActiveSelection)
+                                    }
+                                    className="px-2 py-1 rounded-lg bg-[#e05252] text-white text-[10px] font-bold"
+                                  >
+                                    Borrar
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmDeleteModId(null)}
+                                    className="px-1.5 py-1 rounded-lg bg-white/10 text-white text-[10px]"
+                                  >
+                                    No
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setConfirmDeleteModId(null);
+                                      setEditingModOptionId(mod.id);
+                                      setEditingModName(mod.name);
+                                      setEditingModPrice(String(mod.priceCents / 100));
+                                    }}
+                                    aria-label={`Editar modificador ${mod.name}`}
+                                    title="Editar modificador"
+                                    className="w-7 h-7 rounded-lg bg-white/[0.06] hover:bg-white/[0.14] text-[#e8d090] flex items-center justify-center"
+                                  >
+                                    <Edit3 className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingModOptionId(null);
+                                      if (mod.source === 'custom') {
+                                        handleDeleteModifierOption(mod, setActiveSelection);
+                                      } else {
+                                        setConfirmDeleteModId(mod.id);
+                                      }
+                                    }}
+                                    aria-label={`Eliminar modificador ${mod.name}`}
+                                    title="Eliminar modificador"
+                                    className="w-7 h-7 rounded-lg bg-[#e05252]/15 hover:bg-[#e05252]/30 text-[#e05252] flex items-center justify-center"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* Define custom / catalog modifier inline */}
                 <div className="p-3 rounded-2xl bg-[#0a0a0b]/55 border border-white/10 space-y-2">
-                  <div className="text-[11px] font-bold uppercase tracking-wider text-[rgba(240,230,211,0.7)]">
-                    Definir extra personalizado
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-bold uppercase tracking-wider text-[rgba(240,230,211,0.7)]">
+                      {canPersistCatalogModifiers
+                        ? 'Agregar modificador al catálogo'
+                        : 'Definir extra temporal (sesión)'}
+                    </span>
                   </div>
                   <div className="flex gap-2">
                     <input
@@ -3541,17 +4284,13 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                     />
                     <button
                       type="button"
-                      onClick={() => {
-                        const res = addCustomModifier(customModName, Number(customModPrice) || 0);
-                        if (res.error) {
-                          setCustomModError(res.error);
-                          return;
-                        }
-                        setActiveSelection((prev) => ({ ...prev, [res.id]: true }));
-                        setCustomModName('');
-                        setCustomModPrice('0');
-                        setCustomModError('');
-                      }}
+                      onClick={() =>
+                        handleCreateModifierInComandero(
+                          customModName,
+                          Number(customModPrice) || 0,
+                          setActiveSelection
+                        )
+                      }
                       className="min-h-[38px] px-3 rounded-xl bg-[#173c34] hover:bg-[#28584c] text-[#25d366] font-bold text-xs shrink-0"
                     >
                       + Crear
@@ -3602,6 +4341,136 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           </div>
         );
       })()}
+
+      {/* Manual Off-Menu Item Modal */}
+      {manualItemModalOpen && (
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
+          <div className="ios-glass-modal max-w-md w-full p-6 space-y-4 text-left">
+            <div className="flex items-center justify-between pb-2 border-b border-white/10">
+              <div>
+                <h3 className="font-serif font-bold text-base text-white tracking-[-0.02em]">
+                  Agregar Artículo Manual
+                </h3>
+                <p className="text-xs text-[rgba(240,230,211,0.62)]">
+                  Captura un platillo especial, descorche o cargo fuera de carta.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setManualItemModalOpen(false)}
+                aria-label="Cerrar artículo manual"
+                className="w-9 h-9 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const ok = handleAddManualItem({
+                  name: manualItemName,
+                  pricePesos: Number(manualItemPrice),
+                  qty: Number(manualItemQty),
+                  station: manualItemStation,
+                  note: manualItemNote,
+                });
+                if (ok) {
+                  setManualItemModalOpen(false);
+                }
+              }}
+              className="space-y-3 text-xs"
+            >
+              <div>
+                <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">
+                  Nombre o Descripción *
+                </label>
+                <input
+                  required
+                  autoFocus
+                  placeholder="Ej. Descorche Botella / Orden Especial"
+                  value={manualItemName}
+                  onChange={(e) => setManualItemName(e.target.value)}
+                  className="w-full min-h-[42px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white font-semibold focus:outline-none focus:border-[#c8a84b]"
+                />
+              </div>
+
+              <div className="grid grid-cols-3 gap-2.5">
+                <div>
+                  <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">
+                    Precio ($ MXN) *
+                  </label>
+                  <input
+                    required
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    placeholder="0.00"
+                    value={manualItemPrice}
+                    onChange={(e) => setManualItemPrice(e.target.value)}
+                    className="w-full min-h-[42px] px-3 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-[#c8a84b]/60 text-white font-mono tabular-nums font-bold focus:outline-none focus:border-[#c8a84b]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">
+                    Cantidad
+                  </label>
+                  <input
+                    required
+                    type="number"
+                    min="1"
+                    max="99"
+                    value={manualItemQty}
+                    onChange={(e) => setManualItemQty(e.target.value)}
+                    className="w-full min-h-[42px] px-3 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white font-mono tabular-nums focus:outline-none focus:border-[#c8a84b]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">
+                    Estación
+                  </label>
+                  <select
+                    value={manualItemStation}
+                    onChange={(e) => setManualItemStation(e.target.value as 'cocina' | 'barra')}
+                    className="w-full min-h-[42px] px-2.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white font-semibold focus:outline-none focus:border-[#c8a84b]"
+                  >
+                    <option value="cocina">Cocina</option>
+                    <option value="barra">Barra</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">
+                  Nota para preparación (opcional)
+                </label>
+                <input
+                  placeholder="Ej. Sin sal, servir aparte..."
+                  value={manualItemNote}
+                  onChange={(e) => setManualItemNote(e.target.value)}
+                  className="w-full min-h-[42px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/75 border border-white/10 text-white focus:outline-none focus:border-[#c8a84b]"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setManualItemModalOpen(false)}
+                  className="min-h-[42px] px-4 py-2 rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] text-xs font-semibold text-white transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="min-h-[42px] px-5 py-2 rounded-2xl text-xs font-bold bg-[#c8a84b] hover:bg-[#e8d090] text-[#0a0a0b] transition-colors"
+                >
+                  Añadir a Comanda
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Non-intrusive Animated Toast Notification */}
       <ToastNotification

@@ -13,7 +13,6 @@ import {
   EyeOff,
   FileSpreadsheet,
   FolderArchive,
-  FolderSync,
   History,
   Lock,
   Plus,
@@ -60,9 +59,9 @@ import {
   sanitizeFirestoreId,
 } from '../lib/firestoreSync';
 import { BarbachuLogo } from './BarbachuLogo';
-import { GoogleDriveMergePanel } from './GoogleDriveMergePanel';
 import { IosPinPadModal } from './IosPinPadModal';
 import { downloadCsvFile } from '../utils/csv';
+import { isCatalogModifierActive } from '../utils/modifiers';
 import { hashPin, isValidFourDigitPin, isWeakDefaultPin, verifyPinSecret } from '../utils/pinSecurity';
 
 interface AdminDashboardProps {
@@ -129,6 +128,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [customCat, setCustomCat] = useState<string>('');
   const [batchPercent, setBatchPercent] = useState<string>('');
   const [confirmDeleteProd, setConfirmDeleteProd] = useState<SoftProduct | null>(null);
+  const [editingProduct, setEditingProduct] = useState<SoftProduct | null>(null);
+  const [editProdName, setEditProdName] = useState<string>('');
+  const [editProdPrice, setEditProdPrice] = useState<string>('');
+  const [editProdCat, setEditProdCat] = useState<string>('BOTANAS');
+  const [editCustomCat, setEditCustomCat] = useState<string>('');
+  const [editProdStation, setEditProdStation] = useState<'cocina' | 'barra'>('cocina');
+  const [editProdEnabled, setEditProdEnabled] = useState<boolean>(true);
 
   // Gestión de Empleados filters + Create / Full Edit / Delete state (PIN always hidden by default)
   const [employeeSearch, setEmployeeSearch] = useState<string>('');
@@ -275,7 +281,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       ...prod,
       sourcePrice: priceNum,
       priceCents,
-      saleEnabled: priceCents > 0,
+      saleEnabled:
+        prod.category === 'MODIFICADORES' ? Boolean(prod.saleEnabled) || priceCents === 0 : priceCents > 0,
       station: prod.station || classifyProductStation(prod.category),
     };
     const auditEntry: AuditLogEntry = {
@@ -354,13 +361,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       return;
     }
     const priceNum = Number(newProdPrice);
-    if (!Number.isFinite(priceNum) || priceNum <= 0) {
-      notify('Ingresa un precio mayor a 0.');
-      return;
-    }
     const category = newProdCat === '__OTRA__' ? customCat.trim().toUpperCase() : newProdCat;
     if (!category) {
       notify('Especifica la categoría.');
+      return;
+    }
+    const isModifierCat = category === 'MODIFICADORES';
+    if (!Number.isFinite(priceNum) || (isModifierCat ? priceNum < 0 : priceNum <= 0)) {
+      notify(isModifierCat ? 'Ingresa un precio de 0 o mayor.' : 'Ingresa un precio mayor a 0.');
       return;
     }
 
@@ -375,7 +383,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const newProduct: SoftProduct = {
       key,
       name,
-      group: '1',
+      group: isModifierCat ? '12' : '1',
       category,
       station: classifyProductStation(category),
       sourcePrice: priceNum,
@@ -388,7 +396,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       id: uid(),
       at: now,
       user: actingAdminName,
-      action: 'Producto agregado',
+      action: isModifierCat ? 'Modificador agregado' : 'Producto agregado',
       detail: `Clave ${key}: ${name} (${category}) por ${formatMoney(priceCents)}`,
     };
 
@@ -409,7 +417,88 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setNewProdKey('');
     setNewProdPrice('');
     setCustomCat('');
-    notify(`Platillo "${name}" agregado al catálogo.`);
+    notify(`${isModifierCat ? 'Modificador' : 'Platillo'} "${name}" agregado al catálogo.`);
+  };
+
+  const handleOpenEditProduct = (prod: SoftProduct) => {
+    if (!isAdminAuthorized) {
+      notify('Acceso restringido: se requiere rol de Administrador.');
+      return;
+    }
+    setEditingProduct(prod);
+    setEditProdName(prod.name);
+    setEditProdPrice(String(prod.priceCents / 100));
+    setEditProdCat(prod.category || 'BOTANAS');
+    setEditCustomCat('');
+    setEditProdStation(prod.station || classifyProductStation(prod.category));
+    setEditProdEnabled(
+      prod.category === 'MODIFICADORES' ? isCatalogModifierActive(prod) : Boolean(prod.saleEnabled)
+    );
+  };
+
+  const handleSaveEditProduct = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingProduct) return;
+    if (!isAdminAuthorized) {
+      notify('Acceso restringido: se requiere rol de Administrador.');
+      return;
+    }
+    const cleanName = editProdName.trim();
+    if (!cleanName) {
+      notify('Ingresa el nombre del producto o modificador.');
+      return;
+    }
+    const category = editProdCat === '__OTRA__' ? editCustomCat.trim().toUpperCase() : editProdCat;
+    if (!category) {
+      notify('Especifica la categoría.');
+      return;
+    }
+    const priceNum = Number(editProdPrice);
+    const isModifierCat = category === 'MODIFICADORES';
+    if (!Number.isFinite(priceNum) || (isModifierCat ? priceNum < 0 : priceNum < 0)) {
+      notify('Ingresa un precio válido ($0.00 o mayor).');
+      return;
+    }
+    if (!isModifierCat && editProdEnabled && priceNum <= 0) {
+      notify('Un platillo o bebida habilitado para venta debe tener precio mayor a 0.');
+      return;
+    }
+
+    const priceCents = Math.round(priceNum * 100);
+    const updatedProd: SoftProduct = {
+      ...editingProduct,
+      name: cleanName,
+      category,
+      group: isModifierCat ? editingProduct.group || '12' : editingProduct.group || '1',
+      station: editProdStation,
+      sourcePrice: priceNum,
+      priceCents,
+      saleEnabled: editProdEnabled,
+    };
+
+    const now = new Date().toISOString();
+    const auditEntry: AuditLogEntry = {
+      id: uid(),
+      at: now,
+      user: actingAdminName,
+      action: isModifierCat ? 'Modificador editado' : 'Producto editado',
+      detail: `Clave ${updatedProd.key}: ${cleanName} (${category} · ${editProdStation.toUpperCase()}) · ${formatMoney(priceCents)}`,
+    };
+
+    setState((prev) => ({
+      ...prev,
+      products: prev.products.map((p) => (p.key === updatedProd.key ? updatedProd : p)),
+      audit: [...prev.audit, auditEntry],
+    }));
+
+    if (firebaseUser) {
+      void fsSaveProduct(updatedProd, firebaseUser, auditEntry, authorizedEmails, workspaceOwnerUid).catch((err) => {
+        notify(`Error actualizando producto en Firestore: ${err instanceof Error ? err.message : 'Sin permisos'}`);
+      });
+    }
+
+    setEditingProduct(null);
+    notify(`"${cleanName}" actualizado en catálogo.`);
   };
 
   const handleConfirmDeleteProduct = (prod: SoftProduct) => {
@@ -1078,7 +1167,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       icon: <Clock className="w-3.5 h-3.5" />,
     },
     { id: 'configuracion', label: 'Ajustes & Limpieza', icon: <Settings className="w-3.5 h-3.5" /> },
-    { id: 'archivos', label: 'Drive & Respaldos', icon: <FolderArchive className="w-3.5 h-3.5" /> },
+    { id: 'archivos', label: 'Respaldos', icon: <FolderArchive className="w-3.5 h-3.5" /> },
   ];
 
   return (
@@ -1161,23 +1250,37 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         <div className="space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-5 bg-[#161618]/80 backdrop-blur-xl rounded-[22px] border border-white/10">
             <div>
-              <h3 className="font-serif font-bold text-lg text-white">Precios y Productos Operativos</h3>
+              <h3 className="font-serif font-bold text-lg text-white">Precios, Platillos y Modificadores</h3>
               <p className="text-xs text-[rgba(240,230,211,0.68)]">
-                Edita precios en línea o agrega nuevos platillos al menú digital y comandero.
+                Edita precios, categorías o estaciones. La categoría <strong className="text-[#e8d090]">MODIFICADORES</strong> alimenta directamente el panel de comandas.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={() => setActiveTab('archivos')}
-                className="min-h-[44px] px-4 py-2.5 rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-[#e8d090] font-semibold text-xs whitespace-nowrap inline-flex items-center gap-2 transition-all"
+                onClick={() => {
+                  setNewProdCat('MODIFICADORES');
+                  setNewProdPrice('0');
+                  setNewProdName('');
+                  setNewProdKey('');
+                  setCustomCat('');
+                  setShowAddModal(true);
+                }}
+                className="min-h-[44px] px-4 py-2.5 rounded-2xl bg-[#c8a84b]/20 hover:bg-[#c8a84b]/30 text-[#e8d090] border border-[#c8a84b]/50 font-bold text-xs whitespace-nowrap inline-flex items-center gap-1.5"
               >
-                <FolderSync className="w-4 h-4" />
-                <span>Fusionar desde Drive</span>
+                <Plus className="w-4 h-4" />
+                <span>Nuevo Modificador</span>
               </button>
               <button
                 type="button"
-                onClick={() => setShowAddModal(true)}
+                onClick={() => {
+                  setNewProdCat(selectedCat !== 'TODOS' ? selectedCat : 'BOTANAS');
+                  setNewProdPrice('');
+                  setNewProdName('');
+                  setNewProdKey('');
+                  setCustomCat('');
+                  setShowAddModal(true);
+                }}
                 className="min-h-[44px] px-4 py-2.5 rounded-2xl bg-[#25d366] hover:bg-[#20b858] text-[#0a0a0b] font-bold text-xs shadow-md whitespace-nowrap inline-flex items-center gap-2"
               >
                 <Plus className="w-4 h-4" />
@@ -1271,6 +1374,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     inlinePrices[prod.key] !== undefined
                       ? inlinePrices[prod.key]
                       : basePriceStr;
+                  const isZeroPrepMod =
+                    prod.category === 'MODIFICADORES' && !prod.saleEnabled && prod.priceCents === 0;
+                  const isRowActive =
+                    prod.category === 'MODIFICADORES' ? isCatalogModifierActive(prod) : prod.saleEnabled;
 
                   return (
                     <tr key={prod.key} className="hover:bg-white/[0.03]">
@@ -1312,12 +1419,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           type="button"
                           onClick={() => handleToggleProductSale(prod)}
                           className={`min-h-[34px] px-3 py-1 rounded-full text-xs font-bold uppercase transition-all ${
-                            prod.saleEnabled
+                            isRowActive
                               ? 'bg-[#122822] text-[#25d366] border border-[#25d366]/40'
                               : 'bg-[#e05252]/15 text-[#e05252] border border-[#e05252]/40'
                           }`}
                         >
-                          {prod.saleEnabled ? 'Activo' : 'Pausado'}
+                          {isZeroPrepMod ? 'Prep $0' : prod.saleEnabled ? 'Activo' : 'Pausado'}
                         </button>
                       </td>
                       <td className="py-2.5 pr-2 text-right space-x-1.5 whitespace-nowrap">
@@ -1330,6 +1437,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             Guardar
                           </button>
                         )}
+                        <button
+                          type="button"
+                          onClick={() => handleOpenEditProduct(prod)}
+                          className="min-h-[36px] px-2.5 py-1 rounded-xl bg-white/[0.06] hover:bg-white/[0.14] text-[#e8d090] font-semibold text-xs border border-white/15 inline-flex items-center gap-1"
+                          title="Editar nombre, categoría, estación y precio"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                        </button>
                         <button
                           type="button"
                           onClick={() => setConfirmDeleteProd(prod)}
@@ -2193,19 +2308,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* TAB 8: DRIVE, ARCHIVOS Y RESPALDOS */}
+      {/* TAB 8: ARCHIVOS Y RESPALDOS */}
       {activeTab === 'archivos' && (
         <div className="space-y-4">
-          <GoogleDriveMergePanel
-            state={state}
-            setState={setState}
-            firebaseUser={firebaseUser}
-            authorizedEmails={authorizedEmails}
-            workspaceOwnerUid={workspaceOwnerUid}
-            actingAdminName={actingAdminName}
-            notify={notify}
-          />
-
           <div className="p-5 bg-[#161618]/80 backdrop-blur-xl rounded-[22px] border border-white/10 space-y-1">
             <h3 className="font-serif font-bold text-lg text-white">Exportaciones y Respaldos Locales</h3>
             <p className="text-xs text-[rgba(240,230,211,0.68)]">
@@ -2374,7 +2479,139 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   type="submit"
                   className="min-h-[44px] px-5 py-2 rounded-2xl text-xs font-bold bg-[#25d366] hover:bg-[#20b858] active:scale-[0.98] text-[#0a0a0b] transition-all duration-150"
                 >
-                  Guardar Producto
+                  {newProdCat === 'MODIFICADORES' ? 'Guardar Modificador' : 'Guardar Producto'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* FULL EDIT PRODUCT / MODIFIER MODAL */}
+      {editingProduct && (
+        <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
+          <div className="ios-glass-modal max-w-md w-full p-6 space-y-4 text-left">
+            <div className="flex items-center justify-between pb-3 border-b border-white/10">
+              <div>
+                <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">
+                  Editar {editProdCat === 'MODIFICADORES' ? 'Modificador' : 'Producto'}
+                </h3>
+                <p className="text-xs text-[rgba(240,230,211,0.58)] font-mono">Clave {editingProduct.key}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingProduct(null)}
+                aria-label="Cerrar edición de producto"
+                className="w-10 h-10 rounded-full bg-white/[0.06] hover:bg-white/[0.12] text-[rgba(240,230,211,0.72)] hover:text-white flex items-center justify-center transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditProduct} className="space-y-3 text-xs">
+              <div>
+                <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">
+                  Nombre *
+                </label>
+                <input
+                  required
+                  value={editProdName}
+                  onChange={(e) => setEditProdName(e.target.value)}
+                  className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/80 border border-white/10 text-white font-semibold focus:outline-none focus:border-[#c8a84b]"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">
+                    Precio ($ MXN) *
+                  </label>
+                  <input
+                    required
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    value={editProdPrice}
+                    onChange={(e) => setEditProdPrice(e.target.value)}
+                    className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/80 border border-[#c8a84b]/60 text-white tabular-nums font-bold focus:outline-none focus:border-[#c8a84b]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">
+                    Estación KDS
+                  </label>
+                  <select
+                    value={editProdStation}
+                    onChange={(e) => setEditProdStation(e.target.value as 'cocina' | 'barra')}
+                    className="w-full min-h-[44px] px-3 py-2 rounded-2xl bg-[#0a0a0b]/80 border border-white/10 text-white font-semibold focus:outline-none focus:border-[#c8a84b]"
+                  >
+                    <option value="cocina">Cocina</option>
+                    <option value="barra">Barra</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">Categoría *</label>
+                <select
+                  value={editProdCat}
+                  onChange={(e) => setEditProdCat(e.target.value)}
+                  className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/80 border border-white/10 text-white focus:outline-none focus:border-[#c8a84b]"
+                >
+                  {categories
+                    .filter((c) => c !== 'TODOS')
+                    .map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  {!categories.includes('MODIFICADORES') && (
+                    <option value="MODIFICADORES">MODIFICADORES</option>
+                  )}
+                  <option value="__OTRA__">+ Nueva Categoría...</option>
+                </select>
+              </div>
+
+              {editProdCat === '__OTRA__' && (
+                <div>
+                  <label className="block text-[rgba(240,230,211,0.68)] mb-1 font-semibold">
+                    Nueva Categoría *
+                  </label>
+                  <input
+                    required
+                    placeholder="EJ. POSTRES"
+                    value={editCustomCat}
+                    onChange={(e) => setEditCustomCat(e.target.value)}
+                    className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/80 border border-[#c8a84b]/60 text-white uppercase font-bold focus:outline-none focus:border-[#c8a84b]"
+                  />
+                </div>
+              )}
+
+              <label className="flex items-center gap-2.5 p-3 rounded-2xl bg-white/[0.04] border border-white/10 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={editProdEnabled}
+                  onChange={(e) => setEditProdEnabled(e.target.checked)}
+                  className="w-4 h-4 accent-[#c8a84b]"
+                />
+                <span className="text-white font-semibold">
+                  Habilitado en Comandero POS {editProdCat === 'MODIFICADORES' ? '/ Modificadores' : 'y Menú'}
+                </span>
+              </label>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-white/10">
+                <button
+                  type="button"
+                  onClick={() => setEditingProduct(null)}
+                  className="min-h-[44px] px-4 py-2 rounded-2xl text-xs font-semibold text-[rgba(240,230,211,0.68)] hover:text-white"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="min-h-[44px] px-5 py-2 rounded-2xl text-xs font-bold bg-[#c8a84b] hover:bg-[#e8d090] active:scale-[0.98] text-[#0a0a0b] transition-all duration-150"
+                >
+                  Guardar Cambios
                 </button>
               </div>
             </form>

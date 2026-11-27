@@ -256,7 +256,11 @@ export function buildSalesPerformanceMetrics(
   }
 
   const topProducts: TopProductMetric[] = Array.from(productStats.values())
-    .sort((a, b) => (productMetric === 'revenue' ? b.revenueCents - a.revenueCents : b.units - a.units))
+    .sort((a, b) =>
+      productMetric === 'revenue'
+        ? b.revenueCents - a.revenueCents || b.units - a.units || a.name.localeCompare(b.name, 'es')
+        : b.units - a.units || b.revenueCents - a.revenueCents || a.name.localeCompare(b.name, 'es')
+    )
     .slice(0, 7)
     .map((p) => ({
       name: p.name.length > 18 ? p.name.slice(0, 16) + '...' : p.name,

@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
-import { ArrowDownCircle, ArrowUpCircle, FileText, X } from 'lucide-react';
+import { ArrowDownCircle, ArrowUpCircle, Edit3, FileText, X } from 'lucide-react';
 import { closeAndPayOrder, hasUnservedItems, lineTotalCents, locationLabel, uid } from '../core';
 import {
   fsCloseAndPayOrder,
@@ -36,6 +36,7 @@ interface CashierViewProps {
   onExportSalesCsv: () => void;
   onReopenLastSale: () => void;
   onOpenPreCheck: (order: Order) => void;
+  onEditOrder?: (order: Order) => void;
   onOpenReceipt: React.Dispatch<React.SetStateAction<Sale | null>>;
   onNotify: (msg: string) => void;
 }
@@ -67,6 +68,7 @@ export const CashierView: React.FC<CashierViewProps> = React.memo(
     onExportSalesCsv,
     onReopenLastSale,
     onOpenPreCheck,
+    onEditOrder,
     onOpenReceipt,
     onNotify,
   }) => {
@@ -428,7 +430,17 @@ export const CashierView: React.FC<CashierViewProps> = React.memo(
                     Cuenta #{selectedPayOrder.number} (
                     {locationLabel(selectedPayOrder.service, selectedPayOrder.location)})
                   </span>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {onEditOrder && (
+                      <button
+                        type="button"
+                        onClick={() => onEditOrder(selectedPayOrder)}
+                        className="px-2.5 py-1 rounded-lg bg-[#16191f] border border-white/15 text-white text-xs font-semibold hover:border-[#d4af37] inline-flex items-center gap-1"
+                        title="Regresar esta cuenta al Comandero para editar"
+                      >
+                        <Edit3 className="w-3.5 h-3.5 text-[#eed889]" /> Editar
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => onOpenPreCheck(selectedPayOrder)}

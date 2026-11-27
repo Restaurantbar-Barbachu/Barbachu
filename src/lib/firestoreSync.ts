@@ -1813,6 +1813,39 @@ export async function fsCreateInventoryItem(
   }
 }
 
+export async function fsUpdateInventoryItemMetadata(
+  item: InventoryItem,
+  user: User,
+  authorizedEmails: string[],
+  auditEntry: AuditLogEntry
+): Promise<void> {
+  const itemId = sanitizeFirestoreId(String(item.clave), 'inv');
+  const itemRef = doc(db, 'inventory', itemId);
+  const audId = sanitizeFirestoreId(auditEntry.id, 'aud');
+  try {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(itemRef);
+      if (!snap.exists()) {
+        throw new Error(`ITEM_NOT_FOUND:El insumo #${item.clave} ya no existe en inventario.`);
+      }
+      tx.update(itemRef, {
+        descripcion: boundStr(item.descripcion, 140, 'Insumo'),
+        unidad: boundStr(item.unidad, 20, 'PZA'),
+        categoria: boundStr(item.categoria, 80, 'GENERAL'),
+        costo: Math.max(0, Number(item.costo) || 0),
+        minStock: Math.max(0, Number(item.minStock) || 0),
+        updatedAt: serverTimestamp(),
+      });
+      tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('ITEM_NOT_FOUND:')) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.UPDATE, `inventory/${itemId}`);
+  }
+}
+
 export async function fsDeleteInventoryItem(
   clave: number,
   user: User,

@@ -7,6 +7,8 @@ import {
   ArrowRightLeft,
   Ban,
   BarChart3,
+  Bell,
+  BellOff,
   BookOpen,
   CheckCircle2,
   ChefHat,
@@ -17,6 +19,7 @@ import {
   Edit3,
   FileText,
   Flame,
+  History,
   LayoutDashboard,
   Lock,
   LogOut,
@@ -42,6 +45,7 @@ import {
 } from 'lucide-react';
 import {
   FullPosState,
+  ModifierScope,
   Order,
   OrderItem,
   Sale,
@@ -51,6 +55,7 @@ import {
   DeviceStation,
   TerminalSession,
 } from '../types';
+import { ModifierScopePicker } from './ModifierScopePicker';
 const AdminDashboard = lazy(() => import('./AdminDashboard').then(m => ({ default: m.AdminDashboard })));
 import { BarbachuLogo } from './BarbachuLogo';
 import { CategorySidebar } from './CategorySidebar';
@@ -63,8 +68,10 @@ import {
 } from './EmployeePinAuthPanel';
 import { IosPinPadModal } from './IosPinPadModal';
 import { DeviceSyncModal } from './DeviceSyncModal';
+import { PushNotificationsModal } from './PushNotificationsModal';
 import { PWAInstallButton } from './PwaControls';
 import { useOnlineStatus } from '../hooks/usePwaStatus';
+import { useOrderPushNotifications } from '../hooks/useOrderPushNotifications';
 import {
   useModifiers,
   ModifierOption,
@@ -79,6 +86,7 @@ const PosAnalyticsDashboard = lazy(() => import('./PosAnalyticsDashboard').then(
 const PosDashboardPanel = lazy(() => import('./PosDashboardPanel').then(m => ({ default: m.PosDashboardPanel })));
 const SalesDashboard = lazy(() => import('./SalesDashboard').then(m => ({ default: m.SalesDashboard })));
 const InventoryManagementView = lazy(() => import('./InventoryManagementView').then(m => ({ default: m.InventoryManagementView })));
+const OrderHistoryView = lazy(() => import('./OrderHistoryView').then(m => ({ default: m.OrderHistoryView })));
 import { ToastNotification } from './ToastNotification';
 import type { OrderToastEvent, ToastVariant } from '../lib/securePosApi';
 import {
@@ -138,7 +146,11 @@ import {
 } from '../utils/catalogHierarchy';
 import {
   buildModifierProductKey,
+  filterModifiersForProduct,
+  formatModifierScopeSummary,
+  isModifierScopeValid,
   normalizeModifierName,
+  normalizeModifierScope,
 } from '../utils/modifiers';
 
 export { useModifiers };
@@ -196,6 +208,18 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const [editingModOptionId, setEditingModOptionId] = useState<string | null>(null);
   const [editingModName, setEditingModName] = useState<string>('');
   const [editingModPrice, setEditingModPrice] = useState<string>('0');
+  const [editingModScope, setEditingModScope] = useState<ModifierScope>({
+    mode: 'all',
+    productKeys: [],
+    categories: [],
+  });
+  const [customModScope, setCustomModScope] = useState<ModifierScope>({
+    mode: 'all',
+    productKeys: [],
+    categories: [],
+  });
+  const [showCustomScopePicker, setShowCustomScopePicker] = useState<boolean>(false);
+  const [showAllCatalogModifiers, setShowAllCatalogModifiers] = useState<boolean>(false);
   const [confirmDeleteModId, setConfirmDeleteModId] = useState<string | null>(null);
 
   // Cart Inline Field Editor & Manual Item Modal State
@@ -258,7 +282,12 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
   // New Feature & Navigation States
   const [isDeviceModalOpen, setIsDeviceModalOpen] = useState<boolean>(false);
+  const [isPushModalOpen, setIsPushModalOpen] = useState<boolean>(false);
   const [isNavDrawerOpen, setIsNavDrawerOpen] = useState<boolean>(false);
+  const pendingNotificationOrderRef = useRef<{
+    orderId: string;
+    targetView: 'kitchen' | 'pos';
+  } | null>(null);
 
   // 60-second clock tick for table stay timers and topbar time
   useEffect(() => {
@@ -549,6 +578,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
   const canViewTables = isAdminRole || activePerms.canTakeOrders || activePerms.canCollectPayment;
   const canViewKitchen = isAdminRole || activePerms.canAccessKds || activeRole === 'mesero';
   const canViewCash = isAdminRole || activePerms.canCollectPayment || activePerms.canCashShiftCut;
+  const canViewHistory =
+    isAdminRole || activePerms.canCollectPayment || activePerms.canTakeOrders || activePerms.canViewReports;
   const canViewInventory = isAdminRole || activePerms.canEditCatalog || activePerms.canAccessKds || activePerms.canCollectPayment;
   const canViewReports = isAdminRole || activePerms.canViewReports;
   const canViewAdmin = isAdminRole;
@@ -639,6 +670,77 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     setActivePreCheckOrder,
   });
 
+  const handleNotificationNavigation = useCallback(
+    ({ orderId, targetView }: { orderId: string; targetView: 'kitchen' | 'pos' }) => {
+      if (targetView === 'pos' && canViewPos) {
+        if (orderId) {
+          const matched = state.orders.find((o) => o.id === orderId && o.status !== 'closed');
+          if (matched) {
+            loadOrderIntoDraft(matched);
+            return;
+          }
+          pendingNotificationOrderRef.current = { orderId, targetView };
+        }
+        setView('pos');
+        return;
+      }
+      if (canViewKitchen) {
+        setView('kitchen');
+      } else if (canViewPos) {
+        setView('pos');
+      }
+    },
+    [canViewKitchen, canViewPos, loadOrderIntoDraft, state.orders]
+  );
+
+  // Read initial notification deep-link query params (?orderId=...&targetView=...)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const notifOrderId = params.get('orderId');
+    const notifView = params.get('targetView');
+    if (notifOrderId || notifView === 'kitchen' || notifView === 'pos') {
+      pendingNotificationOrderRef.current = {
+        orderId: notifOrderId || '',
+        targetView: notifView === 'pos' ? 'pos' : 'kitchen',
+      };
+    }
+  }, []);
+
+  // Resolve deferred notification navigation once orders arrive from Firestore
+  useEffect(() => {
+    const pending = pendingNotificationOrderRef.current;
+    if (!pending || !firebaseUser || !workspaceAuthorized) return;
+    if (pending.targetView === 'pos' && pending.orderId) {
+      const matched = state.orders.find((o) => o.id === pending.orderId && o.status !== 'closed');
+      if (matched) {
+        pendingNotificationOrderRef.current = null;
+        loadOrderIntoDraft(matched);
+      }
+    } else if (pending.targetView === 'kitchen' && canViewKitchen) {
+      pendingNotificationOrderRef.current = null;
+      setView('kitchen');
+    }
+  }, [canViewKitchen, firebaseUser, loadOrderIntoDraft, state.orders, workspaceAuthorized]);
+
+  const {
+    prefs: pushPrefs,
+    permission: pushPermission,
+    swStatus: pushSwStatus,
+    isNotificationsActive,
+    enableNotifications,
+    toggleEnabled: togglePushEnabled,
+    toggleSound: togglePushSound,
+    setStationFilter: setPushStationFilter,
+    sendTestAlert: sendTestPushAlert,
+  } = useOrderPushNotifications({
+    orders: state.orders,
+    workspaceReady: Boolean(firebaseUser && workspaceAuthorized && !cloudBooting),
+    defaultTargetView: canViewKitchen ? 'kitchen' : 'pos',
+    onNotifyToast: notify,
+    onNotificationNavigate: handleNotificationNavigation,
+  });
+
   const {
     lowStockItems,
     inventoryModal,
@@ -680,6 +782,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       setCustomModName('');
       setCustomModPrice('0');
       setCustomModError('');
+      setCustomModScope({ mode: 'all', productKeys: [], categories: [] });
+      setShowCustomScopePicker(false);
+      setShowAllCatalogModifiers(false);
       setModifierSearch('');
       setEditingModOptionId(null);
       setConfirmDeleteModId(null);
@@ -694,6 +799,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       setCustomModName('');
       setCustomModPrice('0');
       setCustomModError('');
+      setCustomModScope({ mode: 'all', productKeys: [], categories: [] });
+      setShowCustomScopePicker(false);
+      setShowAllCatalogModifiers(false);
       setModifierSearch('');
       setEditingModOptionId(null);
       setConfirmDeleteModId(null);
@@ -706,13 +814,20 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     (
       rawName: string,
       pricePesos: number,
-      setActiveSelection: React.Dispatch<React.SetStateAction<Record<string, boolean>>>
+      setActiveSelection: React.Dispatch<React.SetStateAction<Record<string, boolean>>>,
+      scope?: ModifierScope
     ) => {
       const cleanName = normalizeModifierName(rawName).slice(0, 60);
       if (!cleanName) {
         setCustomModError('Escribe el nombre del modificador o extra.');
         return;
       }
+      const normalizedScope = normalizeModifierScope(scope);
+      if (normalizedScope.mode === 'specific' && !isModifierScopeValid(normalizedScope)) {
+        setCustomModError('Selecciona al menos un producto o categoría específica.');
+        return;
+      }
+
       const safePesos = Number.isFinite(pricePesos) ? Math.max(0, pricePesos) : 0;
       const existing = modifiers.find(
         (m) => m.name.toLowerCase() === cleanName.toLowerCase()
@@ -722,6 +837,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         setCustomModName('');
         setCustomModPrice('0');
         setCustomModError('');
+        setCustomModScope({ mode: 'all', productKeys: [], categories: [] });
+        setShowCustomScopePicker(false);
         notify(`Modificador "${existing.name}" seleccionado.`);
         return;
       }
@@ -741,13 +858,15 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           sourcePrice: safePesos,
           priceCents,
           saleEnabled: true,
+          ...(normalizedScope.mode === 'specific' ? { modifierScope: normalizedScope } : {}),
         };
+        const scopeDesc = formatModifierScopeSummary(normalizedScope, state.products);
         const auditEntry: AuditLogEntry = {
           id: uid(),
           at: new Date().toISOString(),
           user: state.activeUser.name,
           action: 'Modificador creado en Comandero',
-          detail: `${cleanName} (${formatMoney(priceCents)}) sincronizado en catálogo`,
+          detail: `${cleanName} (${formatMoney(priceCents)} · ${scopeDesc}) sincronizado en catálogo`,
         };
         setState((prev) => ({
           ...prev,
@@ -772,11 +891,17 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         setCustomModName('');
         setCustomModPrice('0');
         setCustomModError('');
+        setCustomModScope({ mode: 'all', productKeys: [], categories: [] });
+        setShowCustomScopePicker(false);
         notify(`Modificador "${cleanName}" agregado al catálogo y seleccionado.`, 'confirmed');
         return;
       }
 
-      const res = addCustomModifier(cleanName, safePesos);
+      const res = addCustomModifier(
+        cleanName,
+        safePesos,
+        normalizedScope.mode === 'specific' ? normalizedScope : undefined
+      );
       if (res.error) {
         setCustomModError(res.error);
         return;
@@ -785,6 +910,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       setCustomModName('');
       setCustomModPrice('0');
       setCustomModError('');
+      setCustomModScope({ mode: 'all', productKeys: [], categories: [] });
+      setShowCustomScopePicker(false);
       notify(`Extra temporal "${cleanName}" agregado a esta sesión.`);
     },
     [
@@ -806,18 +933,24 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       rawName: string,
       pricePesos: number,
       activeSelection: Record<string, boolean>,
-      setActiveSelection: React.Dispatch<React.SetStateAction<Record<string, boolean>>>
+      setActiveSelection: React.Dispatch<React.SetStateAction<Record<string, boolean>>>,
+      nextScope?: ModifierScope
     ) => {
       const cleanName = normalizeModifierName(rawName).slice(0, 60);
       if (!cleanName) {
         setCustomModError('El nombre del modificador no puede quedar vacío.');
         return;
       }
+      const normalizedScope = normalizeModifierScope(nextScope ?? mod.scope);
+      if (normalizedScope.mode === 'specific' && !isModifierScopeValid(normalizedScope)) {
+        setCustomModError('Selecciona al menos un producto o categoría específica.');
+        return;
+      }
       const safePesos = Number.isFinite(pricePesos) ? Math.max(0, pricePesos) : 0;
       const nextPriceCents = Math.round(safePesos * 100);
 
       if (mod.source === 'custom') {
-        const res = updateCustomModifier(mod.id, cleanName, safePesos);
+        const res = updateCustomModifier(mod.id, cleanName, safePesos, normalizedScope);
         if (!res.ok) {
           setCustomModError(res.error || 'Nombre inválido.');
           return;
@@ -860,12 +993,18 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         priceCents: nextPriceCents,
         saleEnabled: true,
       };
+      if (normalizedScope.mode === 'specific') {
+        updatedProd.modifierScope = normalizedScope;
+      } else {
+        delete updatedProd.modifierScope;
+      }
+      const scopeDesc = formatModifierScopeSummary(normalizedScope, state.products);
       const auditEntry: AuditLogEntry = {
         id: uid(),
         at: new Date().toISOString(),
         user: state.activeUser.name,
         action: 'Modificador editado en Comandero',
-        detail: `Clave ${updatedProd.key}: ${mod.name} → ${cleanName} (${formatMoney(nextPriceCents)})`,
+        detail: `Clave ${updatedProd.key}: ${mod.name} → ${cleanName} (${formatMoney(nextPriceCents)} · ${scopeDesc})`,
       };
       setState((prev) => ({
         ...prev,
@@ -1035,6 +1174,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
       tables: canViewTables,
       kitchen: canViewKitchen,
       cash: canViewCash,
+      history: canViewHistory,
       inventory: canViewInventory,
       reports: canViewReports,
       admin: canViewAdmin,
@@ -1051,6 +1191,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
     canViewTables,
     canViewKitchen,
     canViewCash,
+    canViewHistory,
     canViewInventory,
     canViewReports,
     canViewAdmin,
@@ -1525,6 +1666,15 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                 <DollarSign className="w-4 h-4 shrink-0" /> Caja & Cobros
               </button>
             )}
+            {canViewHistory && (
+              <button
+                type="button"
+                className={`pos-nav-btn ${view === 'history' ? 'active' : ''}`}
+                onClick={() => setView('history')}
+              >
+                <History className="w-4 h-4 shrink-0" /> Historial de Pedidos
+              </button>
+            )}
             {canViewInventory && (
               <button
                 type="button"
@@ -1634,7 +1784,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               <Menu className="w-5 h-5 text-[#c8a84b]" />
             </button>
             <h2 className="truncate">
-              <span key={view}>
+              <span>
                 {view === 'dashboard'
                   ? 'Resumen Operativo'
                   : view === 'pos'
@@ -1645,6 +1795,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                   ? 'Comandero de Cocina & Barra (KDS)'
                   : view === 'cash'
                   ? 'Control de Caja & Movimientos'
+                  : view === 'history'
+                  ? 'Historial de Pedidos · Tickets Pasados'
                   : view === 'inventory'
                   ? 'Inventario de Insumos SoftRestaurant'
                   : view === 'reports'
@@ -1663,7 +1815,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               title="Gestionar Conexión de Dispositivos y Estaciones"
               aria-label="Conectividad de dispositivos y sincronización"
             >
-              {isOnline ? <Cloud className="w-3.5 h-3.5 shrink-0" /> : <WifiOff className="w-3.5 h-3.5 shrink-0" />}
+              <span className="inline-flex shrink-0">
+                {isOnline ? <Cloud className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
+              </span>
               <span className="hidden sm:inline">{isOnline ? 'SYNC CLOUD' : 'MODO OFFLINE'}</span>
               <span className="px-1.5 py-0.5 rounded-full bg-black/35 text-[10px] font-mono tabular-nums">
                 {terminals.filter((t) => t.online).length || 1}
@@ -1675,6 +1829,22 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
             <span className="hidden md:inline-block text-xs font-mono tabular-nums text-[#8b92a0]">
               {new Date(nowMs).toLocaleDateString('es-MX', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
             </span>
+            <button
+              type="button"
+              onClick={() => setIsPushModalOpen(true)}
+              aria-label="Configurar notificaciones push de pedidos"
+              title="Alertas push del Service Worker para nuevos pedidos"
+              className={`min-h-[44px] px-2.5 sm:px-3 py-1.5 rounded-2xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+                isNotificationsActive
+                  ? 'bg-[#122822] hover:bg-[#173c34] border-[#25d366]/40 text-[#25d366]'
+                  : 'bg-[#1e222b]/90 hover:border-[#c8a84b]/60 border-white/10 text-[#e8d090]'
+              }`}
+            >
+              <span className="inline-flex shrink-0">
+                {isNotificationsActive ? <Bell className="w-3.5 h-3.5" /> : <BellOff className="w-3.5 h-3.5" />}
+              </span>
+              <span className="hidden lg:inline">{isNotificationsActive ? 'Alertas ON' : 'Alertas'}</span>
+            </button>
             {onSwitchToMenu && (
               <button
                 type="button"
@@ -2252,8 +2422,18 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                               }`}
                             >
                               <div className="text-xs font-bold truncate max-w-[140px]">
-                                {qtyInCart > 0 && <span className="text-[#25d366] mr-1 tabular-nums">×{qtyInCart}</span>}
-                                {qp.name}
+                                <span
+                                  translate="no"
+                                  aria-hidden={qtyInCart <= 0}
+                                  className={
+                                    qtyInCart > 0
+                                      ? 'text-[#25d366] mr-1 tabular-nums'
+                                      : 'hidden'
+                                  }
+                                >
+                                  {qtyInCart > 0 ? `×${qtyInCart}` : ''}
+                                </span>
+                                <span>{qp.name}</span>
                               </div>
                               <div className="text-xs font-mono font-bold text-[#e8d090] tabular-nums mt-0.5">
                                 {formatMoney(qp.priceCents)}
@@ -2521,6 +2701,23 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                       </button>
                     </div>
                   </div>
+
+                  {/* Optional customer name for non-delivery services (searchable in Order History) */}
+                  {currentService !== 'domicilio' && (
+                    <div className="text-xs">
+                      <label className="block text-[rgba(240,230,211,0.58)] mb-1 font-semibold">
+                        Cliente (Opcional)
+                      </label>
+                      <input
+                        type="text"
+                        value={deliveryData.name}
+                        onChange={(e) => setDeliveryData((prev) => ({ ...prev, name: e.target.value }))}
+                        placeholder="Nombre del cliente para identificar ticket..."
+                        aria-label="Nombre del cliente"
+                        className="w-full min-h-[40px] px-3 py-1.5 rounded-2xl bg-[#0a0a0b]/70 border border-white/10 text-white placeholder-[rgba(240,230,211,0.45)] focus:outline-none focus:border-[#c8a84b]"
+                      />
+                    </div>
+                  )}
 
                   {/* Domicilio customer data fields if delivery service is chosen */}
                   {currentService === 'domicilio' && (
@@ -2825,11 +3022,13 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                     className="w-full min-h-[48px] py-3.5 rounded-2xl bg-[#173c34] hover:bg-[#28584c] active:scale-[0.98] text-white font-bold text-sm shadow-lg disabled:opacity-40 disabled:cursor-not-allowed transition-all border border-[#c8a84b]/45 flex items-center justify-center gap-2"
                   >
                     <Flame className="w-4 h-4 text-[#e8d090]" />
-                    {isOrderMutating
-                      ? 'Confirmando pedido en servidor...'
-                      : currentOrderId
-                      ? 'Actualizar Comanda en Cocina/Barra'
-                      : 'Enviar Comanda a Cocina/Barra'}
+                    <span>
+                      {isOrderMutating
+                        ? 'Confirmando pedido en servidor...'
+                        : currentOrderId
+                        ? 'Actualizar Comanda en Cocina/Barra'
+                        : 'Enviar Comanda a Cocina/Barra'}
+                    </span>
                   </button>
 
                   {/* Secondary management actions (role-gated) */}
@@ -2989,6 +3188,19 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               onOpenReceipt={setActiveReceiptSale}
               onNotify={notify}
             />
+          )}
+
+          {/* VIEW 5B: ORDER HISTORY */}
+          {view === 'history' && (
+            <Suspense fallback={<div className="p-8 text-center text-[#d4af37]">Cargando historial de pedidos...</div>}>
+              <OrderHistoryView
+                state={state}
+                firebaseUser={firebaseUser}
+                onOpenReceipt={setActiveReceiptSale}
+                onOpenPreCheck={handleOpenPreCheck}
+                onNotify={notify}
+              />
+            </Suspense>
           )}
 
           {/* VIEW 6: INVENTORY & STOCK */}
@@ -3846,6 +4058,7 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                   { id: 'tables', label: 'Mapa de Mesas', icon: UtensilsCrossed, badge: totalOccupiedTables, show: canViewTables },
                   { id: 'kitchen', label: 'Cocina & Barra KDS', icon: Flame, badge: openOrders.length, show: canViewKitchen },
                   { id: 'cash', label: 'Caja & Cobros', icon: DollarSign, show: canViewCash },
+                  { id: 'history', label: 'Historial de Pedidos', icon: History, show: canViewHistory },
                   { id: 'inventory', label: 'Control de Inventario', icon: Package, badge: lowStockItems.length, show: canViewInventory },
                   { id: 'reports', label: 'Reportes de Venta', icon: BarChart3, show: canViewReports },
                   { id: 'admin', label: 'Administración & Personal', icon: Settings, show: canViewAdmin },
@@ -3946,6 +4159,20 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         onRemoveTerminal={handleRemoveTerminal}
       />
 
+      {/* Push Notifications Settings Modal */}
+      <PushNotificationsModal
+        open={isPushModalOpen}
+        onClose={() => setIsPushModalOpen(false)}
+        prefs={pushPrefs}
+        permission={pushPermission}
+        swStatus={pushSwStatus}
+        onEnableNotifications={enableNotifications}
+        onToggleEnabled={togglePushEnabled}
+        onToggleSound={togglePushSound}
+        onChangeStationFilter={setPushStationFilter}
+        onSendTestAlert={sendTestPushAlert}
+      />
+
       {/* Unified Product / Cart Item Modifiers Modal */}
       {(() => {
         const isEditingItem = editingCartItemIndex !== null && Boolean(cart[editingCartItemIndex]);
@@ -3954,6 +4181,10 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
         const editingItem = isEditingItem && editingCartItemIndex !== null ? cart[editingCartItemIndex] : null;
         const baseProd = editingItem ? state.products.find((p) => p.key === editingItem.key) : null;
+        const targetProduct =
+          activeProduct ||
+          baseProd ||
+          (editingItem ? { key: editingItem.key, name: editingItem.name, category: '' } : null);
         const basePrice = activeProduct
           ? activeProduct.priceCents
           : baseProd
@@ -3965,10 +4196,17 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
         const modalTitle = activeProduct
           ? `Modificar: ${activeProduct.name}`
           : `Modificar ítem: ${editingItem?.name || ''}`;
+        const applicableModifiers = filterModifiersForProduct(
+          modifiers,
+          targetProduct,
+          activeSelection
+        );
+        const hiddenByScopeCount = Math.max(0, modifiers.length - applicableModifiers.length);
+        const scopedModifiers = showAllCatalogModifiers ? modifiers : applicableModifiers;
         const modQuery = modifierSearch.trim().toLowerCase();
         const visibleModifiers = modQuery
-          ? modifiers.filter((m) => m.name.toLowerCase().includes(modQuery))
-          : modifiers;
+          ? scopedModifiers.filter((m) => m.name.toLowerCase().includes(modQuery))
+          : scopedModifiers;
         const appliedCount = Object.values(activeSelection).filter(Boolean).length;
 
         const closeModal = () => {
@@ -3979,6 +4217,9 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
           setEditingModOptionId(null);
           setConfirmDeleteModId(null);
           setCustomModError('');
+          setCustomModScope({ mode: 'all', productKeys: [], categories: [] });
+          setShowCustomScopePicker(false);
+          setShowAllCatalogModifiers(false);
         };
 
         return (
@@ -4049,13 +4290,28 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
               )}
 
               <div className="space-y-3">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
                   <label className="block text-xs font-bold text-[#c8a84b] uppercase tracking-wider">
-                    Catálogo de Modificadores ({visibleModifiers.length})
+                    Modificadores aplicables ({visibleModifiers.length})
                   </label>
-                  <span className="text-[11px] text-[rgba(240,230,211,0.55)]">
-                    Sincronizado con Administración
-                  </span>
+                  <div className="flex items-center gap-2">
+                    {(hiddenByScopeCount > 0 || showAllCatalogModifiers) && (
+                      <button
+                        type="button"
+                        onClick={() => setShowAllCatalogModifiers((prev) => !prev)}
+                        className="px-2.5 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-[11px] font-semibold text-[#e8d090]"
+                      >
+                        <span>
+                          {showAllCatalogModifiers
+                            ? 'Solo aplicables'
+                            : `Ver todos (+${hiddenByScopeCount})`}
+                        </span>
+                      </button>
+                    )}
+                    <span className="text-[11px] text-[rgba(240,230,211,0.55)]">
+                      Sincronizado
+                    </span>
+                  </div>
                 </div>
 
                 {/* Search modifiers */}
@@ -4083,8 +4339,21 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
                 <div className="grid grid-cols-1 gap-2 max-h-60 overflow-y-auto pr-1">
                   {visibleModifiers.length === 0 ? (
-                    <div className="py-6 text-center text-xs text-[rgba(240,230,211,0.5)]">
-                      No hay modificadores que coincidan con "{modifierSearch}".
+                    <div className="py-6 text-center text-xs text-[rgba(240,230,211,0.5)] space-y-2">
+                      <p>
+                        {modifierSearch
+                          ? `No hay modificadores que coincidan con "${modifierSearch}".`
+                          : 'No hay modificadores asignados a este producto.'}
+                      </p>
+                      {!modifierSearch && hiddenByScopeCount > 0 && !showAllCatalogModifiers && (
+                        <button
+                          type="button"
+                          onClick={() => setShowAllCatalogModifiers(true)}
+                          className="px-3 py-1 rounded-lg bg-white/[0.08] text-[#e8d090] font-semibold"
+                        >
+                          <span>Mostrar otros {hiddenByScopeCount} modificadores del catálogo</span>
+                        </button>
+                      )}
                     </div>
                   ) : (
                     visibleModifiers.map((mod) => {
@@ -4093,6 +4362,10 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                       const isConfirmingDelete = confirmDeleteModId === mod.id;
                       const canManageMod =
                         mod.source === 'custom' || canPersistCatalogModifiers;
+                      const isSpecificScope = mod.scope?.mode === 'specific';
+                      const scopeLabel = isSpecificScope
+                        ? formatModifierScopeSummary(mod.scope, state.products)
+                        : 'Todos';
 
                       if (isRowEditing) {
                         return (
@@ -4104,7 +4377,10 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                               <input
                                 type="text"
                                 value={editingModName}
-                                onChange={(e) => setEditingModName(e.target.value)}
+                                onChange={(e) => {
+                                  setEditingModName(e.target.value);
+                                  setCustomModError('');
+                                }}
                                 aria-label="Editar nombre del modificador"
                                 className="flex-1 min-w-0 min-h-[36px] px-2.5 py-1 rounded-xl bg-[#0a0a0b] border border-white/15 text-xs text-white focus:outline-none focus:border-[#c8a84b]"
                               />
@@ -4118,10 +4394,26 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                 className="w-20 min-h-[36px] px-2 py-1 rounded-xl bg-[#0a0a0b] border border-white/15 text-xs text-white font-mono text-right focus:outline-none focus:border-[#c8a84b]"
                               />
                             </div>
+                            <ModifierScopePicker
+                              scope={editingModScope}
+                              onChange={(nextScope) => {
+                                setEditingModScope(nextScope);
+                                setCustomModError('');
+                              }}
+                              products={state.products}
+                              compact
+                              currentProduct={targetProduct}
+                            />
+                            {customModError && (
+                              <p className="text-[11px] text-[#e05252] font-semibold">{customModError}</p>
+                            )}
                             <div className="flex justify-end gap-1.5 text-[11px]">
                               <button
                                 type="button"
-                                onClick={() => setEditingModOptionId(null)}
+                                onClick={() => {
+                                  setEditingModOptionId(null);
+                                  setCustomModError('');
+                                }}
                                 className="px-3 py-1 rounded-lg bg-white/[0.06] text-white font-semibold"
                               >
                                 Cancelar
@@ -4134,7 +4426,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                     editingModName,
                                     Number(editingModPrice) || 0,
                                     activeSelection,
-                                    setActiveSelection
+                                    setActiveSelection,
+                                    editingModScope
                                   )
                                 }
                                 className="px-3 py-1 rounded-lg bg-[#25d366] text-[#0a0a0b] font-bold"
@@ -4182,6 +4475,14 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                               >
                                 {mod.source === 'catalog' ? 'Catálogo' : 'Sesión'}
                               </span>
+                              {isSpecificScope && (
+                                <span
+                                  title={scopeLabel}
+                                  className="px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-[#c8a84b]/15 text-[#e8d090] border border-[#c8a84b]/30 truncate max-w-[110px]"
+                                >
+                                  {scopeLabel}
+                                </span>
+                              )}
                             </span>
                             <span className="font-mono text-[#e8d090] tabular-nums shrink-0">
                               {mod.priceCents > 0 ? `+ ${formatMoney(mod.priceCents)}` : 'Incluido'}
@@ -4215,12 +4516,14 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                                     type="button"
                                     onClick={() => {
                                       setConfirmDeleteModId(null);
+                                      setCustomModError('');
                                       setEditingModOptionId(mod.id);
                                       setEditingModName(mod.name);
                                       setEditingModPrice(String(mod.priceCents / 100));
+                                      setEditingModScope(normalizeModifierScope(mod.scope));
                                     }}
                                     aria-label={`Editar modificador ${mod.name}`}
-                                    title="Editar modificador"
+                                    title="Editar modificador y productos aplicables"
                                     className="w-7 h-7 rounded-lg bg-white/[0.06] hover:bg-white/[0.14] text-[#e8d090] flex items-center justify-center"
                                   >
                                     <Edit3 className="w-3.5 h-3.5" />
@@ -4253,12 +4556,82 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
 
                 {/* Define custom / catalog modifier inline */}
                 <div className="p-3 rounded-2xl bg-[#0a0a0b]/55 border border-white/10 space-y-2">
-                  <div className="flex items-center justify-between text-[11px]">
+                  <div className="flex items-center justify-between gap-2 text-[11px] flex-wrap">
                     <span className="font-bold uppercase tracking-wider text-[rgba(240,230,211,0.7)]">
                       {canPersistCatalogModifiers
                         ? 'Agregar modificador al catálogo'
                         : 'Definir extra temporal (sesión)'}
                     </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCustomModScope({ mode: 'all', productKeys: [], categories: [] });
+                          setShowCustomScopePicker(false);
+                          setCustomModError('');
+                        }}
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                          customModScope.mode === 'all' && !showCustomScopePicker
+                            ? 'bg-[#c8a84b] text-[#0a0a0b] border-[#c8a84b]'
+                            : 'bg-white/[0.04] text-[rgba(240,230,211,0.75)] border-white/10'
+                        }`}
+                      >
+                        <span>Todos</span>
+                      </button>
+                      {targetProduct && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCustomModScope({
+                              mode: 'specific',
+                              productKeys: [targetProduct.key],
+                              categories: [],
+                            });
+                            setShowCustomScopePicker(false);
+                            setCustomModError('');
+                          }}
+                          className={`px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                            customModScope.mode === 'specific' &&
+                            !showCustomScopePicker &&
+                            customModScope.productKeys?.length === 1 &&
+                            customModScope.productKeys[0] === targetProduct.key &&
+                            (customModScope.categories?.length || 0) === 0
+                              ? 'bg-[#25d366] text-[#0a0a0b] border-[#25d366]'
+                              : 'bg-white/[0.04] text-[rgba(240,230,211,0.75)] border-white/10'
+                          }`}
+                        >
+                          <span>Solo este</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!showCustomScopePicker && customModScope.mode === 'all') {
+                            setCustomModScope({
+                              mode: 'specific',
+                              productKeys: targetProduct ? [targetProduct.key] : [],
+                              categories: [],
+                            });
+                          }
+                          setShowCustomScopePicker((prev) => !prev);
+                          setCustomModError('');
+                        }}
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                          showCustomScopePicker ||
+                          (customModScope.mode === 'specific' &&
+                            !(
+                              targetProduct &&
+                              customModScope.productKeys?.length === 1 &&
+                              customModScope.productKeys[0] === targetProduct.key &&
+                              (customModScope.categories?.length || 0) === 0
+                            ))
+                            ? 'bg-[#c8a84b]/25 text-[#e8d090] border-[#c8a84b]/60'
+                            : 'bg-white/[0.04] text-[rgba(240,230,211,0.75)] border-white/10'
+                        }`}
+                      >
+                        <span>Varios...</span>
+                      </button>
+                    </div>
                   </div>
                   <div className="flex gap-2">
                     <input
@@ -4288,7 +4661,8 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                         handleCreateModifierInComandero(
                           customModName,
                           Number(customModPrice) || 0,
-                          setActiveSelection
+                          setActiveSelection,
+                          customModScope
                         )
                       }
                       className="min-h-[38px] px-3 rounded-xl bg-[#173c34] hover:bg-[#28584c] text-[#25d366] font-bold text-xs shrink-0"
@@ -4296,7 +4670,19 @@ export const PosView: React.FC<PosViewProps> = ({ onSwitchToMenu }) => {
                       + Crear
                     </button>
                   </div>
-                  {customModError && (
+                  {showCustomScopePicker && (
+                    <ModifierScopePicker
+                      scope={customModScope}
+                      onChange={(nextScope) => {
+                        setCustomModScope(nextScope);
+                        setCustomModError('');
+                      }}
+                      products={state.products}
+                      compact
+                      currentProduct={targetProduct}
+                    />
+                  )}
+                  {customModError && !editingModOptionId && (
                     <p className="text-[11px] text-[#e05252] font-semibold">{customModError}</p>
                   )}
                 </div>

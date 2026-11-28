@@ -5,8 +5,13 @@ import {
   buildModifierProductKey,
   calculateModifierSelectionTotal,
   duplicateOrderItemInList,
+  filterModifiersForProduct,
+  formatModifierScopeSummary,
   getSelectedModifiersArray,
+  isModifierApplicableToProduct,
+  isModifierScopeValid,
   matchItemModifiersToOptions,
+  normalizeModifierScope,
   removeModifierFromItem,
   updateModifierOnItem,
 } from './modifiers';
@@ -159,3 +164,114 @@ test('duplicateOrderItemInList clones line with pending status and fresh lineId'
   assert.deepEqual(next[1].modifiers, [{ name: 'BBQ', priceCents: 0 }]);
   assert.notEqual(next[1].modifiers, next[0].modifiers);
 });
+
+test('modifier scope supports global, multi-product, single-product, and category targeting', () => {
+  const tacosProduct: SoftProduct = {
+    key: '101',
+    name: 'TACOS DE CECINA',
+    group: '1',
+    category: 'TACOS',
+    sourcePrice: 120,
+    priceCents: 12000,
+    saleEnabled: true,
+  };
+  const alitasProduct: SoftProduct = {
+    key: '729',
+    name: 'ALAS CONVINADAS',
+    group: '7',
+    category: 'ALAS',
+    sourcePrice: 95,
+    priceCents: 9500,
+    saleEnabled: true,
+  };
+  const cervezaProduct: SoftProduct = {
+    key: '205',
+    name: 'CERVEZA CORONA',
+    group: '2',
+    category: 'CERVEZAS',
+    sourcePrice: 45,
+    priceCents: 4500,
+    saleEnabled: true,
+  };
+
+  const scopedCatalog: SoftProduct[] = [
+    tacosProduct,
+    alitasProduct,
+    cervezaProduct,
+    {
+      key: 'mod_global',
+      name: 'Para Llevar',
+      group: '12',
+      category: 'MODIFICADORES',
+      sourcePrice: 0,
+      priceCents: 0,
+      saleEnabled: true,
+    },
+    {
+      key: 'mod_multi_prod',
+      name: 'Salsa Extra',
+      group: '12',
+      category: 'MODIFICADORES',
+      sourcePrice: 10,
+      priceCents: 1000,
+      saleEnabled: true,
+      modifierScope: { mode: 'specific', productKeys: ['101', '729'], categories: [] },
+    },
+    {
+      key: 'mod_single_prod',
+      name: 'Escarchado Clamato',
+      group: '12',
+      category: 'MODIFICADORES',
+      sourcePrice: 20,
+      priceCents: 2000,
+      saleEnabled: true,
+      modifierScope: { mode: 'specific', productKeys: ['205'], categories: [] },
+    },
+    {
+      key: 'mod_cat_alas',
+      name: 'Extra Ranch',
+      group: '12',
+      category: 'MODIFICADORES',
+      sourcePrice: 15,
+      priceCents: 1500,
+      saleEnabled: true,
+      modifierScope: { mode: 'specific', productKeys: [], categories: ['ALAS'] },
+    },
+  ];
+
+  const options = buildCatalogModifierOptions(scopedCatalog);
+  const forTacos = filterModifiersForProduct(options, tacosProduct).map((m) => m.name);
+  assert.deepEqual(forTacos, ['Para Llevar', 'Salsa Extra']);
+
+  const forAlas = filterModifiersForProduct(options, alitasProduct).map((m) => m.name);
+  assert.deepEqual(forAlas, ['Extra Ranch', 'Para Llevar', 'Salsa Extra']);
+
+  const forCerveza = filterModifiersForProduct(options, cervezaProduct).map((m) => m.name);
+  assert.deepEqual(forCerveza, ['Escarchado Clamato', 'Para Llevar']);
+
+  // Already-selected modifier stays visible even if scope excludes product
+  const withSelectedOverride = filterModifiersForProduct(options, tacosProduct, {
+    cat_mod_single_prod: true,
+  }).map((m) => m.name);
+  assert.ok(withSelectedOverride.includes('Escarchado Clamato'));
+
+  assert.equal(isModifierApplicableToProduct({ scope: undefined }, tacosProduct), true);
+  assert.equal(
+    isModifierScopeValid({ mode: 'specific', productKeys: [], categories: [] }),
+    false
+  );
+  assert.equal(
+    formatModifierScopeSummary({ mode: 'specific', productKeys: ['205'] }, scopedCatalog),
+    'Solo: CERVEZA CORONA'
+  );
+  assert.equal(
+    formatModifierScopeSummary({ mode: 'specific', productKeys: ['101', '729'] }, scopedCatalog),
+    '2 productos'
+  );
+  assert.deepEqual(normalizeModifierScope(null), {
+    mode: 'all',
+    productKeys: [],
+    categories: [],
+  });
+});
+

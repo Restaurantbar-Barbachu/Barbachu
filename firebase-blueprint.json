@@ -158,6 +158,10 @@
         "saleEnabled": {
           "type": "boolean"
         },
+        "modifierScope": {
+          "type": "object",
+          "description": "Optional scope restricting a modifier to specific productKeys or categories"
+        },
         "ownerUid": {
           "type": "string",
           "maxLength": 128,

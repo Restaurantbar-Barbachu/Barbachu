@@ -159,9 +159,27 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidScopeStringList(listVal, maxItems) {
+      return listVal is list &&
+        listVal.size() <= maxItems &&
+        (listVal.size() == 0 || (
+          listVal[0] is string && listVal[0].size() >= 1 && listVal[0].size() <= 80 &&
+          (listVal.size() == 1 || (listVal[listVal.size() - 1] is string && listVal[listVal.size() - 1].size() >= 1 && listVal[listVal.size() - 1].size() <= 80))
+        ));
+    }
+
+    function isValidModifierScope(scope) {
+      return scope is map &&
+        scope.keys().hasAll(['mode']) &&
+        scope.keys().hasOnly(['mode', 'productKeys', 'categories']) &&
+        scope.mode in ['all', 'specific'] &&
+        (!('productKeys' in scope) || isValidScopeStringList(scope.productKeys, 200)) &&
+        (!('categories' in scope) || isValidScopeStringList(scope.categories, 40));
+    }
+
     function isValidProduct(data) {
       return data.keys().hasAll(['key', 'name', 'group', 'category', 'sourcePrice', 'priceCents', 'saleEnabled', 'ownerUid', 'updatedAt']) &&
-        data.keys().hasOnly(['key', 'name', 'group', 'category', 'station', 'sourcePrice', 'priceCents', 'saleEnabled', 'ownerUid', 'updatedAt']) &&
+        data.keys().hasOnly(['key', 'name', 'group', 'category', 'station', 'sourcePrice', 'priceCents', 'saleEnabled', 'modifierScope', 'ownerUid', 'updatedAt']) &&
         data.key is string && data.key.size() >= 1 && data.key.size() <= 64 && data.key.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
         data.group is string && data.group.size() <= 40 &&
@@ -170,6 +188,7 @@ service cloud.firestore {
         data.sourcePrice is number && data.sourcePrice >= 0 &&
         data.priceCents is int && data.priceCents >= 0 &&
         data.saleEnabled is bool &&
+        (!('modifierScope' in data) || isValidModifierScope(data.modifierScope)) &&
         data.ownerUid is string && data.ownerUid.size() <= 128 && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.updatedAt is timestamp;
     }

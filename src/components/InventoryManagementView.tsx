@@ -532,7 +532,10 @@ export const InventoryManagementView: React.FC<InventoryManagementViewProps> = (
           </div>
           <div className={`p-3.5 rounded-2xl border ${lowStockItems.length > 0 ? 'bg-[#e05252]/15 border-[#e05252]/40' : 'bg-[#0a0a0b]/60 border-white/10'}`}>
             <div className="text-xs text-[rgba(240,230,211,0.58)] font-semibold flex items-center gap-1">
-              {lowStockItems.length > 0 && <span className="text-[#e05252]">⚠️</span>} Alertas Stock Bajo
+              <span className={lowStockItems.length > 0 ? 'text-[#e05252]' : 'hidden'} aria-hidden="true">
+                ⚠️
+              </span>
+              <span>Alertas Stock Bajo</span>
             </div>
             <div className={`text-lg font-bold font-mono mt-1 tabular-nums ${lowStockItems.length > 0 ? 'text-[#e05252]' : 'text-[#25d366]'}`}>
               {lowStockItems.length}

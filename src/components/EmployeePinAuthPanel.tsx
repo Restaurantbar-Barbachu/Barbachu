@@ -25,6 +25,7 @@ export type PosViewRoute =
   | 'tables'
   | 'kitchen'
   | 'cash'
+  | 'history'
   | 'inventory'
   | 'reports'
   | 'admin';
@@ -46,6 +47,7 @@ export function describeRoleCapabilities(
       'Comandero y Mesas',
       'KDS Cocina/Barra',
       'Caja y Cortes Z',
+      'Historial de Pedidos',
       'Inventario',
       'Gestión de Empleados',
     ];
@@ -54,6 +56,9 @@ export function describeRoleCapabilities(
   if (perms.canTakeOrders) caps.push('Comandero y Mesas');
   if (perms.canAccessKds || role === 'mesero') caps.push('Cocina & Barra (KDS)');
   if (perms.canCollectPayment) caps.push('Cobros en Caja');
+  if (perms.canTakeOrders || perms.canCollectPayment || perms.canViewReports) {
+    caps.push('Historial de Pedidos');
+  }
   if (perms.canCashShiftCut) caps.push('Arqueo y Corte Z');
   if (perms.canApplyDiscount) caps.push('Descuentos');
   if (perms.canViewReports) caps.push('Reportes de Venta');

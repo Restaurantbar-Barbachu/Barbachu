@@ -55,6 +55,7 @@ import {
 import { SOFT_PRODUCTS } from '../data/softRestaurantCatalog';
 import { classifyProductStation } from '../core';
 import { hashPin, isValidFourDigitPin, isWeakDefaultPin, verifyPinSecret } from '../utils/pinSecurity';
+import { normalizeModifierScope } from '../utils/modifiers';
 import {
   WORKSPACE_PAGE_LIMITS,
   buildActiveOrdersQuerySpec,
@@ -221,8 +222,53 @@ function buildFirestoreQueryFromSpec(
   return query(colRef, ...constraints);
 }
 
+function buildProductPayload(prod: SoftProduct, ownerUid: string): Record<string, unknown> {
+  const prodId = sanitizeFirestoreId(prod.key, 'prod').slice(0, 64);
+  const payload: Record<string, unknown> = {
+    key: prodId,
+    name: boundStr(prod.name, 120, 'Producto'),
+    group: boundStr(prod.group, 40, '1'),
+    category: boundStr(prod.category, 80, 'PLATILLOS'),
+    station: prod.station || classifyProductStation(prod.category),
+    sourcePrice: Math.max(0, Number(prod.sourcePrice) || 0),
+    priceCents: Math.max(0, Math.round(Number(prod.priceCents) || 0)),
+    saleEnabled: Boolean(prod.saleEnabled),
+    ownerUid: sanitizeFirestoreId(ownerUid, 'usr'),
+    updatedAt: serverTimestamp(),
+  };
+  if (prod.category === 'MODIFICADORES' && prod.modifierScope?.mode === 'specific') {
+    const normalized = normalizeModifierScope(prod.modifierScope);
+    const productKeys = (normalized.productKeys || [])
+      .map((k) => boundStr(k, 64))
+      .filter(Boolean)
+      .slice(0, 200);
+    const categories = (normalized.categories || [])
+      .map((c) => boundStr(c, 80))
+      .filter(Boolean)
+      .slice(0, 40);
+    if (productKeys.length > 0 || categories.length > 0) {
+      payload.modifierScope = {
+        mode: 'specific',
+        productKeys,
+        categories,
+      };
+    }
+  }
+  return payload;
+}
+
 function mapProductDoc(d: QueryDocumentSnapshot<DocumentData>): SoftProduct {
   const x = d.data();
+  const rawScope = x.modifierScope;
+  const parsedScope =
+    rawScope && typeof rawScope === 'object'
+      ? normalizeModifierScope({
+          mode: rawScope.mode === 'specific' ? 'specific' : 'all',
+          productKeys: Array.isArray(rawScope.productKeys) ? rawScope.productKeys.map(String) : [],
+          categories: Array.isArray(rawScope.categories) ? rawScope.categories.map(String) : [],
+        })
+      : undefined;
+
   return {
     key: String(x.key || d.id),
     name: String(x.name || ''),
@@ -232,6 +278,7 @@ function mapProductDoc(d: QueryDocumentSnapshot<DocumentData>): SoftProduct {
     sourcePrice: Number(x.sourcePrice) || 0,
     priceCents: Number(x.priceCents) || 0,
     saleEnabled: Boolean(x.saleEnabled),
+    ...(parsedScope && parsedScope.mode === 'specific' ? { modifierScope: parsedScope } : {}),
   };
 }
 
@@ -1002,6 +1049,99 @@ export async function fsFetchClosedOrdersPage(
   }
 }
 
+function buildLocalDayRangeTimestamps(dateFrom?: string, dateTo?: string): {
+  startTs: Timestamp | null;
+  endTs: Timestamp | null;
+} {
+  let startTs: Timestamp | null = null;
+  let endTs: Timestamp | null = null;
+  if (dateFrom && /^\d{4}-\d{2}-\d{2}$/.test(dateFrom)) {
+    const [y, m, d] = dateFrom.split('-').map(Number);
+    startTs = Timestamp.fromDate(new Date(y, m - 1, d, 0, 0, 0, 0));
+  }
+  if (dateTo && /^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
+    const [y, m, d] = dateTo.split('-').map(Number);
+    endTs = Timestamp.fromDate(new Date(y, m - 1, d, 23, 59, 59, 999));
+  }
+  return { startTs, endTs };
+}
+
+export async function fsFetchOrdersByDateRange(
+  user: User,
+  options: {
+    dateFrom?: string;
+    dateTo?: string;
+    cursor?: QueryDocumentSnapshot<DocumentData> | null;
+    pageSize?: number;
+  }
+): Promise<PaginatedResult<Order>> {
+  const email = (user.email || '').toLowerCase();
+  const isBootstrapAdmin = Boolean(user.emailVerified && email === BOOTSTRAPPED_ADMIN_EMAIL);
+  const pageSize = normalizePageSize(options.pageSize, 80);
+  const { startTs, endTs } = buildLocalDayRangeTimestamps(options.dateFrom, options.dateTo);
+
+  const constraints: QueryConstraint[] = [];
+  if (!isBootstrapAdmin && email) {
+    constraints.push(where('authorizedEmails', 'array-contains', email));
+  }
+  if (startTs) constraints.push(where('updatedAt', '>=', startTs));
+  if (endTs) constraints.push(where('updatedAt', '<=', endTs));
+  constraints.push(orderBy('updatedAt', 'desc'));
+  if (options.cursor) constraints.push(startAfter(options.cursor));
+  constraints.push(limit(pageSize));
+
+  try {
+    const snap = await getDocs(query(collection(db, 'orders'), ...constraints));
+    const items = snap.docs.map(mapOrderDoc);
+    const nextCursor = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+    return { items, nextCursor, hasMore: snap.docs.length >= pageSize };
+  } catch (error) {
+    if (isMissingIndexError(error)) {
+      return fsFetchClosedOrdersPage(user, { cursor: options.cursor, pageSize });
+    }
+    handleFirestoreError(error, OperationType.LIST, 'orders');
+    return { items: [], nextCursor: null, hasMore: false };
+  }
+}
+
+export async function fsFetchSalesByDateRange(
+  user: User,
+  options: {
+    dateFrom?: string;
+    dateTo?: string;
+    cursor?: QueryDocumentSnapshot<DocumentData> | null;
+    pageSize?: number;
+  }
+): Promise<PaginatedResult<Sale>> {
+  const email = (user.email || '').toLowerCase();
+  const isBootstrapAdmin = Boolean(user.emailVerified && email === BOOTSTRAPPED_ADMIN_EMAIL);
+  const pageSize = normalizePageSize(options.pageSize, 80);
+  const { startTs, endTs } = buildLocalDayRangeTimestamps(options.dateFrom, options.dateTo);
+
+  const constraints: QueryConstraint[] = [];
+  if (!isBootstrapAdmin && email) {
+    constraints.push(where('authorizedEmails', 'array-contains', email));
+  }
+  if (startTs) constraints.push(where('paidAt', '>=', startTs));
+  if (endTs) constraints.push(where('paidAt', '<=', endTs));
+  constraints.push(orderBy('paidAt', 'desc'));
+  if (options.cursor) constraints.push(startAfter(options.cursor));
+  constraints.push(limit(pageSize));
+
+  try {
+    const snap = await getDocs(query(collection(db, 'sales'), ...constraints));
+    const items = snap.docs.map(mapSaleDoc);
+    const nextCursor = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+    return { items, nextCursor, hasMore: snap.docs.length >= pageSize };
+  } catch (error) {
+    if (isMissingIndexError(error)) {
+      return fsFetchSalesPage(user, { cursor: options.cursor, pageSize });
+    }
+    handleFirestoreError(error, OperationType.LIST, 'sales');
+    return { items: [], nextCursor: null, hasMore: false };
+  }
+}
+
 export async function fsFetchInventoryMovementsPage(
   user: User,
   options?: { cursor?: QueryDocumentSnapshot<DocumentData> | null; pageSize?: number }
@@ -1111,18 +1251,7 @@ export async function fsSaveProduct(
         ? String(existingSnap.data().ownerUid || workspaceOwnerUid || user.uid)
         : sanitizeFirestoreId(workspaceOwnerUid || user.uid, 'usr');
 
-      tx.set(prodRef, {
-        key: prodId,
-        name: boundStr(prod.name, 120, 'Producto'),
-        group: boundStr(prod.group, 40, '1'),
-        category: boundStr(prod.category, 80, 'PLATILLOS'),
-        station: prod.station || classifyProductStation(prod.category),
-        sourcePrice: Math.max(0, Number(prod.sourcePrice) || 0),
-        priceCents: Math.max(0, Math.round(Number(prod.priceCents) || 0)),
-        saleEnabled: Boolean(prod.saleEnabled),
-        ownerUid: preservedOwnerUid,
-        updatedAt: serverTimestamp(),
-      });
+      tx.set(prodRef, buildProductPayload(prod, preservedOwnerUid));
       tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
     });
   } catch (error) {
@@ -1144,18 +1273,10 @@ export async function fsBatchUpdateProducts(
       await runTransaction(db, async (tx) => {
         for (const prod of products) {
           const prodId = sanitizeFirestoreId(prod.key, 'prod').slice(0, 64);
-          tx.set(doc(db, 'products', prodId), {
-            key: prodId,
-            name: boundStr(prod.name, 120, 'Producto'),
-            group: boundStr(prod.group, 40, '1'),
-            category: boundStr(prod.category, 80, 'PLATILLOS'),
-            station: prod.station || classifyProductStation(prod.category),
-            sourcePrice: Math.max(0, Number(prod.sourcePrice) || 0),
-            priceCents: Math.max(0, Math.round(Number(prod.priceCents) || 0)),
-            saleEnabled: Boolean(prod.saleEnabled),
-            ownerUid: sanitizeFirestoreId(workspaceOwnerUid || user.uid, 'usr'),
-            updatedAt: serverTimestamp(),
-          });
+          tx.set(
+            doc(db, 'products', prodId),
+            buildProductPayload(prod, workspaceOwnerUid || user.uid)
+          );
         }
         tx.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));
       });
@@ -1168,18 +1289,10 @@ export async function fsBatchUpdateProducts(
       const batch = writeBatch(db);
       for (const prod of slice) {
         const prodId = sanitizeFirestoreId(prod.key, 'prod').slice(0, 64);
-        batch.set(doc(db, 'products', prodId), {
-          key: prodId,
-          name: boundStr(prod.name, 120, 'Producto'),
-          group: boundStr(prod.group, 40, '1'),
-          category: boundStr(prod.category, 80, 'PLATILLOS'),
-          station: prod.station || classifyProductStation(prod.category),
-          sourcePrice: Math.max(0, Number(prod.sourcePrice) || 0),
-          priceCents: Math.max(0, Math.round(Number(prod.priceCents) || 0)),
-          saleEnabled: Boolean(prod.saleEnabled),
-          ownerUid: sanitizeFirestoreId(workspaceOwnerUid || user.uid, 'usr'),
-          updatedAt: serverTimestamp(),
-        });
+        batch.set(
+          doc(db, 'products', prodId),
+          buildProductPayload(prod, workspaceOwnerUid || user.uid)
+        );
       }
       if (i + chunkSize >= products.length) {
         batch.set(doc(db, 'audit_logs', audId), buildAuditPayload(auditEntry, user.uid, authorizedEmails));

@@ -208,6 +208,7 @@ export function useOrderManager({
       (selectedOrder.note || '') !== generalNote ||
       selectedOrder.waiter !== waiter ||
       (selectedOrder.priority || 'normal') !== priority ||
+      (selectedOrder.customer?.name || '') !== deliveryData.name.trim() ||
       selectedOrder.items.length !== cart.length
     ) {
       return true;
@@ -236,7 +237,7 @@ export function useOrderManager({
       }
     }
     return false;
-  }, [cart, generalNote, priority, selectedOrder, waiter]);
+  }, [cart, deliveryData.name, generalNote, priority, selectedOrder, waiter]);
 
   const loadOrderIntoDraft = useCallback(
     (order: Order, silent = false) => {
@@ -247,7 +248,11 @@ export function useOrderManager({
       setWaiter(order.waiter);
       setGeneralNote(order.note || '');
       setPriority(order.priority || 'normal');
-      if (order.customer) setDeliveryData(order.customer);
+      setDeliveryData(
+        order.customer
+          ? { ...order.customer }
+          : { name: '', phone: '', address: '', reference: '' }
+      );
       setView('pos');
       if (!silent) {
         notify(`Cuenta #${order.number} cargada en ${locationLabel(order.service, order.location)}.`, 'info');
@@ -275,6 +280,7 @@ export function useOrderManager({
       setWaiter(stateRef.current.activeUser?.name || 'Operador');
       setGeneralNote('');
       setPriority('normal');
+      setDeliveryData({ name: '', phone: '', address: '', reference: '' });
       setView('pos');
       notify(
         isExtraAccount
@@ -647,6 +653,18 @@ export function useOrderManager({
     }
 
     const isNew = !currentOrderId;
+    const trimmedCustomer = {
+      name: deliveryData.name.trim(),
+      phone: deliveryData.phone.trim(),
+      address: deliveryData.address.trim(),
+      reference: deliveryData.reference.trim(),
+    };
+    const hasCustomerData = Boolean(
+      trimmedCustomer.name ||
+        trimmedCustomer.phone ||
+        trimmedCustomer.address ||
+        trimmedCustomer.reference
+    );
     const { nextState, orderId } = createOrUpdateOrder(stateRef.current, {
       orderId: currentOrderId,
       service: currentService,
@@ -654,7 +672,7 @@ export function useOrderManager({
       waiter,
       note: generalNote,
       items: cart,
-      customer: currentService === 'domicilio' ? deliveryData : undefined,
+      customer: currentService === 'domicilio' || hasCustomerData ? trimmedCustomer : undefined,
       priority,
     });
 

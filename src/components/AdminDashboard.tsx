@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import {
   FullPosState,
+  ModifierScope,
   SoftProduct,
   UserRole,
   RolePermissions,
@@ -60,8 +61,14 @@ import {
 } from '../lib/firestoreSync';
 import { BarbachuLogo } from './BarbachuLogo';
 import { IosPinPadModal } from './IosPinPadModal';
+import { ModifierScopePicker } from './ModifierScopePicker';
 import { downloadCsvFile } from '../utils/csv';
-import { isCatalogModifierActive } from '../utils/modifiers';
+import {
+  formatModifierScopeSummary,
+  isCatalogModifierActive,
+  isModifierScopeValid,
+  normalizeModifierScope,
+} from '../utils/modifiers';
 import { hashPin, isValidFourDigitPin, isWeakDefaultPin, verifyPinSecret } from '../utils/pinSecurity';
 
 interface AdminDashboardProps {
@@ -135,6 +142,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [editCustomCat, setEditCustomCat] = useState<string>('');
   const [editProdStation, setEditProdStation] = useState<'cocina' | 'barra'>('cocina');
   const [editProdEnabled, setEditProdEnabled] = useState<boolean>(true);
+  const [newProdModifierScope, setNewProdModifierScope] = useState<ModifierScope>({
+    mode: 'all',
+    productKeys: [],
+    categories: [],
+  });
+  const [editProdModifierScope, setEditProdModifierScope] = useState<ModifierScope>({
+    mode: 'all',
+    productKeys: [],
+    categories: [],
+  });
 
   // Gestión de Empleados filters + Create / Full Edit / Delete state (PIN always hidden by default)
   const [employeeSearch, setEmployeeSearch] = useState<string>('');
@@ -372,6 +389,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       return;
     }
 
+    const normalizedScope = normalizeModifierScope(newProdModifierScope);
+    if (isModifierCat && normalizedScope.mode === 'specific' && !isModifierScopeValid(normalizedScope)) {
+      notify('Selecciona al menos un producto o categoría para este modificador.');
+      return;
+    }
+
     const rawKey = newProdKey.trim() || String(Math.floor(1000 + Math.random() * 9000));
     const key = sanitizeFirestoreId(rawKey, 'prod').slice(0, 64);
     if (state.products.some((p) => p.key === key)) {
@@ -389,15 +412,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       sourcePrice: priceNum,
       priceCents,
       saleEnabled: true,
+      ...(isModifierCat && normalizedScope.mode === 'specific'
+        ? { modifierScope: normalizedScope }
+        : {}),
     };
 
     const now = new Date().toISOString();
+    const scopeDetail = isModifierCat
+      ? ` · ${formatModifierScopeSummary(normalizedScope, state.products)}`
+      : '';
     const auditEntry: AuditLogEntry = {
       id: uid(),
       at: now,
       user: actingAdminName,
       action: isModifierCat ? 'Modificador agregado' : 'Producto agregado',
-      detail: `Clave ${key}: ${name} (${category}) por ${formatMoney(priceCents)}`,
+      detail: `Clave ${key}: ${name} (${category}) por ${formatMoney(priceCents)}${scopeDetail}`,
     };
 
     setState((prev) => ({
@@ -417,6 +446,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setNewProdKey('');
     setNewProdPrice('');
     setCustomCat('');
+    setNewProdModifierScope({ mode: 'all', productKeys: [], categories: [] });
     notify(`${isModifierCat ? 'Modificador' : 'Platillo'} "${name}" agregado al catálogo.`);
   };
 
@@ -434,6 +464,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setEditProdEnabled(
       prod.category === 'MODIFICADORES' ? isCatalogModifierActive(prod) : Boolean(prod.saleEnabled)
     );
+    setEditProdModifierScope(normalizeModifierScope(prod.modifierScope));
   };
 
   const handleSaveEditProduct = (e: React.FormEvent) => {
@@ -455,12 +486,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
     const priceNum = Number(editProdPrice);
     const isModifierCat = category === 'MODIFICADORES';
-    if (!Number.isFinite(priceNum) || (isModifierCat ? priceNum < 0 : priceNum < 0)) {
+    if (!Number.isFinite(priceNum) || priceNum < 0) {
       notify('Ingresa un precio válido ($0.00 o mayor).');
       return;
     }
     if (!isModifierCat && editProdEnabled && priceNum <= 0) {
       notify('Un platillo o bebida habilitado para venta debe tener precio mayor a 0.');
+      return;
+    }
+
+    const normalizedScope = normalizeModifierScope(editProdModifierScope);
+    if (isModifierCat && normalizedScope.mode === 'specific' && !isModifierScopeValid(normalizedScope)) {
+      notify('Selecciona al menos un producto o categoría para este modificador.');
       return;
     }
 
@@ -475,14 +512,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       priceCents,
       saleEnabled: editProdEnabled,
     };
+    if (isModifierCat && normalizedScope.mode === 'specific') {
+      updatedProd.modifierScope = normalizedScope;
+    } else {
+      delete updatedProd.modifierScope;
+    }
 
     const now = new Date().toISOString();
+    const scopeDetail = isModifierCat
+      ? ` · ${formatModifierScopeSummary(normalizedScope, state.products)}`
+      : '';
     const auditEntry: AuditLogEntry = {
       id: uid(),
       at: now,
       user: actingAdminName,
       action: isModifierCat ? 'Modificador editado' : 'Producto editado',
-      detail: `Clave ${updatedProd.key}: ${cleanName} (${category} · ${editProdStation.toUpperCase()}) · ${formatMoney(priceCents)}`,
+      detail: `Clave ${updatedProd.key}: ${cleanName} (${category} · ${editProdStation.toUpperCase()}) · ${formatMoney(priceCents)}${scopeDetail}`,
     };
 
     setState((prev) => ({
@@ -1264,6 +1309,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   setNewProdName('');
                   setNewProdKey('');
                   setCustomCat('');
+                  setNewProdModifierScope({ mode: 'all', productKeys: [], categories: [] });
                   setShowAddModal(true);
                 }}
                 className="min-h-[44px] px-4 py-2.5 rounded-2xl bg-[#c8a84b]/20 hover:bg-[#c8a84b]/30 text-[#e8d090] border border-[#c8a84b]/50 font-bold text-xs whitespace-nowrap inline-flex items-center gap-1.5"
@@ -1279,6 +1325,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   setNewProdName('');
                   setNewProdKey('');
                   setCustomCat('');
+                  setNewProdModifierScope({ mode: 'all', productKeys: [], categories: [] });
                   setShowAddModal(true);
                 }}
                 className="min-h-[44px] px-4 py-2.5 rounded-2xl bg-[#25d366] hover:bg-[#20b858] text-[#0a0a0b] font-bold text-xs shadow-md whitespace-nowrap inline-flex items-center gap-2"
@@ -1382,8 +1429,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   return (
                     <tr key={prod.key} className="hover:bg-white/[0.03]">
                       <td className="py-2.5 pl-2 tabular-nums text-[rgba(240,230,211,0.6)]">{prod.key}</td>
-                      <td className="py-2.5 font-semibold text-white max-w-xs truncate">{prod.name}</td>
-                      <td className="py-2.5 text-[rgba(240,230,211,0.68)]">{prod.category}</td>
+                      <td className="py-2.5 font-semibold text-white max-w-xs truncate">
+                        <span>{prod.name}</span>
+                      </td>
+                      <td className="py-2.5 text-[rgba(240,230,211,0.68)]">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span>{prod.category}</span>
+                          {prod.category === 'MODIFICADORES' && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditProduct(prod)}
+                              title="Configurar productos o categorías donde aplica"
+                              className={`px-2 py-0.5 rounded-md text-[10px] font-bold border transition-colors ${
+                                prod.modifierScope?.mode === 'specific'
+                                  ? 'bg-[#c8a84b]/20 text-[#e8d090] border-[#c8a84b]/40 hover:bg-[#c8a84b]/30'
+                                  : 'bg-white/[0.05] text-[rgba(240,230,211,0.72)] border-white/10 hover:bg-white/[0.12]'
+                              }`}
+                            >
+                              <span>{formatModifierScopeSummary(prod.modifierScope, state.products)}</span>
+                            </button>
+                          )}
+                        </div>
+                      </td>
                       <td className="py-2.5 tabular-nums font-bold text-[#e8d090]">
                         {formatMoney(prod.priceCents)}
                       </td>
@@ -2377,10 +2444,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* ADD NEW PRODUCT MODAL */}
       {showAddModal && (
         <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
-          <div className="ios-glass-modal max-w-md w-full p-6 space-y-4 text-left">
+          <div className="ios-glass-modal max-w-md w-full p-6 space-y-4 text-left max-h-[90dvh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-white/10">
               <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">
-                Agregar Producto Nuevo
+                {newProdCat === 'MODIFICADORES' ? 'Agregar Modificador Nuevo' : 'Agregar Producto Nuevo'}
               </h3>
               <button
                 type="button"
@@ -2448,6 +2515,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         {c}
                       </option>
                     ))}
+                  {!categories.includes('MODIFICADORES') && (
+                    <option value="MODIFICADORES">MODIFICADORES</option>
+                  )}
                   <option value="__OTRA__">+ Nueva Categoría...</option>
                 </select>
               </div>
@@ -2465,6 +2535,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/80 border border-[#c8a84b]/60 text-white uppercase font-bold focus:outline-none focus:border-[#c8a84b]"
                   />
                 </div>
+              )}
+
+              {(newProdCat === 'MODIFICADORES' ||
+                (newProdCat === '__OTRA__' && customCat.trim().toUpperCase() === 'MODIFICADORES')) && (
+                <ModifierScopePicker
+                  scope={newProdModifierScope}
+                  onChange={setNewProdModifierScope}
+                  products={state.products}
+                />
               )}
 
               <div className="flex justify-end gap-2 pt-3 border-t border-white/10">
@@ -2490,7 +2569,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* FULL EDIT PRODUCT / MODIFIER MODAL */}
       {editingProduct && (
         <div className="fixed inset-0 z-50 ios-scrim flex items-center justify-center p-4" role="dialog" aria-modal="true">
-          <div className="ios-glass-modal max-w-md w-full p-6 space-y-4 text-left">
+          <div className="ios-glass-modal max-w-md w-full p-6 space-y-4 text-left max-h-[90dvh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-white/10">
               <div>
                 <h3 className="font-serif font-bold text-lg text-white tracking-[-0.02em]">
@@ -2585,6 +2664,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     className="w-full min-h-[44px] px-3.5 py-2 rounded-2xl bg-[#0a0a0b]/80 border border-[#c8a84b]/60 text-white uppercase font-bold focus:outline-none focus:border-[#c8a84b]"
                   />
                 </div>
+              )}
+
+              {(editProdCat === 'MODIFICADORES' ||
+                (editProdCat === '__OTRA__' && editCustomCat.trim().toUpperCase() === 'MODIFICADORES')) && (
+                <ModifierScopePicker
+                  scope={editProdModifierScope}
+                  onChange={setEditProdModifierScope}
+                  products={state.products}
+                />
               )}
 
               <label className="flex items-center gap-2.5 p-3 rounded-2xl bg-white/[0.04] border border-white/10 cursor-pointer">

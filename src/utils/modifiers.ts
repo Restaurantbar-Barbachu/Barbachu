@@ -1,4 +1,4 @@
-import type { OrderItem, OrderItemModifier, SoftProduct } from '../types';
+import type { ModifierScope, OrderItem, OrderItemModifier, SoftProduct } from '../types';
 
 export interface ModifierOption {
   id: string;
@@ -7,12 +7,91 @@ export interface ModifierOption {
   priceCents: number;
   source: 'catalog' | 'custom';
   saleEnabled: boolean;
+  scope?: ModifierScope;
 }
 
 export function normalizeModifierName(rawName: string): string {
   return String(rawName || '')
     .trim()
     .replace(/\s+/g, ' ');
+}
+
+export function normalizeModifierScope(scope?: ModifierScope | null): ModifierScope {
+  if (!scope || scope.mode !== 'specific') {
+    return { mode: 'all', productKeys: [], categories: [] };
+  }
+  const keySet = new Set<string>();
+  for (const rawKey of scope.productKeys || []) {
+    const clean = String(rawKey || '').trim().slice(0, 64);
+    if (clean) keySet.add(clean);
+    if (keySet.size >= 200) break;
+  }
+  const catSet = new Set<string>();
+  for (const rawCat of scope.categories || []) {
+    const clean = String(rawCat || '').trim().slice(0, 80);
+    if (clean) catSet.add(clean);
+    if (catSet.size >= 40) break;
+  }
+  return {
+    mode: 'specific',
+    productKeys: Array.from(keySet),
+    categories: Array.from(catSet),
+  };
+}
+
+export function isModifierScopeValid(scope?: ModifierScope | null): boolean {
+  const normalized = normalizeModifierScope(scope);
+  if (normalized.mode === 'all') return true;
+  return (normalized.productKeys?.length || 0) > 0 || (normalized.categories?.length || 0) > 0;
+}
+
+export function isModifierApplicableToProduct(
+  mod: Pick<ModifierOption, 'scope'>,
+  product?: Pick<SoftProduct, 'key' | 'category'> | null
+): boolean {
+  if (!product) return true;
+  const scope = normalizeModifierScope(mod.scope);
+  if (scope.mode === 'all') return true;
+  if (scope.productKeys?.includes(product.key)) return true;
+  if (product.category && scope.categories?.includes(product.category)) return true;
+  return false;
+}
+
+export function filterModifiersForProduct(
+  options: ModifierOption[],
+  product?: Pick<SoftProduct, 'key' | 'category'> | null,
+  selectedIds?: Record<string, boolean>
+): ModifierOption[] {
+  if (!product) return options;
+  return options.filter(
+    (opt) => Boolean(selectedIds?.[opt.id]) || isModifierApplicableToProduct(opt, product)
+  );
+}
+
+export function formatModifierScopeSummary(
+  scope?: ModifierScope | null,
+  products?: SoftProduct[]
+): string {
+  const normalized = normalizeModifierScope(scope);
+  if (normalized.mode === 'all') return 'Todos los productos';
+  const keys = normalized.productKeys || [];
+  const cats = normalized.categories || [];
+  if (keys.length === 0 && cats.length === 0) return 'Sin productos asignados';
+  if (keys.length === 1 && cats.length === 0) {
+    const found = products?.find((p) => p.key === keys[0]);
+    return `Solo: ${found?.name || keys[0]}`;
+  }
+  if (cats.length === 1 && keys.length === 0) {
+    return `Cat: ${cats[0]}`;
+  }
+  const parts: string[] = [];
+  if (cats.length > 0) {
+    parts.push(`${cats.length} ${cats.length === 1 ? 'categoría' : 'categorías'}`);
+  }
+  if (keys.length > 0) {
+    parts.push(`${keys.length} ${keys.length === 1 ? 'producto' : 'productos'}`);
+  }
+  return parts.join(' · ');
 }
 
 export function isCatalogModifierActive(prod: SoftProduct): boolean {
@@ -33,6 +112,7 @@ export function buildCatalogModifierOptions(
       priceCents: Math.max(0, Math.round(Number(p.priceCents) || 0)),
       source: 'catalog' as const,
       saleEnabled: isCatalogModifierActive(p),
+      scope: p.modifierScope ? normalizeModifierScope(p.modifierScope) : undefined,
     }))
     .filter((m) => m.name.length > 0 && m.saleEnabled);
 
@@ -57,6 +137,7 @@ export function buildCatalogModifierOptions(
       priceCents: Math.max(0, Math.round(Number(custom.priceCents) || 0)),
       source: 'custom',
       saleEnabled: true,
+      scope: custom.scope ? normalizeModifierScope(custom.scope) : undefined,
     });
   }
 

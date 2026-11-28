@@ -178,6 +178,12 @@ export interface RestaurantConfig {
   autoLockMinutes?: number;
 }
 
+export interface ModifierScope {
+  mode: 'all' | 'specific';
+  productKeys?: string[];
+  categories?: string[];
+}
+
 export interface SoftProduct {
   key: string;
   name: string;
@@ -187,6 +193,7 @@ export interface SoftProduct {
   sourcePrice: number;
   priceCents: number;
   saleEnabled: boolean;
+  modifierScope?: ModifierScope;
 }
 
 export interface TimeClockRecord {

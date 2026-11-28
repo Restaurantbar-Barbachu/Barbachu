@@ -85,6 +85,7 @@ export default defineConfig({
       manifest: false,
       includeAssets: [
         'manifest.json',
+        'sw-push.js',
         'favicon.ico',
         'icon.svg',
         'apple-touch-icon.png',
@@ -93,6 +94,7 @@ export default defineConfig({
         'pwa-maskable-512x512.png',
       ],
       workbox: {
+        importScripts: ['/sw-push.js'],
         globPatterns: ['**/*.{js,css,html,ico,png,svg,webp,json}'],
         navigateFallbackDenylist: [/^\/api\//],
         runtimeCaching: [
@@ -119,6 +121,10 @@ export default defineConfig({
             },
           },
         ],
+      },
+      devOptions: {
+        enabled: true,
+        type: 'classic',
       },
     }),
   ],
